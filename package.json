@@ -12,7 +12,9 @@
     "solid-js": "=1.9.15"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "=4.3.3",
     "@types/bun": "=1.4.2",
+    "tailwindcss": "=4.3.3",
     "typescript": "=7.0.2",
     "vite": "=8.3.0",
     "vite-plugin-solid": "=2.11.14"

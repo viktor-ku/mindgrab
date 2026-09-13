@@ -1,3 +1,7 @@
 export function App() {
-  return <h1>hewo</h1>;
+  return (
+    <main class="">
+      <h1 class="">hewo</h1>
+    </main>
+  );
 }
