@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
-import { connectionPath, deleteNode, layoutMindMap, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, updateNode } from "./mind-map";
+import { connectionPath, deleteNode, layoutMindMap, NODE_MIN_HEIGHT, updateNode } from "./mind-map";
 import type { MindMapNode, NodeSize } from "./mind-map";
 
 function clsx(slices: JSX.DOMAttributes<HTMLDivElement>["class"][]) {
@@ -36,7 +36,7 @@ function NodeEditor(props: {
   });
 
   return (
-    <div class="relative min-w-0">
+    <div class="relative min-w-px">
       <span class="block whitespace-pre-wrap wrap-anywhere invisible" aria-hidden="true">{props.text + "\u200b"}</span>
       <textarea
         ref={input}
@@ -112,7 +112,6 @@ function Node(props: {
       }}
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
-        "min-width": `${NODE_MIN_WIDTH}px`,
         "min-height": `${NODE_MIN_HEIGHT}px`,
       }}
       title={props.editing ? "Delete or ⌘+Backspace: delete node · Tab: add child · Enter or Escape: finish editing" : props.text}
@@ -190,7 +189,7 @@ export function App() {
         style={{
           left: "50%",
           top: "50%",
-          transform: `translate(${left() - NODE_MIN_WIDTH / 2}px, ${top() - NODE_MIN_HEIGHT / 2}px)`,
+          transform: `translate(${left() - (layout().nodes[0]?.width ?? 0) / 2}px, ${top() - NODE_MIN_HEIGHT / 2}px)`,
         }}
       >
         <svg
