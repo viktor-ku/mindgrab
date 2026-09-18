@@ -102,7 +102,6 @@ export function App() {
   const [nodes, setNodes] = createSignal<MindMapNode[]>([{ id: crypto.randomUUID(), text: "New idea" }]);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [writing, setWriting] = createSignal(false);
-  const mode = () => writing() ? "Writing" : selectedId() ? "Editing" : "Normal";
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
   const layout = createMemo(() => layoutMindMap(nodes(), nodeSizes()));
   const positionedNodes = createMemo(() => new Map(layout().nodes.map((node) => [node.id, node])));
@@ -269,14 +268,6 @@ export function App() {
     });
   });
 
-  const dropDescription = () => {
-    const target = dropTarget();
-    if (!target) return "Drop cancelled: choose another node or empty canvas";
-    if (target.placement === "root") return "Release to make a root node";
-    const text = positionedNodes().get(target.id)?.text || "New idea";
-    return target.placement === "child" ? `Release to add inside “${text}”` : `Release to place ${target.placement} “${text}”`;
-  };
-
   return (
     <div
       ref={canvas}
@@ -322,37 +313,18 @@ export function App() {
           />;
         }}</For>
       </div>
-      <div data-no-pan data-toolbar class="absolute top-4 left-4 right-4 flex flex-wrap items-center gap-2 text-sm cursor-default">
-        <span class="rounded bg-white px-3 py-2 shadow-sm" role="status"><strong>{mode()}</strong> mode</span>
-        <button class="map-control" onClick={() => add("root")}>Add root</button>
-        <Show when={selectedId()}>
-          <button class="map-control" onClick={() => write(selectedId()!)}>Write</button>
-          <button class="map-control" onClick={() => add("child")}>Add child</button>
-          <button class="map-control" onClick={() => add("sibling")}>Add sibling</button>
-          <button class="map-control" onClick={removeSelected}>Delete subtree</button>
-        </Show>
-        <div class="ml-auto flex gap-2 items-center">
-          <button class="map-control" aria-label="Zoom out" onClick={() => changeZoom(zoom() / 1.2)}>−</button>
-          <span class="min-w-12 text-center">{Math.round(zoom() * 100)}%</span>
-          <button class="map-control" aria-label="Zoom in" onClick={() => changeZoom(zoom() * 1.2)}>+</button>
-          <button class="map-control" onClick={() => { setLeft(0); setTop(0); setZoom(1); }}>Reset view</button>
-        </div>
-      </div>
       <Show when={!nodes().length}>
         <div data-no-pan data-toolbar class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center cursor-default">
           <p class="mb-3">Your canvas is empty.</p>
           <button class="map-control" onClick={() => add("root")}>Create an idea</button>
         </div>
       </Show>
-      <div data-no-pan class="absolute bottom-4 left-4 right-4 rounded bg-white/90 px-3 py-2 text-sm cursor-default pointer-events-none" aria-live="polite">
-        {draggingId() ? dropDescription() : writing()
-          ? "Writing · Enter or Escape: finish · Shift+Enter: new line · Text keys only change text"
-          : selectedId()
-            ? "Editing · Tab: child · Enter: sibling · Delete / ⌘⌫: delete subtree · Ctrl+↑/↓: reorder · Double-click / F2: write · Escape: overview"
-            : "Normal · Drag canvas to pan · Scroll to zoom · Click a node to select · Double-click to write"}
-        <Show when={selectedId() && !writing() && !draggingId()}>
-          <span class="block text-stone-600">Drag to a node’s center to reparent, its top/bottom edge to reorder, or empty canvas to make a root.</span>
-        </Show>
+      <div data-no-pan data-toolbar role="group" aria-label="Canvas zoom"
+        class="map-toolbar absolute bottom-4 right-4 flex items-center text-sm cursor-default"
+      >
+        <button class="map-control" aria-label="Zoom out" disabled={zoom() <= 0.25} onClick={() => changeZoom(zoom() / 1.2)}>−</button>
+        <button class="map-control min-w-14 tabular-nums" aria-label="Reset view" title="Reset view" onClick={() => { setLeft(0); setTop(0); setZoom(1); }}>{Math.round(zoom() * 100)}%</button>
+        <button class="map-control" aria-label="Zoom in" disabled={zoom() >= 2.5} onClick={() => changeZoom(zoom() * 1.2)}>+</button>
       </div>
     </div>
   );
