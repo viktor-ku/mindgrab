@@ -89,7 +89,7 @@ function Node(props: {
         "bg-green-300 border rounded-sm",
         "shadow-sm/40 cursor-pointer",
         "px-2.5 py-0.75 select-none",
-        "absolute grid items-center box-border w-max max-w-80 leading-6",
+        "absolute grid items-center box-border w-max max-w-40 leading-6",
       ])}
       classList={{ "ring-2 ring-green-100": props.editing }}
       data-no-pan
