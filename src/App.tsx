@@ -86,12 +86,12 @@ function Node(props: {
     <div
       ref={container}
       class={clsx([
-        "bg-green-300 border rounded-sm",
-        "shadow-sm/40 cursor-pointer",
+        "bg-blue-300 text-blue-950 border border-blue-500 rounded-sm",
+        "shadow-sm/10 cursor-pointer",
         "px-2.5 py-0.75 select-none",
         "absolute grid items-center box-border w-max max-w-40 leading-6",
       ])}
-      classList={{ "ring-2 ring-green-100": props.editing }}
+      classList={{ "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200": props.editing }}
       data-no-pan
       onClick={(e) => {
         if (!props.editing && e.target === e.currentTarget) props.onEdit();
@@ -127,7 +127,7 @@ function Node(props: {
           aria-label="Delete node"
           title={props.canDelete ? "Delete node" : "Cannot delete the only node"}
           disabled={!props.canDelete}
-          class="absolute -right-2.5 -top-2.5 flex size-5 items-center justify-center rounded-full border bg-green-100 text-sm leading-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+          class="absolute -right-2.5 -top-2.5 flex size-5 items-center justify-center rounded-full border border-blue-500 bg-blue-100 text-sm leading-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
           onClick={props.onDelete}
         >
           ×
@@ -185,7 +185,7 @@ export function App() {
         setLeft(vPrevPos.x + dx);
         setTop(vPrevPos.y + dy);
       }}
-      class="overflow-hidden w-screen h-screen bg-stone-900 relative touch-none select-none"
+      class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none"
       style={{ cursor: moving() ? "grabbing" : "grab" }}
     >
       <div
@@ -197,7 +197,7 @@ export function App() {
         }}
       >
         <svg
-          class="absolute inset-0 w-full h-full overflow-visible pointer-events-none"
+          class="absolute inset-0 w-full h-full overflow-visible pointer-events-none stroke-stone-700"
           aria-hidden="true"
         >
           <For each={layout().connections}>
@@ -205,8 +205,7 @@ export function App() {
               <path
                 d={connectionPath(connection)}
                 fill="none"
-                stroke="#86efac"
-                stroke-width="2"
+                stroke-width="1"
               />
             )}
           </For>
