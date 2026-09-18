@@ -1,6 +1,6 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { canMoveNode, connectionPath, deleteNode, insertSibling, layoutMindMap, moveNode, NODE_MIN_HEIGHT, reorderNode, updateNode } from "./mind-map";
-import type { DropTarget, MindMapNode, NodeSize } from "./mind-map";
+import { connectionPath, deleteNode, insertSibling, layoutMindMap, NODE_MIN_HEIGHT, reorderNode, translateSubtree, updateNode } from "./mind-map";
+import type { MindMapNode, NodePosition, NodeSize } from "./mind-map";
 
 function NodeEditor(props: {
   text: string;
@@ -45,7 +45,6 @@ function Node(props: {
   selected: boolean;
   writing: boolean;
   dragging: boolean;
-  dropPlacement?: "child" | "before" | "after";
   onSize: (size: NodeSize) => void;
   onSelect: () => void;
   onWrite: () => void;
@@ -70,10 +69,7 @@ function Node(props: {
       class="bg-blue-300 text-blue-950 border border-blue-500 rounded-sm shadow-sm/10 cursor-pointer px-2.5 py-0.75 select-none absolute grid items-center box-border w-max max-w-40 leading-6"
       classList={{
         "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200": props.selected,
-        "opacity-40": props.dragging,
-        "drop-child": props.dropPlacement === "child",
-        "drop-before": props.dropPlacement === "before",
-        "drop-after": props.dropPlacement === "after",
+        "z-10": props.dragging,
       }}
       data-no-pan
       data-node-id={props.id}
@@ -111,9 +107,13 @@ export function App() {
   const [zoom, setZoom] = createSignal(1);
   const [panning, setPanning] = createSignal(false);
   const [draggingId, setDraggingId] = createSignal<string>();
-  const [dropTarget, setDropTarget] = createSignal<DropTarget>();
   let canvas!: HTMLDivElement;
-  let pointer: { id: number; x: number; y: number; left: number; top: number; nodeId?: string } | undefined;
+  let pointer: {
+    id: number; x: number; y: number; left: number; top: number; zoom: number;
+    nodeId?: string;
+    nodes: MindMapNode[];
+    positions: ReadonlyMap<string, NodePosition>;
+  } | undefined;
   let suppressClick = false;
 
   function select(id: string) {
@@ -166,29 +166,24 @@ export function App() {
   function startPointer(e: PointerEvent, nodeId?: string) {
     if (!e.isPrimary || e.button !== 0 || pointer || (nodeId && writing() && selectedId() === nodeId)) return;
     suppressClick = false;
-    if (nodeId) select(nodeId);
-    else {
+    if (nodeId) {
+      finishWriting();
+      select(nodeId);
+    } else {
       setWriting(false);
       setSelectedId(undefined);
     }
     canvas.focus({ preventScroll: true });
-    pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, left: left(), top: top(), nodeId };
+    pointer = {
+      id: e.pointerId, x: e.clientX, y: e.clientY, left: left(), top: top(), zoom: zoom(), nodeId,
+      nodes: nodes(), positions: positionedNodes(),
+    };
     // Node clicks need their original target for double-click recognition. Capture on drag only.
     if (!nodeId) {
       canvas.setPointerCapture(e.pointerId);
       setPanning(true);
       e.preventDefault();
     }
-  }
-
-  function targetAt(e: PointerEvent): DropTarget | undefined {
-    const element = document.elementFromPoint(e.clientX, e.clientY);
-    if (!element || !canvas.contains(element) || element.closest("[data-toolbar]")) return;
-    const node = element.closest<HTMLElement>("[data-node-id]");
-    if (!node) return { placement: "root" };
-    const bounds = node.getBoundingClientRect();
-    const fraction = (e.clientY - bounds.top) / bounds.height;
-    return { id: node.dataset.nodeId!, placement: fraction < 0.25 ? "before" : fraction > 0.75 ? "after" : "child" };
   }
 
   function movePointer(e: PointerEvent) {
@@ -200,8 +195,9 @@ export function App() {
       canvas.setPointerCapture(e.pointerId);
       setDraggingId(pointer.nodeId);
       suppressClick = true;
-      const target = targetAt(e);
-      setDropTarget(target && canMoveNode(nodes(), pointer.nodeId, target) ? target : undefined);
+      setNodes(translateSubtree(pointer.nodes, pointer.nodeId, pointer.positions, {
+        x: dx / pointer.zoom, y: dy / pointer.zoom,
+      }));
     } else {
       setLeft(pointer.left + dx);
       setTop(pointer.top + dy);
@@ -210,12 +206,12 @@ export function App() {
 
   function stopPointer(e: PointerEvent, commit: boolean) {
     if (!pointer || e.pointerId !== pointer.id) return;
-    const id = draggingId();
-    const target = dropTarget();
-    if (commit && id && target) setNodes((current) => moveNode(current, id, target));
+    if (draggingId()) {
+      if (commit) movePointer(e);
+      else setNodes(pointer.nodes);
+    }
     pointer = undefined;
     setDraggingId(undefined);
-    setDropTarget(undefined);
     setPanning(false);
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
   }
@@ -227,9 +223,9 @@ export function App() {
         e.preventDefault();
         if (pointer) {
           const id = pointer.id;
+          if (draggingId()) setNodes(pointer.nodes);
           pointer = undefined;
           setDraggingId(undefined);
-          setDropTarget(undefined);
           setPanning(false);
           if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
         }
@@ -237,7 +233,7 @@ export function App() {
         canvas.focus({ preventScroll: true });
         return;
       }
-      if (!selectedId()) return;
+      if (pointer || !selectedId()) return;
       if (!e.shiftKey && !e.ctrlKey && !e.altKey && ((e.key === "Delete" && !e.metaKey) || (e.key === "Backspace" && e.metaKey))) {
         e.preventDefault();
         removeSelected();
@@ -255,7 +251,7 @@ export function App() {
     const wheel = (e: WheelEvent) => {
       if (e.target instanceof Element && e.target.closest("[data-toolbar], textarea")) return;
       e.preventDefault();
-      changeZoom(zoom() * Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
+      if (!pointer) changeZoom(zoom() * Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
     };
     window.addEventListener("keydown", keydown);
     window.addEventListener("pointerup", stopOutside);
@@ -293,14 +289,10 @@ export function App() {
         </svg>
         <For each={nodeIds()}>{(id) => {
           const node = () => positionedNodes().get(id)!;
-          const placement = () => {
-            const target = dropTarget();
-            return target && target.placement !== "root" && target.id === id ? target.placement : undefined;
-          };
           return <Node
             id={id} text={node().text} x={node().x} y={node().y}
             selected={selectedId() === id} writing={selectedId() === id && writing()}
-            dragging={draggingId() === id} dropPlacement={placement()}
+            dragging={draggingId() === id}
             onSize={(size) => setNodeSizes((current) => {
               const previous = current.get(id);
               if (previous?.width === size.width && previous?.height === size.height) return current;
