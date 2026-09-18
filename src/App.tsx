@@ -1,5 +1,5 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { connectionPath, deleteNode, insertSibling, layoutMindMap, NODE_MIN_HEIGHT, reorderNode, translateSubtree, updateNode } from "./mind-map";
+import { batch, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { connectionPath, deleteNode, findNode, insertSibling, layoutMindMap, NODE_MIN_HEIGHT, reorderNode, translateSubtree, updateNode } from "./mind-map";
 import type { MindMapNode, NodePosition, NodeSize } from "./mind-map";
 
 function NodeEditor(props: {
@@ -99,7 +99,16 @@ export function App() {
   const [selectedId, setSelectedId] = createSignal<string>();
   const [writing, setWriting] = createSignal(false);
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
-  const layout = createMemo(() => layoutMindMap(nodes(), nodeSizes()));
+  const [layoutAnchorId, setLayoutAnchorId] = createSignal<string>();
+  const layout = createMemo<ReturnType<typeof layoutMindMap>>((previous) => {
+    const roots = nodes();
+    const preferredId = layoutAnchorId();
+    const anchorId = preferredId && findNode(roots, preferredId) ? preferredId : roots[0]?.id;
+    const anchor = previous?.nodes.find((node) => node.id === anchorId);
+    return layoutMindMap(roots, nodeSizes(), anchor && {
+      id: anchor.id, centerY: anchor.y + anchor.height / 2,
+    });
+  });
   const positionedNodes = createMemo(() => new Map(layout().nodes.map((node) => [node.id, node])));
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
@@ -136,10 +145,16 @@ export function App() {
   function add(kind: "child" | "sibling" | "root") {
     const node: MindMapNode = { id: crypto.randomUUID(), text: "New idea" };
     const id = selectedId();
-    setNodes((current) => kind === "root" || !id ? [...current, node]
-      : kind === "child" ? updateNode(current, id, (parent) => ({ ...parent, next: [...(parent.next ?? []), node] }))
-        : insertSibling(current, id, node));
-    write(node.id);
+    const anchorId = kind === "sibling"
+      ? layout().connections.find(({ to }) => to.id === id)?.from.id ?? id
+      : kind === "child" ? id : undefined;
+    batch(() => {
+      setLayoutAnchorId(anchorId);
+      setNodes((current) => kind === "root" || !id ? [...current, node]
+        : kind === "child" ? updateNode(current, id, (parent) => ({ ...parent, next: [...(parent.next ?? []), node] }))
+          : insertSibling(current, id, node));
+      write(node.id);
+    });
   }
 
   function removeSelected() {
