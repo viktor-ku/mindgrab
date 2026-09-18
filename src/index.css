@@ -16,14 +16,3 @@
   border-radius: 0.75rem;
   box-shadow: 0 2px 8px #1c19170a;
 }
-.drop-child { outline: 3px solid #15803d; outline-offset: 4px; }
-.drop-before::before, .drop-after::after {
-  content: "";
-  position: absolute;
-  left: -4px;
-  right: -4px;
-  height: 3px;
-  background: #15803d;
-}
-.drop-before::before { top: -9px; }
-.drop-after::after { bottom: -9px; }

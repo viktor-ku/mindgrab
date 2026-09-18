@@ -1,7 +1,13 @@
 export interface MindMapNode {
   id: string;
   text: string;
+  position?: NodePosition;
   next?: MindMapNode[];
+}
+
+export interface NodePosition {
+  x: number;
+  y: number;
 }
 
 // Used only until ResizeObserver supplies the node's content-sized width.
@@ -48,15 +54,15 @@ export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, N
   function visit(node: MindMapNode, x: number, top: number): PositionedNode {
     const size = sizeOf(node);
     const subtreeHeight = subtreeHeights.get(node.id)!;
-    const positioned = { id: node.id, text: node.text, x, y: top + (subtreeHeight - size.height) / 2, ...size };
+    const positioned = { id: node.id, text: node.text, x, y: top + (subtreeHeight - size.height) / 2, ...node.position, ...size };
     nodes.push(positioned);
 
     const children = node.next ?? [];
     const childrenHeight = children.reduce((sum, child) => sum + subtreeHeights.get(child.id)!, 0)
       + Math.max(0, children.length - 1) * ROW_GAP;
-    let childTop = top + (subtreeHeight - childrenHeight) / 2;
+    let childTop = positioned.y + (size.height - childrenHeight) / 2;
     for (const child of children) {
-      const childPosition = visit(child, x + size.width + COLUMN_GAP, childTop);
+      const childPosition = visit(child, positioned.x + size.width + COLUMN_GAP, childTop);
       connections.push({ from: positioned, to: childPosition });
       childTop += subtreeHeights.get(child.id)! + ROW_GAP;
     }
@@ -72,6 +78,25 @@ export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, N
   }
 
   return { nodes, connections };
+}
+
+// Use the positions at drag start so every descendant moves by the same delta,
+// including descendants that have already been placed manually.
+export function translateSubtree(
+  nodes: MindMapNode[],
+  id: string,
+  positions: ReadonlyMap<string, NodePosition>,
+  delta: NodePosition,
+): MindMapNode[] {
+  function translate(node: MindMapNode): MindMapNode {
+    const position = positions.get(node.id);
+    return {
+      ...node,
+      ...(position && { position: { x: position.x + delta.x, y: position.y + delta.y } }),
+      ...(node.next && { next: node.next.map(translate) }),
+    };
+  }
+  return updateNode(nodes, id, translate);
 }
 
 export function updateNode(
@@ -149,10 +174,18 @@ export function moveNode(nodes: MindMapNode[], id: string, target: DropTarget): 
 }
 
 export function connectionPath({ from, to }: Connection) {
-  const startX = from.x + from.width;
-  const startY = from.y + from.height / 2;
-  const endX = to.x;
-  const endY = to.y + to.height / 2;
-  const middleX = (startX + endX) / 2;
-  return `M ${startX} ${startY} C ${middleX} ${startY}, ${middleX} ${endY}, ${endX} ${endY}`;
+  const dx = to.x + to.width / 2 - (from.x + from.width / 2);
+  const dy = to.y + to.height / 2 - (from.y + from.height / 2);
+  // Attach to the facing borders, even when a child is above or left of its parent.
+  const fromScale = Math.max(Math.abs(dx) / (from.width / 2), Math.abs(dy) / (from.height / 2)) || 1;
+  const toScale = Math.max(Math.abs(dx) / (to.width / 2), Math.abs(dy) / (to.height / 2)) || 1;
+  const startX = from.x + from.width / 2 + dx / fromScale;
+  const startY = from.y + from.height / 2 + dy / fromScale;
+  const endX = to.x + to.width / 2 - dx / toScale;
+  const endY = to.y + to.height / 2 - dy / toScale;
+  const length = Math.hypot(dx, dy) || 1;
+  const bend = Math.min(32, Math.hypot(endX - startX, endY - startY) * 0.15);
+  const controlX = (startX + endX) / 2 - dy / length * bend;
+  const controlY = (startY + endY) / 2 + dx / length * bend;
+  return `M ${startX} ${startY} Q ${controlX} ${controlY}, ${endX} ${endY}`;
 }
