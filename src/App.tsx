@@ -27,6 +27,7 @@ function NodeEditor(props: {
   onTextChange: (text: string) => void;
   onAddChild: () => void;
   onFinish: () => void;
+  onDelete: () => void;
 }) {
   let input!: HTMLTextAreaElement;
   onMount(() => {
@@ -46,7 +47,13 @@ function NodeEditor(props: {
         onInput={(e) => props.onTextChange(e.currentTarget.value)}
         onKeyDown={(e) => {
           if (e.isComposing) return;
-          if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          if (
+            !e.shiftKey && !e.ctrlKey && !e.altKey &&
+            ((e.key === "Delete" && !e.metaKey) || (e.key === "Backspace" && e.metaKey))
+          ) {
+            e.preventDefault();
+            props.onDelete();
+          } else if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
             e.preventDefault();
             props.onAddChild();
           } else if (e.key === "Enter" || e.key === "Escape") {
@@ -64,7 +71,6 @@ function Node(props: {
   x: number;
   y: number;
   editing: boolean;
-  canDelete: boolean;
   onSize: (size: NodeSize) => void;
   onEdit: () => void;
   onFinish: () => void;
@@ -109,7 +115,7 @@ function Node(props: {
         "min-width": `${NODE_MIN_WIDTH}px`,
         "min-height": `${NODE_MIN_HEIGHT}px`,
       }}
-      title={props.editing ? "Tab: add child · Enter or Escape: finish editing" : props.text}
+      title={props.editing ? "Delete or ⌘+Backspace: delete node · Tab: add child · Enter or Escape: finish editing" : props.text}
     >
       <Show when={props.editing} fallback={
         <button type="button" class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer" onClick={props.onEdit}>
@@ -121,17 +127,8 @@ function Node(props: {
           onTextChange={props.onTextChange}
           onAddChild={props.onAddChild}
           onFinish={props.onFinish}
+          onDelete={props.onDelete}
         />
-        <button
-          type="button"
-          aria-label="Delete node"
-          title={props.canDelete ? "Delete node" : "Cannot delete the only node"}
-          disabled={!props.canDelete}
-          class="absolute -right-2.5 -top-2.5 flex size-5 items-center justify-center rounded-full border border-blue-500 bg-blue-100 text-sm leading-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-          onClick={props.onDelete}
-        >
-          ×
-        </button>
       </Show>
     </div>
   );
@@ -219,7 +216,6 @@ export function App() {
                 x={node().x}
                 y={node().y}
                 editing={editingId() === id}
-                canDelete={nodeIds().length > 1}
                 onSize={(size) => setNodeSizes((current) => {
                   const previous = current.get(id);
                   if (previous?.width === size.width && previous?.height === size.height) return current;
