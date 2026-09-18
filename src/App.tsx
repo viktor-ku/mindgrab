@@ -1,5 +1,7 @@
-import { createSignal } from "solid-js";
+import { createSignal, For } from "solid-js";
 import type { JSX } from "solid-js";
+import { connectionPath, layoutMindMap, NODE_HEIGHT, NODE_WIDTH } from "./mind-map";
+import type { MindMapNode } from "./mind-map";
 
 function clsx(slices: JSX.DOMAttributes<HTMLDivElement>["class"][]) {
   return slices.join(" ");
@@ -18,7 +20,32 @@ class Vector2 {
     this.x = x;
     this.y = y;
   }
+}
 
+const content: { nodes: MindMapNode[] } = { nodes: [{ text: "New idea" }] };
+
+const layout = layoutMindMap(content.nodes);
+
+function Node({ text, x, y }: { text: string; x: number; y: number }) {
+  return (
+    <div
+      class={clsx([
+        "bg-green-300 border rounded-sm",
+        "shadow-sm/40 cursor-pointer",
+        "px-2.5 py-0.75 select-none",
+        "absolute flex items-center justify-center box-border",
+      ])}
+      data-no-pan
+      style={{
+        transform: `translate(${x}px, ${y}px)`,
+        width: `${NODE_WIDTH}px`,
+        height: `${NODE_HEIGHT}px`,
+      }}
+      title={text}
+    >
+      <span class="truncate">{text}</span>
+    </div>
+  );
 }
 
 export function App() {
@@ -39,8 +66,10 @@ export function App() {
   return (
     <div
       onPointerDown={(e) => {
-        if (!e.isPrimary || e.button !== 0 || activePointerId !== undefined) return;
-        if (e.target instanceof Element && e.target.closest("[data-no-pan]")) return;
+        if (!e.isPrimary || e.button !== 0 || activePointerId !== undefined)
+          return;
+        if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
+          return;
 
         e.currentTarget.setPointerCapture(e.pointerId);
         activePointerId = e.pointerId;
@@ -65,35 +94,30 @@ export function App() {
     >
       <div
         class="absolute w-full h-full"
-        style={{ transform: `translate(${left()}px, ${top()}px)` }}
+        style={{
+          left: "50%",
+          top: "50%",
+          transform: `translate(${left() - NODE_WIDTH / 2}px, ${top() - NODE_HEIGHT / 2}px)`,
+        }}
       >
-        <div class="relative w-full h-full">
-          <div
-            class={clsx([
-              "bg-green-300 border rounded-md",
-              "shadow-sm/30 cursor-pointer",
-              "px-2.5 py-0.75 select-none",
-              "absolute",
-            ])}
-            data-no-pan
-            style={{ top: `200px`, left: `200px` }}
-          >
-            <span>User</span>
-          </div>
-
-          <div
-            class={clsx([
-              "bg-green-300 border rounded-md",
-              "shadow-sm/30 cursor-pointer",
-              "px-2.5 py-0.75 select-none",
-              "absolute",
-            ])}
-            data-no-pan
-            style={{ top: `200px`, left: `320px` }}
-          >
-            <span>id</span>
-          </div>
-        </div>
+        <svg
+          class="absolute inset-0 w-full h-full overflow-visible pointer-events-none"
+          aria-hidden="true"
+        >
+          <For each={layout.connections}>
+            {(connection) => (
+              <path
+                d={connectionPath(connection)}
+                fill="none"
+                stroke="#86efac"
+                stroke-width="2"
+              />
+            )}
+          </For>
+        </svg>
+        <For each={layout.nodes}>
+          {(node) => <Node text={node.text} x={node.x} y={node.y} />}
+        </For>
       </div>
     </div>
   );
