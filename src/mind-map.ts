@@ -4,7 +4,8 @@ export interface MindMapNode {
   next?: MindMapNode[];
 }
 
-export const NODE_MIN_WIDTH = 128;
+// Used only until ResizeObserver supplies the node's content-sized width.
+const DEFAULT_NODE_WIDTH = 128;
 export const NODE_MIN_HEIGHT = 40;
 const COLUMN_GAP = 64;
 const ROW_GAP = 24;
@@ -32,7 +33,7 @@ export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, N
   const subtreeHeights = new Map<string, number>();
 
   function sizeOf(node: MindMapNode): NodeSize {
-    return sizes.get(node.id) ?? { width: NODE_MIN_WIDTH, height: NODE_MIN_HEIGHT };
+    return sizes.get(node.id) ?? { width: DEFAULT_NODE_WIDTH, height: NODE_MIN_HEIGHT };
   }
 
   function measureSubtree(node: MindMapNode): number {

@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { canMoveNode, connectionPath, deleteNode, insertSibling, layoutMindMap, moveNode, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, reorderNode, updateNode } from "./mind-map";
+import { canMoveNode, connectionPath, deleteNode, insertSibling, layoutMindMap, moveNode, NODE_MIN_HEIGHT, reorderNode, updateNode } from "./mind-map";
 import type { DropTarget, MindMapNode, NodeSize } from "./mind-map";
 
 function NodeEditor(props: {
@@ -14,7 +14,7 @@ function NodeEditor(props: {
   });
 
   return (
-    <div class="relative min-w-0">
+    <div class="relative min-w-px">
       <span class="block whitespace-pre-wrap wrap-anywhere invisible" aria-hidden="true">{props.text + "\u200b"}</span>
       <textarea
         ref={input}
@@ -83,7 +83,6 @@ function Node(props: {
       onDblClick={props.onWrite}
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
-        "min-width": `${NODE_MIN_WIDTH}px`,
         "min-height": `${NODE_MIN_HEIGHT}px`,
       }}
       title="Click to select · Double-click to write · Drag to move"
@@ -296,7 +295,7 @@ export function App() {
     >
       <div class="absolute w-full h-full origin-top-left" style={{
         left: "50%", top: "50%",
-        transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-NODE_MIN_WIDTH / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
+        transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
       }}>
         <svg class="absolute inset-0 w-full h-full overflow-visible pointer-events-none stroke-stone-700" aria-hidden="true">
           <For each={layout().connections}>{(connection) => <path d={connectionPath(connection)} fill="none" stroke-width="1" />}</For>
