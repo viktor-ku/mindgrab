@@ -89,17 +89,63 @@ export function updateNode(
 }
 
 export function deleteNode(nodes: MindMapNode[], id: string): MindMapNode[] {
-  if (nodes.length === 1 && !nodes[0].next?.length) return nodes;
+  return nodes.filter((node) => node.id !== id).map((node) =>
+    node.next ? { ...node, next: deleteNode(node.next, id) } : node,
+  );
+}
 
-  function remove(branch: MindMapNode[]): MindMapNode[] {
-    return branch.flatMap((node) =>
-      node.id === id
-        ? node.next ?? []
-        : [{ ...node, ...(node.next && { next: remove(node.next) }) }],
-    );
+export function findNode(nodes: MindMapNode[], id: string): MindMapNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    const child = findNode(node.next ?? [], id);
+    if (child) return child;
   }
+}
 
-  return remove(nodes);
+export function insertSibling(nodes: MindMapNode[], id: string, sibling: MindMapNode): MindMapNode[] {
+  return nodes.flatMap((node) => node.id === id
+    ? [node, sibling]
+    : [node.next ? { ...node, next: insertSibling(node.next, id, sibling) } : node]);
+}
+
+export function reorderNode(nodes: MindMapNode[], id: string, direction: -1 | 1): MindMapNode[] {
+  const index = nodes.findIndex((node) => node.id === id);
+  if (index !== -1) {
+    const target = index + direction;
+    if (target < 0 || target >= nodes.length) return nodes;
+    const reordered = [...nodes];
+    [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
+    return reordered;
+  }
+  return nodes.map((node) => node.next
+    ? { ...node, next: reorderNode(node.next, id, direction) } : node);
+}
+
+export type DropTarget = { id: string; placement: "child" | "before" | "after" } | { placement: "root" };
+
+export function canMoveNode(nodes: MindMapNode[], id: string, target: DropTarget): boolean {
+  const source = findNode(nodes, id);
+  if (!source) return false;
+  return target.placement === "root"
+    || (!!findNode(nodes, target.id) && !findNode([source], target.id));
+}
+
+// Validate before removal: dropping on oneself or a descendant must never lose a subtree.
+export function moveNode(nodes: MindMapNode[], id: string, target: DropTarget): MindMapNode[] {
+  if (!canMoveNode(nodes, id, target)) return nodes;
+  const source = findNode(nodes, id)!;
+  const remaining = deleteNode(nodes, id);
+  if (target.placement === "root") return [...remaining, source];
+  if (target.placement === "child") {
+    return updateNode(remaining, target.id, (node) => ({ ...node, next: [...(node.next ?? []), source] }));
+  }
+  const targetId = target.id;
+  function insert(branch: MindMapNode[]): MindMapNode[] {
+    return branch.flatMap((node) => node.id === targetId
+      ? target.placement === "before" ? [source, node] : [node, source]
+      : [node.next ? { ...node, next: insert(node.next) } : node]);
+  }
+  return insert(remaining);
 }
 
 export function connectionPath({ from, to }: Connection) {
