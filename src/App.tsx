@@ -1,6 +1,6 @@
-import { createSignal, For } from "solid-js";
+import { createMemo, createSignal, For, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
-import { connectionPath, layoutMindMap, NODE_HEIGHT, NODE_WIDTH } from "./mind-map";
+import { connectionPath, deleteNode, layoutMindMap, NODE_HEIGHT, NODE_WIDTH, updateNode } from "./mind-map";
 import type { MindMapNode } from "./mind-map";
 
 function clsx(slices: JSX.DOMAttributes<HTMLDivElement>["class"][]) {
@@ -22,11 +22,51 @@ class Vector2 {
   }
 }
 
-const content: { nodes: MindMapNode[] } = { nodes: [{ text: "New idea" }] };
+function NodeEditor(props: {
+  text: string;
+  onTextChange: (text: string) => void;
+  onAddChild: () => void;
+  onFinish: () => void;
+}) {
+  let input!: HTMLInputElement;
+  onMount(() => {
+    input.focus();
+    input.select();
+  });
 
-const layout = layoutMindMap(content.nodes);
+  return (
+    <input
+      ref={input}
+      aria-label="Node text"
+      class="w-full min-w-0 bg-transparent text-center outline-none select-text cursor-text"
+      value={props.text}
+      onInput={(e) => props.onTextChange(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        if (e.isComposing) return;
+        if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          props.onAddChild();
+        } else if (e.key === "Enter" || e.key === "Escape") {
+          e.preventDefault();
+          props.onFinish();
+        }
+      }}
+    />
+  );
+}
 
-function Node({ text, x, y }: { text: string; x: number; y: number }) {
+function Node(props: {
+  text: string;
+  x: number;
+  y: number;
+  editing: boolean;
+  canDelete: boolean;
+  onEdit: () => void;
+  onFinish: () => void;
+  onTextChange: (text: string) => void;
+  onAddChild: () => void;
+  onDelete: () => void;
+}) {
   return (
     <div
       class={clsx([
@@ -35,20 +75,58 @@ function Node({ text, x, y }: { text: string; x: number; y: number }) {
         "px-2.5 py-0.75 select-none",
         "absolute flex items-center justify-center box-border",
       ])}
+      classList={{ "ring-2 ring-green-100": props.editing }}
       data-no-pan
+      onClick={(e) => {
+        if (!props.editing && e.target === e.currentTarget) props.onEdit();
+      }}
+      onFocusOut={(e) => {
+        const container = e.currentTarget;
+        if (e.relatedTarget instanceof Element && container.contains(e.relatedTarget)) return;
+        // Switching between the button and input also moves focus.
+        queueMicrotask(() => {
+          if (!container.contains(document.activeElement)) props.onFinish();
+        });
+      }}
       style={{
-        transform: `translate(${x}px, ${y}px)`,
+        transform: `translate(${props.x}px, ${props.y}px)`,
         width: `${NODE_WIDTH}px`,
         height: `${NODE_HEIGHT}px`,
       }}
-      title={text}
+      title={props.editing ? "Tab: add child · Enter or Escape: finish editing" : props.text}
     >
-      <span class="truncate">{text}</span>
+      <Show when={props.editing} fallback={
+        <button type="button" class="w-full h-full truncate cursor-pointer" onClick={props.onEdit}>
+          {props.text || "New idea"}
+        </button>
+      }>
+        <NodeEditor
+          text={props.text}
+          onTextChange={props.onTextChange}
+          onAddChild={props.onAddChild}
+          onFinish={props.onFinish}
+        />
+        <button
+          type="button"
+          aria-label="Delete node"
+          title={props.canDelete ? "Delete node" : "Cannot delete the only node"}
+          disabled={!props.canDelete}
+          class="absolute -right-2.5 -top-2.5 flex size-5 items-center justify-center rounded-full border bg-green-100 text-sm leading-none cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+          onClick={props.onDelete}
+        >
+          ×
+        </button>
+      </Show>
     </div>
   );
 }
 
 export function App() {
+  const [nodes, setNodes] = createSignal<MindMapNode[]>([{ id: crypto.randomUUID(), text: "New idea" }]);
+  const [editingId, setEditingId] = createSignal<string>();
+  const layout = createMemo(() => layoutMindMap(nodes()));
+  const positionedNodes = createMemo(() => new Map(layout().nodes.map((node) => [node.id, node])));
+  const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
   const [top, setTop] = createSignal(0);
   const [moving, setMoving] = createSignal(false);
@@ -71,6 +149,7 @@ export function App() {
         if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
           return;
 
+        setEditingId(undefined);
         e.currentTarget.setPointerCapture(e.pointerId);
         activePointerId = e.pointerId;
         vMouseDown.set(e.clientX, e.clientY);
@@ -104,7 +183,7 @@ export function App() {
           class="absolute inset-0 w-full h-full overflow-visible pointer-events-none"
           aria-hidden="true"
         >
-          <For each={layout.connections}>
+          <For each={layout().connections}>
             {(connection) => (
               <path
                 d={connectionPath(connection)}
@@ -115,8 +194,34 @@ export function App() {
             )}
           </For>
         </svg>
-        <For each={layout.nodes}>
-          {(node) => <Node text={node.text} x={node.x} y={node.y} />}
+        <For each={nodeIds()}>
+          {(id) => {
+            const node = () => positionedNodes().get(id)!;
+            return (
+              <Node
+                text={node().text}
+                x={node().x}
+                y={node().y}
+                editing={editingId() === id}
+                canDelete={nodeIds().length > 1}
+                onEdit={() => setEditingId(id)}
+                onFinish={() => {
+                  if (editingId() === id) setEditingId(undefined);
+                }}
+                onTextChange={(text) => setNodes((current) => updateNode(current, id, (node) => ({ ...node, text })))}
+                onAddChild={() => {
+                  const child: MindMapNode = { id: crypto.randomUUID(), text: "New idea" };
+                  setNodes((current) => updateNode(current, id, (node) => ({ ...node, next: [...(node.next ?? []), child] })));
+                  setEditingId(child.id);
+                }}
+                onDelete={() => {
+                  if (nodeIds().length <= 1) return;
+                  setEditingId(undefined);
+                  setNodes((current) => deleteNode(current, id));
+                }}
+              />
+            );
+          }}
         </For>
       </div>
     </div>

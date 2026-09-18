@@ -1,4 +1,5 @@
 export interface MindMapNode {
+  id: string;
   text: string;
   next?: MindMapNode[];
 }
@@ -9,6 +10,7 @@ const COLUMN_GAP = 64;
 const ROW_GAP = 24;
 
 interface PositionedNode {
+  id: string;
   text: string;
   x: number;
   y: number;
@@ -25,7 +27,7 @@ export function layoutMindMap(roots: MindMapNode[]) {
   let nextLeafY = 0;
 
   function visit(node: MindMapNode, depth: number): PositionedNode {
-    const positioned = { text: node.text, x: depth * (NODE_WIDTH + COLUMN_GAP), y: 0 };
+    const positioned = { id: node.id, text: node.text, x: depth * (NODE_WIDTH + COLUMN_GAP), y: 0 };
     nodes.push(positioned);
 
     const children = (node.next ?? []).map((child) => visit(child, depth + 1));
@@ -45,6 +47,34 @@ export function layoutMindMap(roots: MindMapNode[]) {
   for (const root of roots) visit(root, 0);
 
   return { nodes, connections };
+}
+
+export function updateNode(
+  nodes: MindMapNode[],
+  id: string,
+  update: (node: MindMapNode) => MindMapNode,
+): MindMapNode[] {
+  return nodes.map((node) =>
+    node.id === id
+      ? update(node)
+      : node.next
+        ? { ...node, next: updateNode(node.next, id, update) }
+        : node,
+  );
+}
+
+export function deleteNode(nodes: MindMapNode[], id: string): MindMapNode[] {
+  if (nodes.length === 1 && !nodes[0].next?.length) return nodes;
+
+  function remove(branch: MindMapNode[]): MindMapNode[] {
+    return branch.flatMap((node) =>
+      node.id === id
+        ? node.next ?? []
+        : [{ ...node, ...(node.next && { next: remove(node.next) }) }],
+    );
+  }
+
+  return remove(nodes);
 }
 
 export function connectionPath({ from, to }: Connection) {
