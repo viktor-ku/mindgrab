@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { connectionPath, deleteNode, findNode, insertSibling, layoutMindMap, moveNode, reorderNode, translateSubtree } from "../src/mind-map";
+import { connectionPath, deleteNode, findNode, insertSibling, layoutMindMap, moveNode, reorderNode, translateSubtree, updateNode } from "../src/mind-map";
 import type { MindMapNode } from "../src/mind-map";
 
 const tree = (): MindMapNode[] => [
@@ -80,6 +80,114 @@ describe("free positioning", () => {
       expect((endX - startX) * (values[3] - startY) - (endY - startY) * (values[2] - startX)).not.toBe(0);
     }
     expect(connectionPath({ from, to: from })).not.toMatch(/NaN|Infinity/);
+  });
+});
+
+describe("layout stability", () => {
+  const nodeAt = (layout: ReturnType<typeof layoutMindMap>, id: string) => layout.nodes.find((node) => node.id === id)!;
+  const centerY = (node: { y: number; height: number }) => node.y + node.height / 2;
+
+  test("adding a sibling spreads children around a stationary root", () => {
+    const original = [{ id: "parent", text: "Parent", next: [{ id: "one", text: "One" }] }];
+    const before = layoutMindMap(original);
+    const after = layoutMindMap(insertSibling(original, "one", { id: "two", text: "Two" }));
+    expect(nodeAt(after, "parent")).toEqual(nodeAt(before, "parent"));
+    expect(nodeAt(after, "one").y).toBeLessThan(nodeAt(before, "one").y);
+    expect(centerY(nodeAt(after, "parent"))).toBe(
+      (centerY(nodeAt(after, "one")) + centerY(nodeAt(after, "two"))) / 2,
+    );
+  });
+
+  test("adding siblings keeps a nested parent stationary and branches separated", () => {
+    let current = tree();
+    let layout = layoutMindMap(current);
+    const parent = nodeAt(layout, "b");
+    const anchor = { id: parent.id, centerY: centerY(parent) };
+    for (const id of ["new-1", "new-2", "new-3"]) {
+      current = insertSibling(current, "c", { id, text: id });
+      layout = layoutMindMap(current, new Map(), anchor);
+      expect(nodeAt(layout, "b")).toEqual(parent);
+      const children = findNode(current, "b")!.next!.map((child) => nodeAt(layout, child.id));
+      expect(centerY(parent)).toBe((children[0].y + children.at(-1)!.y + children.at(-1)!.height) / 2);
+      for (let i = 1; i < children.length; i++) {
+        expect(children[i].y - (children[i - 1].y + children[i - 1].height)).toBeGreaterThanOrEqual(24);
+      }
+      expect(nodeAt(layout, "d").y).toBeGreaterThanOrEqual(children.at(-1)!.y + children.at(-1)!.height + 24);
+      expect(nodeAt(layout, "e").y).toBeGreaterThanOrEqual(nodeAt(layout, "d").y + nodeAt(layout, "d").height + 24);
+    }
+  });
+
+  test("child insertion and measured sizes preserve the parent's center and connections", () => {
+    const original = tree();
+    const before = layoutMindMap(original);
+    const parent = nodeAt(before, "b");
+    const anchor = { id: parent.id, centerY: centerY(parent) };
+    const current = updateNode(original, "b", (node) => ({ ...node, next: [...node.next!, { id: "new", text: "New" }] }));
+    const sizes = new Map([
+      ["new", { width: 160, height: 120 }],
+      ["b", { width: 100, height: 64 }],
+    ]);
+    const after = layoutMindMap(current, sizes, anchor);
+    expect(centerY(nodeAt(after, "b"))).toBe(centerY(parent));
+    expect(nodeAt(after, "new").y).toBeGreaterThanOrEqual(nodeAt(after, "c").y + nodeAt(after, "c").height + 24);
+    for (const connection of after.connections) {
+      expect(connection.from).toBe(nodeAt(after, connection.from.id));
+      expect(connection.to).toBe(nodeAt(after, connection.to.id));
+      const values = connectionPath(connection).match(/-?\d+(?:\.\d+)?/g)!.map(Number);
+      const onBorder = (node: typeof connection.from, x: number, y: number) =>
+        Math.max(Math.abs(x - node.x - node.width / 2) / (node.width / 2),
+          Math.abs(y - node.y - node.height / 2) / (node.height / 2));
+      expect(onBorder(connection.from, values[0], values[1])).toBeCloseTo(1);
+      expect(onBorder(connection.to, values[4], values[5])).toBeCloseTo(1);
+    }
+  });
+
+  test("root siblings, empty maps, and removed anchors have valid layouts", () => {
+    const original = tree();
+    const before = layoutMindMap(original);
+    const root = nodeAt(before, "e");
+    const after = layoutMindMap(insertSibling(original, "e", { id: "new", text: "New" }), new Map(), {
+      id: root.id, centerY: centerY(root),
+    });
+    expect(nodeAt(after, "e")).toEqual(root);
+    expect(nodeAt(after, "new").y).toBeGreaterThanOrEqual(root.y + root.height + 24);
+    expect(layoutMindMap([], new Map(), { id: "missing", centerY: 100 })).toEqual({ nodes: [], connections: [] });
+    expect(layoutMindMap(original, new Map(), { id: "missing", centerY: 100 })).toEqual(before);
+  });
+
+  test("dragging an anchored parent takes precedence and leaves other branches in place", () => {
+    const original = tree();
+    const before = layoutMindMap(original);
+    for (const id of ["a", "b"]) {
+      const anchor = { id, centerY: centerY(nodeAt(before, id)) };
+      const positions = new Map(before.nodes.map((node) => [node.id, node]));
+      const moved = translateSubtree(original, id, positions, { x: -120, y: 175 });
+      const after = layoutMindMap(moved, new Map(), anchor);
+      for (const node of after.nodes) {
+        const previous = nodeAt(before, node.id);
+        const delta = findNode([findNode(original, id)!], node.id) ? { x: -120, y: 175 } : { x: 0, y: 0 };
+        expect(node.x).toBe(previous.x + delta.x);
+        expect(node.y).toBe(previous.y + delta.y);
+      }
+      // Restoring the drag snapshot (Escape/cancel) restores the anchored layout.
+      expect(layoutMindMap(original, new Map(), anchor)).toEqual(before);
+    }
+  });
+
+  test("adding siblings beside a manually moved branch preserves its saved positions", () => {
+    const original = tree();
+    const before = layoutMindMap(original);
+    const moved = translateSubtree(original, "b", new Map(before.nodes.map((node) => [node.id, node])), { x: 75, y: -150 });
+    const parent = nodeAt(layoutMindMap(moved), "b");
+    const current = insertSibling(moved, "c", { id: "new", text: "New" });
+    const after = layoutMindMap(current, new Map(), { id: "b", centerY: centerY(parent) });
+    expect(nodeAt(after, "b")).toEqual(parent);
+    for (const id of ["b", "c"]) {
+      const node = nodeAt(after, id);
+      expect({ x: node.x, y: node.y }).toEqual(findNode(moved, id)!.position!);
+    }
+    expect(nodeAt(after, "new").x).toBe(parent.x + parent.width + 64);
+    expect(nodeAt(after, "new").y).toBeGreaterThan(parent.y);
   });
 });
 

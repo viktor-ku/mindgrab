@@ -33,7 +33,16 @@ interface Connection {
   to: PositionedNode;
 }
 
-export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, NodeSize> = new Map()) {
+export interface LayoutAnchor {
+  id: string;
+  centerY: number;
+}
+
+export function layoutMindMap(
+  roots: MindMapNode[],
+  sizes: ReadonlyMap<string, NodeSize> = new Map(),
+  anchor?: LayoutAnchor,
+) {
   const nodes: PositionedNode[] = [];
   const connections: Connection[] = [];
   const subtreeHeights = new Map<string, number>();
@@ -54,7 +63,12 @@ export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, N
   function visit(node: MindMapNode, x: number, top: number): PositionedNode {
     const size = sizeOf(node);
     const subtreeHeight = subtreeHeights.get(node.id)!;
-    const positioned = { id: node.id, text: node.text, x, y: top + (subtreeHeight - size.height) / 2, ...node.position, ...size };
+    // Anchor before placing children so they spread around the parent. A manual
+    // position takes precedence, allowing the anchored node to be dragged freely.
+    const y = node.id === anchor?.id
+      ? anchor.centerY - size.height / 2
+      : top + (subtreeHeight - size.height) / 2;
+    const positioned = { id: node.id, text: node.text, x, y, ...node.position, ...size };
     nodes.push(positioned);
 
     const children = node.next ?? [];
@@ -71,7 +85,7 @@ export function layoutMindMap(roots: MindMapNode[], sizes: ReadonlyMap<string, N
   }
 
   for (const root of roots) measureSubtree(root);
-  let rootTop = 0;
+  let rootTop = roots.length ? (NODE_MIN_HEIGHT - subtreeHeights.get(roots[0].id)!) / 2 : 0;
   for (const root of roots) {
     visit(root, 0, rootTop);
     rootTop += subtreeHeights.get(root.id)! + ROW_GAP;
