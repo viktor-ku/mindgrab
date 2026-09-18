@@ -1,7 +1,7 @@
-import { createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { JSX } from "solid-js";
-import { connectionPath, deleteNode, layoutMindMap, NODE_HEIGHT, NODE_WIDTH, updateNode } from "./mind-map";
-import type { MindMapNode } from "./mind-map";
+import { connectionPath, deleteNode, layoutMindMap, NODE_MIN_HEIGHT, NODE_MIN_WIDTH, updateNode } from "./mind-map";
+import type { MindMapNode, NodeSize } from "./mind-map";
 
 function clsx(slices: JSX.DOMAttributes<HTMLDivElement>["class"][]) {
   return slices.join(" ");
@@ -28,30 +28,34 @@ function NodeEditor(props: {
   onAddChild: () => void;
   onFinish: () => void;
 }) {
-  let input!: HTMLInputElement;
+  let input!: HTMLTextAreaElement;
   onMount(() => {
     input.focus();
     input.select();
   });
 
   return (
-    <input
-      ref={input}
-      aria-label="Node text"
-      class="w-full min-w-0 bg-transparent text-center outline-none select-text cursor-text"
-      value={props.text}
-      onInput={(e) => props.onTextChange(e.currentTarget.value)}
-      onKeyDown={(e) => {
-        if (e.isComposing) return;
-        if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
-          e.preventDefault();
-          props.onAddChild();
-        } else if (e.key === "Enter" || e.key === "Escape") {
-          e.preventDefault();
-          props.onFinish();
-        }
-      }}
-    />
+    <div class="relative min-w-0">
+      <span class="block whitespace-pre-wrap wrap-anywhere invisible" aria-hidden="true">{props.text + "\u200b"}</span>
+      <textarea
+        ref={input}
+        aria-label="Node text"
+        rows={1}
+        class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-center outline-none select-text cursor-text"
+        value={props.text}
+        onInput={(e) => props.onTextChange(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.isComposing) return;
+          if (e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            e.preventDefault();
+            props.onAddChild();
+          } else if (e.key === "Enter" || e.key === "Escape") {
+            e.preventDefault();
+            props.onFinish();
+          }
+        }}
+      />
+    </div>
   );
 }
 
@@ -61,19 +65,31 @@ function Node(props: {
   y: number;
   editing: boolean;
   canDelete: boolean;
+  onSize: (size: NodeSize) => void;
   onEdit: () => void;
   onFinish: () => void;
   onTextChange: (text: string) => void;
   onAddChild: () => void;
   onDelete: () => void;
 }) {
+  let container!: HTMLDivElement;
+  onMount(() => {
+    const observer = new ResizeObserver(() => {
+      const { width, height } = container.getBoundingClientRect();
+      props.onSize({ width, height });
+    });
+    observer.observe(container);
+    onCleanup(() => observer.disconnect());
+  });
+
   return (
     <div
+      ref={container}
       class={clsx([
         "bg-green-300 border rounded-sm",
         "shadow-sm/40 cursor-pointer",
         "px-2.5 py-0.75 select-none",
-        "absolute flex items-center justify-center box-border",
+        "absolute grid items-center box-border w-max max-w-80 leading-6",
       ])}
       classList={{ "ring-2 ring-green-100": props.editing }}
       data-no-pan
@@ -90,13 +106,13 @@ function Node(props: {
       }}
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
-        width: `${NODE_WIDTH}px`,
-        height: `${NODE_HEIGHT}px`,
+        "min-width": `${NODE_MIN_WIDTH}px`,
+        "min-height": `${NODE_MIN_HEIGHT}px`,
       }}
       title={props.editing ? "Tab: add child · Enter or Escape: finish editing" : props.text}
     >
       <Show when={props.editing} fallback={
-        <button type="button" class="w-full h-full truncate cursor-pointer" onClick={props.onEdit}>
+        <button type="button" class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer" onClick={props.onEdit}>
           {props.text || "New idea"}
         </button>
       }>
@@ -124,7 +140,8 @@ function Node(props: {
 export function App() {
   const [nodes, setNodes] = createSignal<MindMapNode[]>([{ id: crypto.randomUUID(), text: "New idea" }]);
   const [editingId, setEditingId] = createSignal<string>();
-  const layout = createMemo(() => layoutMindMap(nodes()));
+  const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
+  const layout = createMemo(() => layoutMindMap(nodes(), nodeSizes()));
   const positionedNodes = createMemo(() => new Map(layout().nodes.map((node) => [node.id, node])));
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
@@ -176,7 +193,7 @@ export function App() {
         style={{
           left: "50%",
           top: "50%",
-          transform: `translate(${left() - NODE_WIDTH / 2}px, ${top() - NODE_HEIGHT / 2}px)`,
+          transform: `translate(${left() - NODE_MIN_WIDTH / 2}px, ${top() - NODE_MIN_HEIGHT / 2}px)`,
         }}
       >
         <svg
@@ -204,6 +221,11 @@ export function App() {
                 y={node().y}
                 editing={editingId() === id}
                 canDelete={nodeIds().length > 1}
+                onSize={(size) => setNodeSizes((current) => {
+                  const previous = current.get(id);
+                  if (previous?.width === size.width && previous?.height === size.height) return current;
+                  return new Map(current).set(id, size);
+                })}
                 onEdit={() => setEditingId(id)}
                 onFinish={() => {
                   if (editingId() === id) setEditingId(undefined);
