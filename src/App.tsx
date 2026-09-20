@@ -1,6 +1,8 @@
 import { batch, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { connectionPath, deleteNode, findNode, insertSibling, layoutMindMap, NODE_MIN_HEIGHT, reorderNode, translateSubtree, updateNode } from "./mind-map";
-import type { MindMapNode, NodePosition, NodeSize } from "./mind-map";
+import { connectionPath, deleteNode, insertSibling, layoutMindMap, NODE_MIN_HEIGHT, reorderNode, translateSubtree, updateNode } from "./mind-map";
+import { createHistory } from "./history";
+import type { MapSnapshot } from "./history";
+import type { LayoutAnchor, MindMapNode, NodePosition, NodeSize } from "./mind-map";
 
 function NodeEditor(props: {
   text: string;
@@ -100,16 +102,8 @@ export function App() {
   const [selectedId, setSelectedId] = createSignal<string>();
   const [writing, setWriting] = createSignal(false);
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
-  const [layoutAnchorId, setLayoutAnchorId] = createSignal<string>();
-  const layout = createMemo<ReturnType<typeof layoutMindMap>>((previous) => {
-    const roots = nodes();
-    const preferredId = layoutAnchorId();
-    const anchorId = preferredId && findNode(roots, preferredId) ? preferredId : roots[0]?.id;
-    const anchor = previous?.nodes.find((node) => node.id === anchorId);
-    return layoutMindMap(roots, nodeSizes(), anchor && {
-      id: anchor.id, centerY: anchor.y + anchor.height / 2,
-    });
-  });
+  const [layoutAnchor, setLayoutAnchor] = createSignal<LayoutAnchor>();
+  const layout = createMemo(() => layoutMindMap(nodes(), nodeSizes(), layoutAnchor()));
   const positionedNodes = createMemo(() => new Map(layout().nodes.map((node) => [node.id, node])));
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
@@ -122,38 +116,66 @@ export function App() {
     id: number; x: number; y: number; left: number; top: number; zoom: number;
     nodeId?: string;
     nodes: MindMapNode[];
+    snapshot: MapSnapshot;
     positions: ReadonlyMap<string, NodePosition>;
   } | undefined;
   let suppressClick = false;
+  const history = createHistory();
+  let editSnapshot: MapSnapshot | undefined;
+
+  function snapshot(): MapSnapshot {
+    return { nodes: nodes(), selectedId: selectedId(), anchor: layoutAnchor(), sizes: nodeSizes() };
+  }
+
+  function undo() {
+    const previous = history.undo();
+    if (!previous) return;
+    batch(() => {
+      setNodes(previous.nodes);
+      setSelectedId(previous.selectedId);
+      setLayoutAnchor(previous.anchor);
+      setNodeSizes(new Map(previous.sizes));
+    });
+    canvas.focus({ preventScroll: true });
+  }
 
   function select(id: string) {
     if (suppressClick) return;
-    if (selectedId() !== id) setWriting(false);
+    if (selectedId() !== id) finishWriting();
     setSelectedId(id);
   }
 
   function finishWriting() {
     if (!writing()) return;
+    if (editSnapshot) history.record(editSnapshot, nodes());
+    editSnapshot = undefined;
     setWriting(false);
     canvas.focus({ preventScroll: true });
   }
 
   function write(id: string) {
+    if (writing() && selectedId() === id) return;
+    finishWriting();
     setSelectedId(id);
+    editSnapshot = snapshot();
     setWriting(true);
   }
 
   function add(kind: "child" | "sibling" | "root") {
+    finishWriting();
+    const before = snapshot();
     const node: MindMapNode = { id: crypto.randomUUID(), text: "New idea" };
     const id = selectedId();
     const anchorId = kind === "sibling"
       ? layout().connections.find(({ to }) => to.id === id)?.from.id ?? id
       : kind === "child" ? id : undefined;
     batch(() => {
-      setLayoutAnchorId(anchorId);
+      const anchor = positionedNodes().get(anchorId ?? nodes()[0]?.id);
+      setLayoutAnchor(anchor && { id: anchor.id, centerY: anchor.y + anchor.height / 2 });
       setNodes((current) => kind === "root" || !id ? [...current, node]
         : kind === "child" ? updateNode(current, id, (parent) => ({ ...parent, next: [...(parent.next ?? []), node] }))
           : insertSibling(current, id, node));
+      history.record(before, nodes());
       write(node.id);
     });
   }
@@ -161,9 +183,11 @@ export function App() {
   function removeSelected() {
     const id = selectedId();
     if (!id) return;
-    setWriting(false);
+    finishWriting();
+    const before = snapshot();
     setSelectedId(undefined);
     setNodes((current) => deleteNode(current, id));
+    history.record(before, nodes());
     setNodeSizes((current) => new Map([...current].filter(([key]) => nodeIds().includes(key))));
     canvas.focus({ preventScroll: true });
   }
@@ -186,13 +210,13 @@ export function App() {
       finishWriting();
       select(nodeId);
     } else {
-      setWriting(false);
+      finishWriting();
       setSelectedId(undefined);
     }
     canvas.focus({ preventScroll: true });
     pointer = {
       id: e.pointerId, x: e.clientX, y: e.clientY, left: left(), top: top(), zoom: zoom(), nodeId,
-      nodes: nodes(), positions: positionedNodes(),
+      nodes: nodes(), snapshot: snapshot(), positions: positionedNodes(),
     };
     // Node clicks need their original target for double-click recognition. Capture on drag only.
     if (!nodeId) {
@@ -223,8 +247,10 @@ export function App() {
   function stopPointer(e: PointerEvent, commit: boolean) {
     if (!pointer || e.pointerId !== pointer.id) return;
     if (draggingId()) {
-      if (commit) movePointer(e);
-      else setNodes(pointer.nodes);
+      if (commit) {
+        movePointer(e);
+        history.record(pointer.snapshot, nodes());
+      } else setNodes(pointer.nodes);
     }
     pointer = undefined;
     setDraggingId(undefined);
@@ -234,7 +260,7 @@ export function App() {
 
   onMount(() => {
     const keydown = (e: KeyboardEvent) => {
-      if (e.isComposing || writing() || (e.target instanceof Element && e.target.closest("textarea, input, [contenteditable=true], [data-toolbar]"))) return;
+      if (e.isComposing || writing() || (e.target instanceof Element && e.target.closest("textarea, input, [contenteditable=true]"))) return;
       if (e.key === "Escape") {
         e.preventDefault();
         if (pointer) {
@@ -249,7 +275,13 @@ export function App() {
         canvas.focus({ preventScroll: true });
         return;
       }
-      if (pointer || !selectedId()) return;
+      if (pointer) return;
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (!selectedId() || (e.target instanceof Element && e.target.closest("[data-toolbar]"))) return;
       if (!e.shiftKey && !e.ctrlKey && !e.altKey && ((e.key === "Delete" && !e.metaKey) || (e.key === "Backspace" && e.metaKey))) {
         e.preventDefault();
         removeSelected();
@@ -258,7 +290,9 @@ export function App() {
         add(e.key === "Tab" ? "child" : "sibling");
       } else if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
         e.preventDefault();
+        const before = snapshot();
         setNodes((current) => reorderNode(current, selectedId()!, e.key === "ArrowUp" ? -1 : 1));
+        history.record(before, nodes());
       } else if (e.key === "F2") {
         e.preventDefault();
         write(selectedId()!);
