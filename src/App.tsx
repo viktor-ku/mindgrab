@@ -95,6 +95,7 @@ function Node(props: {
 }
 
 export function App() {
+  const [projectName, setProjectName] = createSignal("");
   const [nodes, setNodes] = createSignal<MindMapNode[]>([{ id: crypto.randomUUID(), text: "New idea" }]);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [writing, setWriting] = createSignal(false);
@@ -295,6 +296,16 @@ export function App() {
       class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
+      <label data-no-pan data-toolbar class="map-toolbar absolute top-4 left-4 z-20 flex w-64 max-w-[calc(100%-2rem)] flex-col gap-1 cursor-default">
+        <span class="px-2 pt-1 text-xs font-medium text-stone-500">Project name</span>
+        <input
+          type="text"
+          placeholder="Untitled project"
+          class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          value={projectName()}
+          onInput={(e) => setProjectName(e.currentTarget.value)}
+        />
+      </label>
       <div class="absolute w-full h-full origin-top-left" style={{
         left: "50%", top: "50%",
         transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
