@@ -19,6 +19,8 @@ import {
 } from "./mind-map";
 import { createHistory } from "./history";
 import type { MapSnapshot } from "./history";
+import { listProjects, loadProject, saveProject } from "./projects";
+import type { Project } from "./projects";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -146,6 +148,9 @@ function Node(props: {
 
 export function App() {
   const [projectName, setProjectName] = createSignal("");
+  const [savedKeys, setSavedKeys] = createSignal<string[]>([]);
+  const [showLoad, setShowLoad] = createSignal(false);
+  const [storageMessage, setStorageMessage] = createSignal("");
   const [nodes, setNodes] = createSignal<MindMapNode[]>([
     { id: crypto.randomUUID(), text: "New idea" },
   ]);
@@ -183,6 +188,79 @@ export function App() {
   let suppressClick = false;
   const history = createHistory();
   let editSnapshot: MapSnapshot | undefined;
+
+  function replaceProject(project?: Project) {
+    finishWriting();
+    if (pointer) {
+      const id = pointer.id;
+      pointer = undefined;
+      if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+    }
+    history.clear();
+    editSnapshot = undefined;
+    suppressClick = false;
+    batch(() => {
+      setProjectName(project?.name ?? "");
+      setNodes(
+        project?.nodes ?? [{ id: crypto.randomUUID(), text: "New idea" }],
+      );
+      setSelectedId(undefined);
+      setNodeSizes(new Map());
+      setLayoutAnchor(project?.anchor);
+      setLeft(project?.view.left ?? 0);
+      setTop(project?.view.top ?? 0);
+      setZoom(project?.view.zoom ?? 1);
+      setDraggingId(undefined);
+      setPanning(false);
+      setShowLoad(false);
+    });
+    canvas.focus({ preventScroll: true });
+  }
+
+  function save() {
+    finishWriting();
+    try {
+      const name = saveProject(window.localStorage, {
+        version: 1,
+        name: projectName(),
+        nodes: nodes(),
+        anchor: layoutAnchor(),
+        view: { left: left(), top: top(), zoom: zoom() },
+      });
+      setProjectName(name);
+      setShowLoad(false);
+      setStorageMessage(`Saved “${name}” in this browser.`);
+    } catch {
+      setStorageMessage(
+        "Could not save. Browser storage may be full or unavailable.",
+      );
+    }
+  }
+
+  function openLoad() {
+    finishWriting();
+    try {
+      setSavedKeys(listProjects(window.localStorage));
+      setStorageMessage("");
+      setShowLoad(true);
+    } catch {
+      setStorageMessage(
+        "Could not list projects. Browser storage is unavailable.",
+      );
+    }
+  }
+
+  function load(key: string) {
+    try {
+      const project = loadProject(window.localStorage, key);
+      replaceProject(project);
+      setStorageMessage(`Loaded “${project.name}”.`);
+    } catch {
+      setStorageMessage(
+        "Could not load this project. It may be missing, damaged, or unavailable.",
+      );
+    }
+  }
 
   function snapshot(): MapSnapshot {
     return {
@@ -478,22 +556,83 @@ export function App() {
       class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
-      <label
+      <div
         data-no-pan
         data-toolbar
         class="map-toolbar absolute top-4 left-4 z-20 flex w-64 max-w-[calc(100%-2rem)] flex-col gap-1 cursor-default"
       >
-        <span class="px-2 pt-1 text-xs font-medium text-stone-500">
-          Project name
-        </span>
-        <input
-          type="text"
-          placeholder="Untitled project"
-          class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-          value={projectName()}
-          onInput={(e) => setProjectName(e.currentTarget.value)}
-        />
-      </label>
+        <label class="flex flex-col gap-1">
+          <span class="px-2 pt-1 text-xs font-medium text-stone-500">
+            Project name
+          </span>
+          <input
+            type="text"
+            placeholder="Untitled project"
+            class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            value={projectName()}
+            onInput={(e) => setProjectName(e.currentTarget.value)}
+          />
+        </label>
+        <fieldset
+          class="flex items-center text-sm"
+          aria-label="Project actions"
+        >
+          <button
+            type="button"
+            class="map-control"
+            onClick={() => {
+              replaceProject();
+              setStorageMessage(
+                "New project. Save to keep it in this browser.",
+              );
+            }}
+          >
+            New
+          </button>
+          <button type="button" class="map-control" onClick={save}>
+            Save
+          </button>
+          <button
+            type="button"
+            class="map-control"
+            aria-expanded={showLoad()}
+            aria-controls="saved-projects"
+            onClick={() => (showLoad() ? setShowLoad(false) : openLoad())}
+          >
+            Load
+          </button>
+        </fieldset>
+        <Show when={showLoad()}>
+          <div id="saved-projects" class="border-t border-stone-200 pt-2">
+            <p class="px-2 text-xs text-stone-500">Saved in this browser</p>
+            <ul class="max-h-60 overflow-y-auto text-sm">
+              <For
+                each={savedKeys()}
+                fallback={
+                  <li class="px-2 py-2 text-stone-500">
+                    No saved projects yet.
+                  </li>
+                }
+              >
+                {(key) => (
+                  <li>
+                    <button
+                      type="button"
+                      class="map-control w-full text-left whitespace-normal! break-words"
+                      onClick={() => load(key)}
+                    >
+                      {key.slice("proj/".length)}
+                    </button>
+                  </li>
+                )}
+              </For>
+            </ul>
+          </div>
+        </Show>
+        <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
+          {storageMessage()}
+        </p>
+      </div>
       <div
         class="absolute w-full h-full origin-top-left"
         style={{
