@@ -11,6 +11,9 @@ export interface MapSnapshot {
 export function createHistory() {
   const past: MapSnapshot[] = [];
   return {
+    clear: () => {
+      past.length = 0;
+    },
     record(before: MapSnapshot, after: MindMapNode[]) {
       if (JSON.stringify(before.nodes) === JSON.stringify(after)) return;
       past.push(before);

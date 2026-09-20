@@ -93,3 +93,13 @@ test("editing after undo continues from the restored state", () => {
   expect(history.undo()).toEqual(original);
   expect(history.undo()).toBeUndefined();
 });
+
+test("clearing history prevents undo from restoring a previous project", () => {
+  const history = createHistory();
+  history.record(snapshot([{ id: "a", text: "Old project" }]), []);
+  history.clear();
+  expect(history.undo()).toBeUndefined();
+  const current = snapshot([{ id: "b", text: "New project" }]);
+  history.record(current, []);
+  expect(history.undo()).toEqual(current);
+});
