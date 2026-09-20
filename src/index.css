@@ -6,9 +6,18 @@
   cursor: pointer;
   white-space: nowrap;
 }
-.map-control:hover { background: #f5f5f4; }
-.map-control:disabled { color: #a8a29e; cursor: default; background: transparent; }
-.map-control:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.map-control:hover {
+  background: #f5f5f4;
+}
+.map-control:disabled {
+  color: #a8a29e;
+  cursor: default;
+  background: transparent;
+}
+.map-control:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
 .map-toolbar {
   padding: 0.25rem;
   background: white;
