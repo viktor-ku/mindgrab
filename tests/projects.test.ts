@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   listProjects,
+  loadLatestProject,
   loadProject,
   parseProject,
   saveProject,
@@ -95,4 +96,68 @@ test("storage failures propagate so the UI can report failure", () => {
     throw new Error("Quota exceeded");
   };
   expect(() => saveProject(local, project)).toThrow("Quota exceeded");
+});
+
+test("restores the most recently saved or opened project from storage", () => {
+  const local = storage();
+  expect(loadLatestProject(local)).toBeUndefined();
+  saveProject(local, project);
+  expect(loadLatestProject(local)).toEqual(project);
+
+  const other = { ...project, name: "Another" };
+  saveProject(local, other);
+  expect(loadLatestProject(local)).toEqual(other);
+  loadProject(local, "proj/My ideas");
+  expect(loadLatestProject(local)).toEqual(project);
+  expect(listProjects(local)).toEqual(["proj/Another", "proj/My ideas"]);
+});
+
+test("remembers normalized names and the latest saved contents", () => {
+  const local = storage();
+  saveProject(local, { ...project, name: "  " });
+  expect(loadLatestProject(local)?.name).toBe("Untitled project");
+  saveProject(local, { ...project, name: "  Plans  " });
+  saveProject(local, { ...project, name: "Plans", nodes: [] });
+  expect(loadLatestProject(local)).toEqual({
+    ...project,
+    name: "Plans",
+    nodes: [],
+  });
+});
+
+test("failed saves and loads do not replace the latest project", () => {
+  const local = storage();
+  saveProject(local, project);
+  local.setItem("proj/broken", "not JSON");
+  expect(() => loadProject(local, "proj/broken")).toThrow();
+  expect(() => loadProject(local, "proj/missing")).toThrow();
+  local.setItem = () => {
+    throw new Error("Quota exceeded");
+  };
+  expect(() => saveProject(local, { ...project, name: "Other" })).toThrow();
+  expect(loadLatestProject(local)).toEqual(project);
+});
+
+test("preference write failures do not prevent saving or loading project data", () => {
+  const local = storage();
+  const setItem = local.setItem;
+  local.setItem = (key, value) => {
+    if (!key.startsWith("proj/")) throw new Error("Quota exceeded");
+    setItem(key, value);
+  };
+  expect(saveProject(local, project)).toBe(project.name);
+  expect(loadProject(local, "proj/My ideas")).toEqual(project);
+});
+
+test("missing or corrupt latest projects and unavailable storage report failure", () => {
+  const local = storage();
+  saveProject(local, project);
+  local.removeItem("proj/My ideas");
+  expect(() => loadLatestProject(local)).toThrow("no longer exists");
+  local.setItem("proj/My ideas", "not JSON");
+  expect(() => loadLatestProject(local)).toThrow();
+  local.getItem = () => {
+    throw new Error("Storage unavailable");
+  };
+  expect(() => loadLatestProject(local)).toThrow("Storage unavailable");
 });
