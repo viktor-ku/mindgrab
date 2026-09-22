@@ -26,6 +26,7 @@ import {
   saveProject,
 } from "./projects";
 import type { Project } from "./projects";
+import { generateProjectName } from "./project-names";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -152,7 +153,22 @@ function Node(props: {
 }
 
 export function App() {
-  const [projectName, setProjectName] = createSignal("");
+  function newProjectName(previousName?: string) {
+    const used = previousName ? [previousName] : [];
+    try {
+      used.push(
+        ...listProjects(window.localStorage).map((key) =>
+          key.slice("proj/".length),
+        ),
+      );
+    } catch {
+      // Creating a project also works when browser storage is unavailable.
+    }
+    return generateProjectName(used);
+  }
+
+  const [projectName, setProjectName] = createSignal(newProjectName());
+  const [projectNameDraft, setProjectNameDraft] = createSignal(projectName());
   const [savedKeys, setSavedKeys] = createSignal<string[]>([]);
   const [showLoad, setShowLoad] = createSignal(false);
   const [storageMessage, setStorageMessage] = createSignal("");
@@ -219,7 +235,9 @@ export function App() {
     editSnapshot = undefined;
     suppressClick = false;
     batch(() => {
-      setProjectName(project?.name ?? "");
+      const name = project?.name ?? newProjectName(projectName());
+      setProjectName(name);
+      setProjectNameDraft(name);
       setNodes(
         project?.nodes ?? [{ id: crypto.randomUUID(), text: "New idea" }],
       );
@@ -236,9 +254,16 @@ export function App() {
     canvas.focus({ preventScroll: true });
   }
 
+  function finishProjectName() {
+    const name = projectNameDraft().trim() || projectName();
+    setProjectName(name);
+    setProjectNameDraft(name);
+  }
+
   function save() {
     if (saveStatus() === "saving") return;
     finishWriting();
+    finishProjectName();
     clearSaveStatus();
     const project: Project = {
       version: 1,
@@ -257,7 +282,10 @@ export function App() {
       saveTimer = undefined;
       try {
         const name = saveProject(window.localStorage, project);
-        if (projectName() === project.name) setProjectName(name);
+        if (projectName() === project.name) {
+          setProjectName(name);
+          setProjectNameDraft(name);
+        }
         setSaveStatus("done");
         saveStatusTimer = window.setTimeout(clearSaveStatus, 1500);
       } catch {
@@ -612,10 +640,14 @@ export function App() {
           </span>
           <input
             type="text"
-            placeholder="Untitled project"
+            required
             class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            value={projectName()}
-            onInput={(e) => setProjectName(e.currentTarget.value)}
+            value={projectNameDraft()}
+            onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
+            onBlur={finishProjectName}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
           />
         </label>
         <fieldset

@@ -62,11 +62,20 @@ test("lists only projects and updates the same name without affecting others", (
   expect(local.getItem("other-app")).toBe("keep");
 });
 
-test("blank names have a usable fallback and names are trimmed", () => {
+test("blank names cannot be saved and do not change storage", () => {
   const local = storage();
-  expect(saveProject(local, { ...project, name: "  " })).toBe(
-    "Untitled project",
-  );
+  saveProject(local, project);
+  for (const name of ["", "  ", "\t\n"]) {
+    expect(() => saveProject(local, { ...project, name })).toThrow(
+      "A project name is required.",
+    );
+  }
+  expect(listProjects(local)).toEqual(["proj/My ideas"]);
+  expect(loadProject(local, "proj/My ideas")).toEqual(project);
+});
+
+test("names are trimmed", () => {
+  const local = storage();
   expect(saveProject(local, { ...project, name: "  Plans  " })).toBe("Plans");
   expect(loadProject(local, "proj/Plans").name).toBe("Plans");
 });
@@ -75,6 +84,9 @@ test("rejects malformed, incompatible, and duplicate-ID projects", () => {
   for (const value of [
     null,
     {},
+    { ...project, name: undefined },
+    { ...project, name: "" },
+    { ...project, name: " \t\n" },
     { ...project, version: 2 },
     { ...project, nodes: [{ id: "a", text: 5 }] },
     { ...project, nodes: [...project.nodes, ...project.nodes] },

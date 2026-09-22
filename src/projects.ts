@@ -75,7 +75,8 @@ export function parseProject(json: string): Project {
 }
 
 export function saveProject(storage: Storage, project: Project): string {
-  const name = project.name.trim() || "Untitled project";
+  const name = project.name.trim();
+  if (!name) throw new Error("A project name is required.");
   const key = PREFIX + name;
   storage.setItem(key, JSON.stringify({ ...project, name }, null, 2));
   rememberProject(storage, key);
