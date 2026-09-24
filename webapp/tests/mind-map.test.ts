@@ -6,6 +6,7 @@ import {
   insertSibling,
   layoutMindMap,
   moveNode,
+  navigationTarget,
   reorderNode,
   translateSubtree,
   updateNode,
@@ -278,6 +279,41 @@ describe("layout stability", () => {
     }
     expect(nodeAt(after, "new").x).toBe(parent.x + parent.width + 64);
     expect(nodeAt(after, "new").y).toBeGreaterThan(parent.y);
+  });
+});
+
+describe("arrow-key navigation", () => {
+  test("right descends to the first child, left returns to the parent", () => {
+    const original = tree();
+    expect(navigationTarget(original, "a", "right")).toBe("b");
+    expect(navigationTarget(original, "b", "right")).toBe("c");
+    expect(navigationTarget(original, "c", "right")).toBeUndefined();
+    expect(navigationTarget(original, "e", "right")).toBeUndefined();
+    expect(navigationTarget(original, "c", "left")).toBe("b");
+    expect(navigationTarget(original, "d", "left")).toBe("a");
+    expect(navigationTarget(original, "a", "left")).toBeUndefined();
+    expect(navigationTarget(original, "e", "left")).toBeUndefined();
+  });
+
+  test("up and down move between adjacent siblings at any depth", () => {
+    const original = tree();
+    expect(navigationTarget(original, "d", "up")).toBe("b");
+    expect(navigationTarget(original, "b", "down")).toBe("d");
+    expect(navigationTarget(original, "b", "up")).toBeUndefined();
+    expect(navigationTarget(original, "d", "down")).toBeUndefined();
+    expect(navigationTarget(original, "a", "down")).toBe("e");
+    expect(navigationTarget(original, "e", "up")).toBe("a");
+    expect(navigationTarget(original, "a", "up")).toBeUndefined();
+    expect(navigationTarget(original, "e", "down")).toBeUndefined();
+    expect(navigationTarget(original, "c", "up")).toBeUndefined();
+    expect(navigationTarget(original, "c", "down")).toBeUndefined();
+  });
+
+  test("unknown ids have no target", () => {
+    const original = tree();
+    for (const direction of ["left", "right", "up", "down"] as const) {
+      expect(navigationTarget(original, "missing", direction)).toBeUndefined();
+    }
   });
 });
 

@@ -12,6 +12,7 @@ import {
   deleteNode,
   insertSibling,
   layoutMindMap,
+  navigationTarget,
   NODE_MIN_HEIGHT,
   reorderNode,
   translateSubtree,
@@ -34,6 +35,14 @@ import type {
   NodePosition,
   NodeSize,
 } from "./mind-map";
+
+const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
+  new Map([
+    ["ArrowLeft", "left"],
+    ["ArrowRight", "right"],
+    ["ArrowUp", "up"],
+    ["ArrowDown", "down"],
+  ]);
 
 function NodeEditor(props: {
   text: string;
@@ -575,6 +584,7 @@ export function App() {
         (e.target instanceof Element && e.target.closest("[data-toolbar]"))
       )
         return;
+      const arrow = ARROW_DIRECTIONS.get(e.key);
       if (
         !e.shiftKey &&
         !e.ctrlKey &&
@@ -606,6 +616,16 @@ export function App() {
           reorderNode(current, selectedId()!, e.key === "ArrowUp" ? -1 : 1),
         );
         history.record(before, nodes());
+      } else if (
+        arrow &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey
+      ) {
+        e.preventDefault();
+        const target = navigationTarget(nodes(), selectedId()!, arrow);
+        if (target) setSelectedId(target);
       } else if (e.key === "F2") {
         e.preventDefault();
         write(selectedId()!);

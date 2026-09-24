@@ -169,6 +169,37 @@ export function findNode(
   }
 }
 
+// Arrow-key navigation: right to the first child, left to the parent, up/down
+// to adjacent siblings. Undefined when that relative does not exist.
+export function navigationTarget(
+  nodes: MindMapNode[],
+  id: string,
+  direction: "left" | "right" | "up" | "down",
+): string | undefined {
+  function search(
+    branch: MindMapNode[],
+    parent?: MindMapNode,
+  ): { hit: boolean; target?: string } {
+    const index = branch.findIndex((node) => node.id === id);
+    if (index !== -1) {
+      if (direction === "right")
+        return { hit: true, target: branch[index].next?.[0]?.id };
+      if (direction === "left") return { hit: true, target: parent?.id };
+      return {
+        hit: true,
+        target: branch[index + (direction === "up" ? -1 : 1)]?.id,
+      };
+    }
+    for (const node of branch) {
+      if (!node.next) continue;
+      const result = search(node.next, node);
+      if (result.hit) return result;
+    }
+    return { hit: false };
+  }
+  return search(nodes).target;
+}
+
 export function insertSibling(
   nodes: MindMapNode[],
   id: string,
