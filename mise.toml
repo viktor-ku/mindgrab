@@ -1,3 +1,7 @@
+[tasks.golive]
+description = "Make origin/live reference current local main"
+run = "git push --force-with-lease origin main:live"
+
 [tasks.db]
 description = "Start local Postgres"
 run = "docker compose up -d postgres"
