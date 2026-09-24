@@ -19,7 +19,12 @@ import {
 } from "./mind-map";
 import { createHistory } from "./history";
 import type { MapSnapshot } from "./history";
-import { listProjects, loadProject, saveProject } from "./projects";
+import {
+  listProjects,
+  loadLatestProject,
+  loadProject,
+  saveProject,
+} from "./projects";
 import type { Project } from "./projects";
 import type {
   LayoutAnchor,
@@ -470,6 +475,18 @@ export function App() {
   }
 
   onMount(() => {
+    try {
+      const project = loadLatestProject(window.localStorage);
+      if (project) {
+        replaceProject(project);
+        setStorageMessage(`Loaded “${project.name}”.`);
+      }
+    } catch {
+      setStorageMessage(
+        "Could not restore the latest project. It may be missing, damaged, or unavailable.",
+      );
+    }
+
     const keydown = (e: KeyboardEvent) => {
       if (
         e.isComposing ||

@@ -9,6 +9,16 @@ export interface Project {
 }
 
 const PREFIX = "proj/";
+const LATEST_PROJECT_KEY = "mindgrab/latest-project";
+
+function rememberProject(storage: Storage, key: string) {
+  try {
+    storage.setItem(LATEST_PROJECT_KEY, key);
+  } catch {
+    // A failed preference write must not prevent saving or opening a project.
+  }
+}
+
 const finite = (value: unknown): value is number =>
   typeof value === "number" && Number.isFinite(value);
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -68,6 +78,7 @@ export function saveProject(storage: Storage, project: Project): string {
   const name = project.name.trim() || "Untitled project";
   const key = PREFIX + name;
   storage.setItem(key, JSON.stringify({ ...project, name }, null, 2));
+  rememberProject(storage, key);
   return name;
 }
 
@@ -84,5 +95,12 @@ export function loadProject(storage: Storage, key: string): Project {
   if (!key.startsWith(PREFIX)) throw new Error("Invalid project key.");
   const json = storage.getItem(key);
   if (json === null) throw new Error("This saved project no longer exists.");
-  return parseProject(json);
+  const project = parseProject(json);
+  rememberProject(storage, key);
+  return project;
+}
+
+export function loadLatestProject(storage: Storage): Project | undefined {
+  const key = storage.getItem(LATEST_PROJECT_KEY);
+  return key === null ? undefined : loadProject(storage, key);
 }
