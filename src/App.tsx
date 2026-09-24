@@ -151,6 +151,19 @@ export function App() {
   const [savedKeys, setSavedKeys] = createSignal<string[]>([]);
   const [showLoad, setShowLoad] = createSignal(false);
   const [storageMessage, setStorageMessage] = createSignal("");
+  const [saveStatus, setSaveStatus] = createSignal<"" | "saving" | "done">("");
+  let saveTimer: number | undefined;
+  let saveStatusTimer: number | undefined;
+
+  function clearSaveStatus() {
+    window.clearTimeout(saveTimer);
+    window.clearTimeout(saveStatusTimer);
+    saveTimer = undefined;
+    saveStatusTimer = undefined;
+    setSaveStatus("");
+  }
+
+  onCleanup(clearSaveStatus);
   const [nodes, setNodes] = createSignal<MindMapNode[]>([
     { id: crypto.randomUUID(), text: "New idea" },
   ]);
@@ -190,6 +203,7 @@ export function App() {
   let editSnapshot: MapSnapshot | undefined;
 
   function replaceProject(project?: Project) {
+    clearSaveStatus();
     finishWriting();
     if (pointer) {
       const id = pointer.id;
@@ -218,26 +232,40 @@ export function App() {
   }
 
   function save() {
+    if (saveStatus() === "saving") return;
     finishWriting();
-    try {
-      const name = saveProject(window.localStorage, {
-        version: 1,
-        name: projectName(),
-        nodes: nodes(),
-        anchor: layoutAnchor(),
-        view: { left: left(), top: top(), zoom: zoom() },
-      });
-      setProjectName(name);
-      setShowLoad(false);
-      setStorageMessage(`Saved “${name}” in this browser.`);
-    } catch {
-      setStorageMessage(
-        "Could not save. Browser storage may be full or unavailable.",
-      );
-    }
+    clearSaveStatus();
+    const project: Project = {
+      version: 1,
+      name: projectName(),
+      nodes: nodes(),
+      anchor: layoutAnchor(),
+      view: { left: left(), top: top(), zoom: zoom() },
+    };
+    setStorageMessage("");
+    setShowLoad(false);
+    setSaveStatus("saving");
+
+    // Give the status time to paint without relying on animation frames,
+    // which can pause when the page is in the background.
+    saveTimer = window.setTimeout(() => {
+      saveTimer = undefined;
+      try {
+        const name = saveProject(window.localStorage, project);
+        if (projectName() === project.name) setProjectName(name);
+        setSaveStatus("done");
+        saveStatusTimer = window.setTimeout(clearSaveStatus, 1500);
+      } catch {
+        setSaveStatus("");
+        setStorageMessage(
+          "Could not save. Browser storage may be full or unavailable.",
+        );
+      }
+    }, 50);
   }
 
   function openLoad() {
+    clearSaveStatus();
     finishWriting();
     try {
       setSavedKeys(listProjects(window.localStorage));
@@ -576,6 +604,7 @@ export function App() {
         <fieldset
           class="flex items-center text-sm"
           aria-label="Project actions"
+          disabled={saveStatus() === "saving"}
         >
           <button
             type="button"
@@ -601,6 +630,13 @@ export function App() {
           >
             Load
           </button>
+          <span role="status" class="ml-auto px-2 text-xs text-stone-500">
+            {saveStatus() === "saving"
+              ? "Saving…"
+              : saveStatus() === "done"
+                ? "Done"
+                : ""}
+          </span>
         </fieldset>
         <Show when={showLoad()}>
           <div id="saved-projects" class="border-t border-stone-200 pt-2">
