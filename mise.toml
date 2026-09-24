@@ -1,0 +1,47 @@
+[tasks.db]
+description = "Start local Postgres"
+run = "docker compose up -d postgres"
+
+[tasks."server:dev"]
+description = "Run the API server"
+run = "mise -C server exec -- cargo run"
+
+[tasks."server:test"]
+description = "Run server tests against local Postgres"
+run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test"
+
+[tasks."server:fmt"]
+description = "Check Rust formatting"
+run = "mise -C server exec -- cargo fmt --check"
+
+[tasks."server:clippy"]
+description = "Lint the server with warnings as errors"
+run = "mise -C server exec -- cargo clippy --all-targets -- -D warnings"
+
+[tasks."server:check"]
+description = "Run server formatting, lint, and tests"
+depends = ["server:fmt", "server:clippy", "server:test"]
+
+[tasks."webapp:dev"]
+description = "Run the Vite dev server"
+dir = "webapp"
+run = "bun --bun run dev"
+
+[tasks."webapp:test"]
+description = "Run webapp tests"
+dir = "webapp"
+run = "bun --bun test"
+
+[tasks."webapp:build"]
+description = "Build the webapp"
+dir = "webapp"
+run = "bun --bun run build"
+
+[tasks."webapp:check"]
+description = "Run webapp lint, formatting, and type checks"
+dir = "webapp"
+run = "bun --bun run check"
+
+[tasks.check]
+description = "Run all server and webapp checks"
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:build"]

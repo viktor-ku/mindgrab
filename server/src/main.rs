@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod health;
 mod workos;
 
 use std::{sync::Arc, time::Duration};
@@ -42,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let workos = workos::WorkOs::new(&config)?;
+    let health = health::router(pool.clone());
     let state = Arc::new(auth::AppState {
         config,
         pool,
@@ -49,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let app = Router::new()
         .route("/", get(|| async { "Mindgrab API" }))
+        .merge(health)
         .merge(auth::router(state));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Mindgrab API listening on http://localhost:3000");
