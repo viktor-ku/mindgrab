@@ -27,6 +27,7 @@ import {
 } from "./projects";
 import type { Project } from "./projects";
 import { generateProjectName } from "./project-names";
+import { AccountControls } from "./AccountControls";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -295,6 +296,27 @@ export function App() {
         );
       }
     }, 50);
+  }
+
+  function saveBeforeAuth() {
+    finishWriting();
+    finishProjectName();
+    clearSaveStatus();
+    try {
+      saveProject(window.localStorage, {
+        version: 1,
+        name: projectName(),
+        nodes: nodes(),
+        anchor: layoutAnchor(),
+        view: { left: left(), top: top(), zoom: zoom() },
+      });
+      return true;
+    } catch {
+      setStorageMessage(
+        "Could not save your project before leaving. Free up browser storage and try again.",
+      );
+      return false;
+    }
   }
 
   function openLoad() {
@@ -717,6 +739,7 @@ export function App() {
         <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
           {storageMessage()}
         </p>
+        <AccountControls beforeNavigate={saveBeforeAuth} />
       </div>
       <div
         class="absolute w-full h-full origin-top-left"

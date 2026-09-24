@@ -1,67 +1,57 @@
-use axum::{
-    Json, Router,
-    http::StatusCode,
-    routing::{get, post},
-};
-use serde::{Deserialize, Serialize};
+mod auth;
+mod config;
+mod workos;
+
+use std::{sync::Arc, time::Duration};
+
+use axum::{Router, routing::get};
+use config::Config;
+use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
-async fn main() {
-    // initialize tracing
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Searches parent directories; process environment takes precedence.
+    match dotenvy::dotenv() {
+        Ok(_) => {}
+        Err(error) if error.not_found() => {}
+        Err(_) => return Err("Could not parse .env".into()),
+    }
     tracing_subscriber::fmt::init();
+    let config = Config::from_env()?;
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&config.database_url)
+        .await?;
+    sqlx::migrate!().run(&pool).await?;
 
-    // build our application with a route
+    let cleanup_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            for query in [
+                "DELETE FROM auth_sessions WHERE expires_at <= NOW()",
+                "DELETE FROM auth_login_attempts WHERE expires_at <= NOW()",
+            ] {
+                if sqlx::query(query).execute(&cleanup_pool).await.is_err() {
+                    eprintln!("Could not clean up expired authentication records");
+                }
+            }
+        }
+    });
+
+    let workos = workos::WorkOs::new(&config)?;
+    let state = Arc::new(auth::AppState {
+        config,
+        pool,
+        workos,
+    });
     let app = Router::new()
-        // `GET /` goes to `root`
-        .route("/", get(root))
-        // `GET /api/me` goes to `current_user`
-        .route("/api/me", get(current_user))
-        // `POST /users` goes to `create_user`
-        .route("/users", post(create_user));
-
-    // run our app with hyper, listening globally on port 3000
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await;
-}
-
-// basic handler that responds with a static string
-async fn root() -> &'static str {
-    "Hello, World!"
-}
-
-// Authentication is not wired up yet, so this returns the server's placeholder user.
-async fn current_user() -> Json<User> {
-    Json(User {
-        id: 1337,
-        username: "current-user".to_owned(),
-    })
-}
-
-async fn create_user(
-    // this argument tells axum to parse the request body
-    // as JSON into a `CreateUser` type
-    Json(payload): Json<CreateUser>,
-) -> (StatusCode, Json<User>) {
-    // insert your application logic here
-    let user = User {
-        id: 1337,
-        username: payload.username,
-    };
-
-    // this will be converted into a JSON response
-    // with a status code of `201 Created`
-    (StatusCode::CREATED, Json(user))
-}
-
-// the input to our `create_user` handler
-#[derive(Deserialize)]
-struct CreateUser {
-    username: String,
-}
-
-// the output to our `create_user` handler
-#[derive(Serialize)]
-struct User {
-    id: u64,
-    username: String,
+        .route("/", get(|| async { "Mindgrab API" }))
+        .merge(auth::router(state));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    println!("Mindgrab API listening on http://localhost:3000");
+    axum::serve(listener, app).await?;
+    Ok(())
 }
