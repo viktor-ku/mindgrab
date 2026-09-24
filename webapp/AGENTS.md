@@ -1,0 +1,2 @@
+- use `bun --bun` for running things instead of node or npm
+- prefer git rebase over merge when getting the fresh branch

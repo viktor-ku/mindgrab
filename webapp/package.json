@@ -1,0 +1,34 @@
+{
+  "name": "mindgrab",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "bun test",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint:ts": "tsc -b",
+    "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts",
+    "prepare": "bun --bun run simple-git-hooks"
+  },
+  "dependencies": {
+    "solid-js": "=1.9.15"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@tailwindcss/vite": "=4.3.3",
+    "@types/bun": "=1.4.2",
+    "simple-git-hooks": "2.14.0",
+    "tailwindcss": "=4.3.3",
+    "typescript": "=7.0.2",
+    "vite": "=8.3.0",
+    "vite-plugin-solid": "=2.11.14"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "bun --bun run check"
+  }
+}
