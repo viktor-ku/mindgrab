@@ -14,6 +14,8 @@ async fn main() {
     let app = Router::new()
         // `GET /` goes to `root`
         .route("/", get(root))
+        // `GET /api/me` goes to `current_user`
+        .route("/api/me", get(current_user))
         // `POST /users` goes to `create_user`
         .route("/users", post(create_user));
 
@@ -25,6 +27,14 @@ async fn main() {
 // basic handler that responds with a static string
 async fn root() -> &'static str {
     "Hello, World!"
+}
+
+// Authentication is not wired up yet, so this returns the server's placeholder user.
+async fn current_user() -> Json<User> {
+    Json(User {
+        id: 1337,
+        username: "current-user".to_owned(),
+    })
 }
 
 async fn create_user(
