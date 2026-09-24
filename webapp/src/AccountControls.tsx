@@ -1,4 +1,5 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { backendEndpoint } from "./backend";
 
 type User = {
   id: number;
@@ -19,8 +20,8 @@ export function AccountControls(props: { beforeNavigate: () => boolean }) {
     if (checking) return;
     checking = true;
     try {
-      const response = await fetch("/api/me", {
-        credentials: "same-origin",
+      const response = await fetch(backendEndpoint("/api/me"), {
+        credentials: "include",
         cache: "no-store",
       });
       if (response.status !== 401 && !response.ok) throw new Error();
@@ -75,7 +76,7 @@ export function AccountControls(props: { beforeNavigate: () => boolean }) {
           fallback={
             <a
               class="map-control block"
-              href="/api/auth/login"
+              href={backendEndpoint("/api/auth/login")}
               onClick={(event) => {
                 if (!props.beforeNavigate()) event.preventDefault();
               }}
@@ -94,7 +95,7 @@ export function AccountControls(props: { beforeNavigate: () => boolean }) {
               </span>
               <form
                 method="post"
-                action="/api/auth/logout"
+                action={backendEndpoint("/api/auth/logout")}
                 onSubmit={(event) => {
                   if (!props.beforeNavigate()) event.preventDefault();
                 }}

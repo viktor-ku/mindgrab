@@ -25,11 +25,14 @@ SolidJS mind maps with a Rust/Axum API and WorkOS AuthKit login.
 4. In a second terminal:
 
    ```sh
+   cp webapp/.env.example webapp/.env
    (cd webapp && bun --bun install)
    mise run webapp:dev
    ```
 
-   Open **http://localhost:5173**. Vite proxies `/api` to Axum. Use this exact
+   Open **http://localhost:5173**. Vite proxies `/api` to `VITE_BACKEND_URL`
+   from `webapp/.env` (locally `http://localhost:3000`). Restart Vite after
+   changing this value. Use this exact
    hostname so the callback, cookies, and logout origin match. The dev server
    refuses to switch ports if 5173 is occupied.
 
@@ -76,6 +79,11 @@ header reports the time spent on the database check. The response never
 includes connection details or error messages.
 
 ## Deployment
+
+`VITE_BACKEND_URL` sets the backend base URL at build time for account and
+health requests. Leave it empty for the same-origin reverse proxy setup below.
+An external backend origin must allow credentialed CORS requests from the webapp
+and expose `Server-Timing` for health latency calculations.
 
 Use HTTPS and serve the frontend and `/api` on the same origin through a reverse
 proxy. Client-side routes such as `/checkhealth` must fall back to `index.html`. Set `DATABASE_URL`, the WorkOS credentials, `APP_URL` (the root URL), and
