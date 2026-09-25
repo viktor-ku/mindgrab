@@ -10,7 +10,7 @@ Use this skill when an agent needs an authenticated session in the locally runni
 ## Requirements
 
 - The local API and webapp must be running. The webapp is expected at `http://localhost:5173` and proxies `/api` to the API at `http://localhost:3000`.
-- Root `.env` must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, and `webapp/.env` should set `VITE_BACKEND_URL=http://localhost:3000`.
+- The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `webapp/.env` should set `VITE_BACKEND_URL=http://localhost:3000`.
 - The WorkOS application must allow these local URLs:
   - Redirect URI: `http://localhost:5173/api/auth/callback`
   - Initiate login URI: `http://localhost:5173/api/auth/login`
@@ -24,22 +24,25 @@ Do not print, copy into chat, or include secret values from `.env` in tool outpu
 
 The user has authorized this skill to use the following WorkOS staging account for local Mindgrab sign-in:
 
-- Email: `boba.tee@example.com`
+- Email: `boba.tee@mindgrab.test`
 - Password: `qMT]DP[[pFm56[Pk`
 
-Enter these only into the expected WorkOS AuthKit sign-in form reached by clicking **Sign in** from `http://localhost:5173`. Do not echo them in chat, logs, shell commands, screenshots, or other files. If the account is rejected or the page is not clearly the configured WorkOS AuthKit flow, stop and report the issue; do not try the password elsewhere or repeatedly retry it.
+This is a real password user in the configured WorkOS staging environment, with an already verified test email. Its WorkOS user ID is `user_01M3D7HX2KDTKS1SQXA8KWMX15`. The reserved `.test` domain receives no email; use password sign-in, not email codes or password-reset emails.
+
+Enter the credentials only into the expected WorkOS AuthKit sign-in form reached by clicking **Sign in** from `http://localhost:5173`. This staging application's hosted form is on `pleased-myth-32-staging.authkit.app`. Do not echo the password in chat, logs, shell commands, screenshots, or other files. If the account is rejected or the page is not clearly the configured WorkOS AuthKit flow, stop and report the issue; do not try the password elsewhere or repeatedly retry it.
 
 ## Procedure
 
 1. Check whether the local app is already running at `http://localhost:5173`. If it is not, inspect the existing process and project setup before starting anything. Follow the repository README to configure and start Postgres, the API, and Vite. Avoid launching duplicate servers. Restart Vite if `VITE_BACKEND_URL` was changed.
 2. Use the available collaborative/browser preview for this workspace when present. Open exactly `http://localhost:5173` (use `localhost`, not `127.0.0.1`, so the callback and cookie origin match).
 3. If the UI shows **Sign in**, click it. If it already shows an account name or email, the current browser session is signed in; skip to verification.
-4. Complete the hosted WorkOS AuthKit prompts in that browser. Use the account in **Local development account** through the normal UI. If a password manager, MFA challenge, email verification, CAPTCHA, or other step requires the user, leave that step for them and clearly explain what action is needed. Do not ask the user to paste one-time codes, recovery codes, or session cookies into chat.
+4. Complete the hosted WorkOS AuthKit prompts in that browser. Enter the email from **Local development account**, click **Continue with email**, then enter its password and click **Sign in**. If a password manager, MFA challenge, email verification, CAPTCHA, or other step requires the user, leave that step for them and clearly explain what action is needed. Do not ask the user to paste one-time codes, recovery codes, or session cookies into chat.
 5. Wait for the callback to return to `http://localhost:5173/`. A successful callback sets the local HttpOnly cookie and returns to Mindgrab.
 6. Verify that the account controls show the signed-in user's name or email. If browser tools support same-origin page requests, `GET http://localhost:5173/api/me` in that same browser context should return `200` with basic user fields (`id`, `name`, `email`, `external_id`). Do not verify with a separate `curl`/HTTP client: it will not share the browser cookie. Do not read or export the cookie value.
 
 ## Troubleshooting
 
+- **Preview opens but inspection times out:** Check preview status and retry. If the tab remains unavailable, open a fresh collaborative tab with `reuseExistingTab=false`, then start sign-in from the local app in that tab.
 - **Cannot connect / API unavailable:** Confirm Postgres, the Rust API on port 3000, and Vite on port 5173 are running. Check `/checkhealth` in the local app for API and database reachability.
 - **Sign-in did not complete:** Check the browser stayed on `localhost:5173`, and confirm the WorkOS redirect URI exactly matches `http://localhost:5173/api/auth/callback`. Restart by returning to the app and clicking **Sign in** again; login state is short-lived and one-use.
 - **Sign-in temporarily unavailable:** Check that the API can reach WorkOS and that Postgres is available. Retry after the underlying service recovers.

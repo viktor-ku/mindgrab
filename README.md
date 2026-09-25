@@ -41,6 +41,12 @@ SolidJS mind maps with a Rust/Axum API and WorkOS AuthKit login.
 
 ## Authentication
 
+For agent browser sign-in, use the repository's
+[local sign-in skill](.agents/skills/mindgrab-local-signin/SKILL.md). Its staging
+password user is `boba.tee@mindgrab.test`, with a preverified test email. Complete
+the hosted password flow in the browser the agent uses, then verify that
+`/api/me` returns `200` in that browser session.
+
 - `GET /api/auth/login` starts AuthKit with a browser-bound, one-use state and
   PKCE. Login attempts expire after 10 minutes.
 - `GET /api/auth/callback` exchanges the code, verifies the access token, upserts
