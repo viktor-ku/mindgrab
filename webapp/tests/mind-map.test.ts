@@ -233,6 +233,24 @@ describe("layout stability", () => {
     ).toEqual(before);
   });
 
+  test("adding a root keeps existing trees in place and leaves room between them", () => {
+    const original = tree();
+    const before = layoutMindMap(original);
+    const firstRoot = nodeAt(before, "a");
+    const after = layoutMindMap(
+      [...original, { id: "new-root", text: "New idea" }],
+      new Map(),
+      { id: firstRoot.id, centerY: centerY(firstRoot) },
+    );
+
+    for (const node of before.nodes) {
+      expect(nodeAt(after, node.id)).toEqual(node);
+    }
+    expect(nodeAt(after, "new-root").y).toBeGreaterThanOrEqual(
+      nodeAt(after, "e").y + nodeAt(after, "e").height + 24,
+    );
+  });
+
   test("dragging an anchored parent takes precedence and leaves other branches in place", () => {
     const original = tree();
     const before = layoutMindMap(original);

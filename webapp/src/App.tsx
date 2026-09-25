@@ -712,6 +712,19 @@ export function App() {
         return;
       }
       if (
+        !selectedId() &&
+        e.key === "Enter" &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey &&
+        !(e.target instanceof Element && e.target.closest("[data-toolbar]"))
+      ) {
+        e.preventDefault();
+        add("root");
+        return;
+      }
+      if (
         !selectedId() ||
         (e.target instanceof Element && e.target.closest("[data-toolbar]"))
       )
