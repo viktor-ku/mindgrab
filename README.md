@@ -21,7 +21,10 @@ SolidJS mind maps with a Rust/Axum API and WorkOS AuthKit login.
    mise run server:dev
    ```
 
-   The server applies database migrations automatically and listens on port 3000.
+   The server applies database migrations automatically and then inserts the
+   local Boba Tee profile when both the app URL and `DATABASE_URL` point to
+   loopback and the `mindgrab` database. Existing users are left unchanged.
+   This seeds only the user profile; sign-in still goes through WorkOS AuthKit.
 4. In a second terminal:
 
    ```sh
