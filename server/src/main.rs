@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod health;
+mod local_seed;
 mod workos;
 
 use std::{sync::Arc, time::Duration};
@@ -26,6 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&config.database_url)
         .await?;
     sqlx::migrate!().run(&pool).await?;
+    if config.is_local() {
+        if local_seed::is_local_mindgrab_database(&config.database_url) {
+            local_seed::seed_user(&pool).await?;
+        } else {
+            eprintln!("Skipping local development user seed: DATABASE_URL is not a loopback mindgrab database");
+        }
+    }
 
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {
