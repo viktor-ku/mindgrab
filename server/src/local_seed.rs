@@ -2,8 +2,8 @@ use reqwest::Url;
 use sqlx::PgPool;
 
 const USER_NAME: &str = "Boba Tee";
-const USER_EMAIL: &str = "boba.tee@example.com";
-const EXTERNAL_ID: &str = "user_01M3D5S1S2TBPA6RFH9Z8PBBW5";
+const USER_EMAIL: &str = "boba.tee@mindgrab.test";
+const EXTERNAL_ID: &str = "user_01M3D7HX2KDTKS1SQXA8KWMX15";
 
 pub(crate) fn is_local_mindgrab_database(database_url: &str) -> bool {
     let Ok(url) = Url::parse(database_url) else {
