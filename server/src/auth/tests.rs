@@ -1,5 +1,6 @@
 use super::*;
 use axum::body::{Body, to_bytes};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use std::sync::{
@@ -120,6 +121,27 @@ async fn request(
         .unwrap()
 }
 
+async fn request_json(
+    f: &Fixture,
+    method: &str,
+    path: &str,
+    cookies: &str,
+    body: Value,
+) -> Response {
+    router(f.state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::COOKIE, cookies)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 fn response_cookie(response: &Response, name: &str) -> String {
     response
         .headers()
@@ -206,6 +228,135 @@ async fn anonymous_and_forged_sessions_are_rejected(pool: PgPool) {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
+}
+
+#[sqlx::test]
+async fn project_api_requires_authentication_and_scopes_records_to_each_user(pool: PgPool) {
+    let f = fixture(pool).await;
+    let project_payload = std::env::var("PROJECT_SYNC_PAYLOAD_B64")
+        .ok()
+        .and_then(|value| STANDARD.decode(value).ok())
+        .and_then(|value| serde_json::from_slice::<Value>(&value).ok())
+        .unwrap_or_else(|| {
+            let mut node = Value::Null;
+            for depth in (1..=10).rev() {
+                let mut current =
+                    json!({"id":format!("node-{depth}"), "text":format!("Depth {depth}")});
+                if !node.is_null() {
+                    current["next"] = json!([node]);
+                }
+                node = current;
+            }
+            json!({
+                "name":"Ten deep",
+                "state":{"version":1, "nodes":[node], "view":{"left":0, "top":0, "zoom":1}}
+            })
+        });
+    let project_name = project_payload["name"].as_str().unwrap();
+    let project_state = project_payload["state"].clone();
+    let mut depth = 0;
+    let mut node = &project_state["nodes"][0];
+    while !node.is_null() {
+        depth += 1;
+        node = &node["next"][0];
+    }
+    assert_eq!(depth, 10);
+
+    let anonymous_read = request(&f, "GET", "/api/projects", "", None).await;
+    assert_eq!(anonymous_read.status(), StatusCode::UNAUTHORIZED);
+    let anonymous_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        "",
+        json!({"name":"Private", "state":{"value":"anonymous"}}),
+    )
+    .await;
+    assert_eq!(anonymous_write.status(), StatusCode::UNAUTHORIZED);
+
+    let first_cookie = sign_in(&f).await;
+    let invalid_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        &first_cookie,
+        json!({"name":"  ", "state":{}}),
+    )
+    .await;
+    assert_eq!(invalid_write.status(), StatusCode::BAD_REQUEST);
+    let first_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        &first_cookie,
+        json!({"name":project_name, "state":project_state}),
+    )
+    .await;
+    assert_eq!(first_write.status(), StatusCode::OK);
+
+    let second_user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (name, email, external_id) VALUES ('Other', 'other@example.com', 'other_user') RETURNING id",
+    )
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    let second_token = "second-user-session";
+    let second_access = signed_token(
+        jsonwebtoken::get_current_timestamp() + 3600,
+        json!({"sub":"other_user", "sid":"other_session"}),
+    );
+    sqlx::query("INSERT INTO auth_sessions (token_hash, user_id, workos_session_id, access_token, refresh_token) VALUES ($1, $2, $3, $4, 'refresh')")
+        .bind(token_hash(second_token))
+        .bind(second_user_id)
+        .bind("other_session")
+        .bind(second_access)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let second_cookie = format!("{SESSION_COOKIE}={second_token}");
+
+    let first_projects = request(&f, "GET", "/api/projects", &first_cookie, None).await;
+    assert_eq!(first_projects.status(), StatusCode::OK);
+    let first_body = to_bytes(first_projects.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_projects: Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_projects.as_array().unwrap().len(), 1);
+    assert_eq!(first_projects[0]["name"], project_name);
+    assert_eq!(first_projects[0]["state"], project_state);
+    assert!(first_projects[0]["updated_at"].as_str().is_some());
+
+    let database_state: Value = sqlx::query_scalar(
+        "SELECT state FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')",
+    )
+    .bind(project_name)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(database_state, project_state);
+
+    let second_read = request(&f, "GET", "/api/projects", &second_cookie, None).await;
+    assert_eq!(second_read.status(), StatusCode::OK);
+    let second_body = to_bytes(second_read.into_body(), usize::MAX).await.unwrap();
+    let second_projects: Value = serde_json::from_slice(&second_body).unwrap();
+    assert_eq!(second_projects, json!([]));
+
+    let second_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        &second_cookie,
+        json!({"name":project_name, "state":{"value":"second user"}}),
+    )
+    .await;
+    assert_eq!(second_write.status(), StatusCode::OK);
+
+    let first_projects = request(&f, "GET", "/api/projects", &first_cookie, None).await;
+    let first_body = to_bytes(first_projects.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let first_projects: Value = serde_json::from_slice(&first_body).unwrap();
+    assert_eq!(first_projects[0]["state"], project_state);
 }
 
 #[sqlx::test]

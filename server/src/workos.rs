@@ -10,6 +10,7 @@ use crate::config::Config;
 
 #[derive(Debug, PartialEq)]
 pub enum AuthError {
+    BadRequest,
     Unauthorized,
     Unavailable,
 }

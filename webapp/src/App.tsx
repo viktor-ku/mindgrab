@@ -24,11 +24,15 @@ import {
   listProjects,
   loadLatestProject,
   loadProject,
+  projectUpdatedAt,
   saveProject,
+  userProjectStorage,
 } from "./projects";
 import type { Project } from "./projects";
 import { generateProjectName } from "./project-names";
 import { AccountControls } from "./AccountControls";
+import type { User } from "./AccountControls";
+import { syncProjects, uploadProject } from "./project-sync";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -163,11 +167,133 @@ function Node(props: {
 }
 
 export function App() {
+  const [signedIn, setSignedIn] = createSignal(false);
+  const cachedUserKey = "mindgrab/cached-user-id";
+  const anonymousOwnerKey = "mindgrab/anonymous-projects-owner";
+  let activeProjectStorage: Storage = window.localStorage;
+  let activeUserId: number | undefined;
+  try {
+    const cachedUserId = Number(window.localStorage.getItem(cachedUserKey));
+    if (Number.isSafeInteger(cachedUserId) && cachedUserId > 0) {
+      activeProjectStorage = userProjectStorage(
+        window.localStorage,
+        cachedUserId,
+      );
+      activeUserId = cachedUserId;
+      setSignedIn(true);
+    }
+  } catch {
+    // Continue with browser storage when account-scoped storage is unavailable.
+  }
+
+  function projectStorage() {
+    return activeProjectStorage;
+  }
+
+  let projectSync: Promise<void> | undefined;
+
+  function syncCloudProjects() {
+    if (projectSync) return projectSync;
+    let restoreFromStorage = false;
+    const activeBefore = currentProject();
+    let activeWasSaved = false;
+    try {
+      restoreFromStorage = !loadLatestProject(projectStorage());
+      activeWasSaved =
+        JSON.stringify(
+          loadProject(projectStorage(), `proj/${activeBefore.name}`),
+        ) === JSON.stringify(activeBefore);
+    } catch {
+      restoreFromStorage = true;
+    }
+    projectSync = syncProjects(projectStorage())
+      .then((changedNames) => {
+        if (restoreFromStorage) {
+          const latest = loadLatestProject(projectStorage());
+          if (latest) replaceProject(latest);
+        } else if (
+          activeWasSaved &&
+          changedNames.includes(activeBefore.name) &&
+          JSON.stringify(currentProject()) === JSON.stringify(activeBefore)
+        ) {
+          const updated = loadProject(
+            projectStorage(),
+            `proj/${activeBefore.name}`,
+          );
+          replaceProject(updated);
+        }
+        setStorageMessage("");
+      })
+      .catch(() => {
+        setStorageMessage(
+          "Saved in this browser. Cloud sync will retry on your next save or when you return to the app.",
+        );
+      })
+      .finally(() => {
+        projectSync = undefined;
+      });
+    return projectSync;
+  }
+
+  function accountChanged(user: User | undefined) {
+    setSignedIn(Boolean(user));
+    if (!user) {
+      activeProjectStorage = window.localStorage;
+      activeUserId = undefined;
+      try {
+        window.localStorage.removeItem(cachedUserKey);
+        const latest = loadLatestProject(window.localStorage);
+        if (latest) replaceProject(latest);
+      } catch {
+        // Keep the current canvas if local storage is unavailable.
+      }
+      return;
+    }
+
+    const userChanged = activeUserId !== user.id;
+    const accountStorage = userProjectStorage(window.localStorage, user.id);
+    try {
+      window.localStorage.setItem(cachedUserKey, String(user.id));
+      if (!window.localStorage.getItem(anonymousOwnerKey)) {
+        const anonymousProjects = listProjects(window.localStorage).map((key) =>
+          loadProject(window.localStorage, key),
+        );
+        for (const project of anonymousProjects) {
+          if (!accountStorage.getItem(`proj/${project.name}`)) {
+            saveProject(
+              accountStorage,
+              project,
+              projectUpdatedAt(window.localStorage, project.name) ??
+                new Date().toISOString(),
+              false,
+            );
+          }
+        }
+        const latest = loadLatestProject(window.localStorage);
+        if (latest) saveProject(accountStorage, latest);
+        window.localStorage.setItem(anonymousOwnerKey, String(user.id));
+      }
+      activeProjectStorage = accountStorage;
+      activeUserId = user.id;
+      if (userChanged) {
+        const latest = loadLatestProject(accountStorage);
+        replaceProject(latest);
+      }
+    } catch {
+      activeProjectStorage = accountStorage;
+      activeUserId = user.id;
+      setStorageMessage(
+        "Could not prepare account storage. Your current project remains available in this browser.",
+      );
+    }
+    void syncCloudProjects();
+  }
+
   function newProjectName(previousName?: string) {
     const used = previousName ? [previousName] : [];
     try {
       used.push(
-        ...listProjects(window.localStorage).map((key) =>
+        ...listProjects(projectStorage()).map((key) =>
           key.slice("proj/".length),
         ),
       );
@@ -270,18 +396,22 @@ export function App() {
     setProjectNameDraft(name);
   }
 
-  function save() {
-    if (saveStatus() === "saving") return;
-    finishWriting();
-    finishProjectName();
-    clearSaveStatus();
-    const project: Project = {
+  function currentProject(): Project {
+    return {
       version: 1,
       name: projectName(),
       nodes: nodes(),
       anchor: layoutAnchor(),
       view: { left: left(), top: top(), zoom: zoom() },
     };
+  }
+
+  function save() {
+    if (saveStatus() === "saving") return;
+    finishWriting();
+    finishProjectName();
+    clearSaveStatus();
+    const project = currentProject();
     setStorageMessage("");
     setShowLoad(false);
     setSaveStatus("saving");
@@ -291,10 +421,17 @@ export function App() {
     saveTimer = window.setTimeout(() => {
       saveTimer = undefined;
       try {
-        const name = saveProject(window.localStorage, project);
+        const name = saveProject(projectStorage(), project);
         if (projectName() === project.name) {
           setProjectName(name);
           setProjectNameDraft(name);
+        }
+        if (signedIn()) {
+          void uploadProject(projectStorage(), { ...project, name }).catch(() =>
+            setStorageMessage(
+              "Saved in this browser. Cloud sync will retry on your next save or when you return to the app.",
+            ),
+          );
         }
         setSaveStatus("done");
         saveStatusTimer = window.setTimeout(clearSaveStatus, 1500);
@@ -312,13 +449,7 @@ export function App() {
     finishProjectName();
     clearSaveStatus();
     try {
-      saveProject(window.localStorage, {
-        version: 1,
-        name: projectName(),
-        nodes: nodes(),
-        anchor: layoutAnchor(),
-        view: { left: left(), top: top(), zoom: zoom() },
-      });
+      saveProject(projectStorage(), currentProject());
       return true;
     } catch {
       setStorageMessage(
@@ -332,7 +463,7 @@ export function App() {
     clearSaveStatus();
     finishWriting();
     try {
-      setSavedKeys(listProjects(window.localStorage));
+      setSavedKeys(listProjects(projectStorage()));
       setStorageMessage("");
       setShowLoad(true);
     } catch {
@@ -344,7 +475,7 @@ export function App() {
 
   function load(key: string) {
     try {
-      const project = loadProject(window.localStorage, key);
+      const project = loadProject(projectStorage(), key);
       replaceProject(project);
       setStorageMessage(`Loaded “${project.name}”.`);
     } catch {
@@ -535,7 +666,7 @@ export function App() {
 
   onMount(() => {
     try {
-      const project = loadLatestProject(window.localStorage);
+      const project = loadLatestProject(projectStorage());
       if (project) {
         replaceProject(project);
         setStorageMessage(`Loaded “${project.name}”.`);
@@ -725,7 +856,7 @@ export function App() {
             {saveStatus() === "saving"
               ? "Saving…"
               : saveStatus() === "done"
-                ? "Done"
+                ? "Saved locally"
                 : ""}
           </span>
         </fieldset>
@@ -759,7 +890,10 @@ export function App() {
         <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
           {storageMessage()}
         </p>
-        <AccountControls beforeNavigate={saveBeforeAuth} />
+        <AccountControls
+          beforeNavigate={saveBeforeAuth}
+          onUser={accountChanged}
+        />
       </div>
       <div
         class="absolute w-full h-full origin-top-left"

@@ -11,6 +11,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -35,6 +36,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/auth/callback", get(callback))
         .route("/api/auth/logout", post(logout))
         .route("/api/me", get(current_user))
+        .route("/api/projects", get(list_projects).put(save_project))
         .layer(middleware::from_fn(private_response))
         .with_state(state)
 }
@@ -53,6 +55,7 @@ async fn private_response(request: Request, next: Next) -> Response {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid project."),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "Sign in to continue."),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -143,6 +146,7 @@ async fn callback(
             .into_response(),
         Err(error) => {
             let code = match error {
+                AuthError::BadRequest => "sign_in_failed",
                 AuthError::Unauthorized => "sign_in_failed",
                 AuthError::Unavailable => "unavailable",
             };
@@ -280,6 +284,54 @@ async fn authenticated_user(state: &AppState, jar: &CookieJar) -> Result<User, A
     // Preserve sessions on transient provider failures; no stale token is accepted.
     tx.commit().await?;
     result
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct ProjectRecord {
+    name: String,
+    state: Value,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct SaveProject {
+    name: String,
+    state: Value,
+}
+
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Result<Json<Vec<ProjectRecord>>, AuthError> {
+    let user = authenticated_user(&state, &jar).await?;
+    let projects = sqlx::query_as::<_, ProjectRecord>(
+        "SELECT name, state, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at FROM project WHERE user_id = $1 ORDER BY name",
+    )
+    .bind(user.id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(projects))
+}
+
+async fn save_project(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Json(project): Json<SaveProject>,
+) -> Result<Json<ProjectRecord>, AuthError> {
+    let user = authenticated_user(&state, &jar).await?;
+    let name = project.name.trim();
+    if name.is_empty() || name.len() > 200 {
+        return Err(AuthError::BadRequest);
+    }
+    let saved = sqlx::query_as::<_, ProjectRecord>(
+        "INSERT INTO project (user_id, name, state) VALUES ($1, $2, $3) ON CONFLICT (user_id, name) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW() RETURNING name, state, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at",
+    )
+    .bind(user.id)
+    .bind(name)
+    .bind(project.state)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(saved))
 }
 
 async fn validate_session(

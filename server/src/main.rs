@@ -81,7 +81,11 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
     Ok(CorsLayer::new()
         .allow_origin(origin)
         .allow_credentials(!local)
-        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+        ])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
         .expose_headers([HeaderName::from_static("server-timing")]))
 }
