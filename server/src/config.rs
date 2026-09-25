@@ -49,6 +49,13 @@ impl Config {
     pub fn origin(&self) -> String {
         self.app_url.trim_end_matches('/').to_owned()
     }
+
+    pub fn is_local(&self) -> bool {
+        Url::parse(&self.app_url)
+            .ok()
+            .and_then(|app| app.host_str().map(is_loopback))
+            .unwrap_or(false)
+    }
 }
 
 pub(crate) fn default_issuer(client_id: &str) -> String {
@@ -57,7 +64,7 @@ pub(crate) fn default_issuer(client_id: &str) -> String {
 
 fn validate_url(value: &str) -> Result<Url, String> {
     let url = Url::parse(value).map_err(|_| "Invalid authentication URL")?;
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    let local = url.host_str().is_some_and(is_loopback);
     if !(url.scheme() == "https" || (url.scheme() == "http" && local))
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -68,6 +75,10 @@ fn validate_url(value: &str) -> Result<Url, String> {
         return Err("Authentication URLs require HTTPS (HTTP is allowed on loopback only), with no credentials, query, or fragment".into());
     }
     Ok(url)
+}
+
+fn is_loopback(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
 #[cfg(test)]
@@ -98,5 +109,36 @@ mod tests {
         ] {
             assert!(validate_url(url).is_err());
         }
+    }
+
+    #[test]
+    fn app_url_identifies_loopback_development() {
+        for app_url in [
+            "http://localhost:5173/",
+            "http://127.0.0.1:5173/",
+            "http://[::1]:5173/",
+        ] {
+            let config = Config {
+                database_url: String::new(),
+                client_id: String::new(),
+                api_key: String::new(),
+                redirect_uri: String::new(),
+                app_url: app_url.to_owned(),
+                issuer: String::new(),
+                secure_cookies: false,
+            };
+            assert!(config.is_local(), "{app_url}");
+        }
+
+        let production = Config {
+            database_url: String::new(),
+            client_id: String::new(),
+            api_key: String::new(),
+            redirect_uri: String::new(),
+            app_url: "https://mindgrab.example/".to_owned(),
+            issuer: String::new(),
+            secure_cookies: true,
+        };
+        assert!(!production.is_local());
     }
 }
