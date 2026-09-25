@@ -31,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if local_seed::is_local_mindgrab_database(&config.database_url) {
             local_seed::seed_user(&pool).await?;
         } else {
-            eprintln!("Skipping local development user seed: DATABASE_URL is not a loopback mindgrab database");
+            eprintln!(
+                "Skipping local development user seed: DATABASE_URL is not a loopback mindgrab database"
+            );
         }
     }
 
