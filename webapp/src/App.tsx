@@ -7,6 +7,7 @@ import {
   onMount,
   Show,
 } from "solid-js";
+import { createShortcut } from "@solid-primitives/keyboard";
 import {
   connectionPath,
   deleteNode,
@@ -772,6 +773,22 @@ export function App() {
       if (!pointer)
         changeZoom(zoom() * Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
     };
+    const saveShortcut = (event: KeyboardEvent | null) => {
+      if (
+        !event ||
+        event.isComposing ||
+        writing() ||
+        (event.target instanceof Element &&
+          event.target.closest("textarea, input, [contenteditable=true]"))
+      )
+        return;
+      event.preventDefault();
+      save();
+    };
+    // Let the callback decide whether the target accepts text before suppressing
+    // the browser's native save dialog.
+    createShortcut(["Control", "S"], saveShortcut, { preventDefault: false });
+    createShortcut(["Meta", "S"], saveShortcut, { preventDefault: false });
     window.addEventListener("keydown", keydown);
     window.addEventListener("pointerup", stopOutside);
     canvas.addEventListener("wheel", wheel, { passive: false });
