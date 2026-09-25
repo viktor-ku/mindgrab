@@ -1,14 +1,17 @@
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
 
-type User = {
+export type User = {
   id: number;
   name: string;
   email: string;
   external_id: string;
 };
 
-export function AccountControls(props: { beforeNavigate: () => boolean }) {
+export function AccountControls(props: {
+  beforeNavigate: () => boolean;
+  onUser: (user: User | undefined) => void;
+}) {
   const [user, setUser] = createSignal<User>();
   const [loading, setLoading] = createSignal(true);
   const [message, setMessage] = createSignal("");
@@ -29,6 +32,7 @@ export function AccountControls(props: { beforeNavigate: () => boolean }) {
         response.status === 401 ? undefined : await response.json();
       if (disposed) return;
       setUser(current);
+      props.onUser(current);
       if (failed()) setMessage("");
       setFailed(false);
     } catch {

@@ -69,10 +69,12 @@ row lock; rotated refresh tokens are persisted before returning. Transient
 refresh failures receive one bounded retry and preserve the session. Expired
 records are cleaned up hourly.
 
-Projects remain in browser `localStorage`. They are saved before auth redirects
-and restored on return. They are not yet synced or scoped to an account; switching
-accounts in the same browser uses the same local projects. Future project APIs
-must enforce ownership on the server using the authenticated local user ID.
+Projects are saved in browser `localStorage` first and restored from there on
+startup. When signed in, saved projects also sync to the `project` table. Cloud
+records are scoped to the authenticated local user ID, and the API never accepts
+an owner ID from the browser. Projects downloaded from the cloud are copied to
+`localStorage`, so they remain available if the server is temporarily unavailable.
+The project name is stored separately from its JSONB state and is unique per user.
 
 ## Health check
 

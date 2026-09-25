@@ -5,6 +5,7 @@ import {
   loadProject,
   parseProject,
   saveProject,
+  userProjectStorage,
   type Project,
 } from "../src/projects";
 
@@ -126,7 +127,7 @@ test("restores the most recently saved or opened project from storage", () => {
 
 test("remembers normalized names and the latest saved contents", () => {
   const local = storage();
-  saveProject(local, { ...project, name: "  " });
+  saveProject(local, { ...project, name: "  Untitled project  " });
   expect(loadLatestProject(local)?.name).toBe("Untitled project");
   saveProject(local, { ...project, name: "  Plans  " });
   saveProject(local, { ...project, name: "Plans", nodes: [] });
@@ -159,6 +160,21 @@ test("preference write failures do not prevent saving or loading project data", 
   };
   expect(saveProject(local, project)).toBe(project.name);
   expect(loadProject(local, "proj/My ideas")).toEqual(project);
+});
+
+test("account project storage keeps each user's projects and latest choice separate", () => {
+  const local = storage();
+  const alice = userProjectStorage(local, 1);
+  const bob = userProjectStorage(local, 2);
+  saveProject(alice, project);
+  saveProject(bob, { ...project, name: "My ideas", nodes: [] });
+
+  expect(loadProject(alice, "proj/My ideas")).toEqual(project);
+  expect(loadProject(bob, "proj/My ideas").nodes).toEqual([]);
+  expect(loadProject(alice, "proj/My ideas").nodes).not.toEqual(
+    loadProject(bob, "proj/My ideas").nodes,
+  );
+  expect(local.length).toBeGreaterThan(alice.length);
 });
 
 test("missing or corrupt latest projects and unavailable storage report failure", () => {
