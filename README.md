@@ -74,7 +74,11 @@ startup. When signed in, saved projects also sync to the `project` table. Cloud
 records are scoped to the authenticated local user ID, and the API never accepts
 an owner ID from the browser. Projects downloaded from the cloud are copied to
 `localStorage`, so they remain available if the server is temporarily unavailable.
-The project name is stored separately from its JSONB state and is unique per user.
+Project names and canvas view settings are stored on the `project` row; each map
+node is stored in `pnode` with its text, layout position, sibling order, and an
+optional parent node. The API rebuilds the nested project state from those rows,
+and the migration converts existing JSONB project trees before removing the old
+`state` column. Project names remain unique per user.
 
 ## Health check
 

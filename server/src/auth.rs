@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -11,7 +14,7 @@ use axum::{
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -286,11 +289,50 @@ async fn authenticated_user(state: &AppState, jar: &CookieJar) -> Result<User, A
     result
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize)]
 struct ProjectRecord {
     name: String,
     state: Value,
     updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct ProjectState {
+    version: u8,
+    nodes: Vec<ProjectNode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    anchor: Option<ProjectAnchor>,
+    view: ProjectView,
+}
+
+#[derive(Deserialize)]
+struct ProjectNode {
+    id: String,
+    text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    position: Option<NodePosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next: Option<Vec<ProjectNode>>,
+}
+
+#[derive(Deserialize)]
+struct NodePosition {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+struct ProjectAnchor {
+    id: String,
+    #[serde(rename = "centerY")]
+    center_y: f64,
+}
+
+#[derive(Deserialize)]
+struct ProjectView {
+    left: f64,
+    top: f64,
+    zoom: f64,
 }
 
 #[derive(Deserialize)]
@@ -299,18 +341,47 @@ struct SaveProject {
     state: Value,
 }
 
+#[derive(sqlx::FromRow)]
+struct StoredProject {
+    id: i64,
+    name: String,
+    view_left: f64,
+    view_top: f64,
+    view_zoom: f64,
+    anchor_pnode_id: Option<String>,
+    anchor_center_y: Option<f64>,
+    updated_at: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct StoredPNode {
+    project_id: i64,
+    id: String,
+    text: String,
+    sort_order: i64,
+    position_x: Option<f64>,
+    position_y: Option<f64>,
+    parent_pnode_id: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SavedProject {
+    id: i64,
+    updated_at: String,
+}
+
+struct NewPNode<'a> {
+    node: &'a ProjectNode,
+    parent_pnode_id: Option<&'a str>,
+    sort_order: i64,
+}
+
 async fn list_projects(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<Vec<ProjectRecord>>, AuthError> {
     let user = authenticated_user(&state, &jar).await?;
-    let projects = sqlx::query_as::<_, ProjectRecord>(
-        "SELECT name, state, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at FROM project WHERE user_id = $1 ORDER BY name",
-    )
-    .bind(user.id)
-    .fetch_all(&state.pool)
-    .await?;
-    Ok(Json(projects))
+    Ok(Json(load_projects(&state.pool, user.id).await?))
 }
 
 async fn save_project(
@@ -323,15 +394,219 @@ async fn save_project(
     if name.is_empty() || name.len() > 200 {
         return Err(AuthError::BadRequest);
     }
-    let saved = sqlx::query_as::<_, ProjectRecord>(
-        "INSERT INTO project (user_id, name, state) VALUES ($1, $2, $3) ON CONFLICT (user_id, name) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW() RETURNING name, state, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at",
+    let state_value = project.state;
+    let project_state: ProjectState =
+        serde_json::from_value(state_value.clone()).map_err(|_| AuthError::BadRequest)?;
+    if !valid_project_state(&project_state) {
+        return Err(AuthError::BadRequest);
+    }
+
+    let mut new_nodes = Vec::new();
+    flatten_pnodes(&project_state.nodes, None, &mut new_nodes);
+    let node_ids = new_nodes
+        .iter()
+        .map(|entry| entry.node.id.clone())
+        .collect::<Vec<_>>();
+    let anchor_id = project_state
+        .anchor
+        .as_ref()
+        .map(|anchor| anchor.id.as_str());
+    let anchor_center_y = project_state.anchor.as_ref().map(|anchor| anchor.center_y);
+
+    let mut tx = state.pool.begin().await?;
+    let saved: SavedProject = sqlx::query_as(
+        "INSERT INTO project (user_id, name, view_left, view_top, view_zoom, anchor_pnode_id, anchor_center_y) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (user_id, name) DO UPDATE SET view_left = EXCLUDED.view_left, view_top = EXCLUDED.view_top, view_zoom = EXCLUDED.view_zoom, anchor_pnode_id = EXCLUDED.anchor_pnode_id, anchor_center_y = EXCLUDED.anchor_center_y, updated_at = NOW() RETURNING id, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at",
     )
     .bind(user.id)
     .bind(name)
-    .bind(project.state)
-    .fetch_one(&state.pool)
+    .bind(project_state.view.left)
+    .bind(project_state.view.top)
+    .bind(project_state.view.zoom)
+    .bind(anchor_id)
+    .bind(anchor_center_y)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(Json(saved))
+
+    for entry in &new_nodes {
+        let position_x = entry.node.position.as_ref().map(|position| position.x);
+        let position_y = entry.node.position.as_ref().map(|position| position.y);
+        sqlx::query(
+            "INSERT INTO pnode (id, user_id, project_id, text, parent_pnode_id, sort_order, position_x, position_y) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, id) DO UPDATE SET text = EXCLUDED.text, parent_pnode_id = EXCLUDED.parent_pnode_id, sort_order = EXCLUDED.sort_order, position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, updated_at = NOW()",
+        )
+        .bind(&entry.node.id)
+        .bind(user.id)
+        .bind(saved.id)
+        .bind(&entry.node.text)
+        .bind(entry.parent_pnode_id)
+        .bind(entry.sort_order)
+        .bind(position_x)
+        .bind(position_y)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query("DELETE FROM pnode WHERE project_id = $1 AND id <> ALL($2)")
+        .bind(saved.id)
+        .bind(node_ids)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    Ok(Json(ProjectRecord {
+        name: name.to_owned(),
+        state: state_value,
+        updated_at: saved.updated_at,
+    }))
+}
+
+async fn load_projects(pool: &PgPool, user_id: i64) -> Result<Vec<ProjectRecord>, AuthError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let projects = sqlx::query_as::<_, StoredProject>(
+        "SELECT id, name, view_left, view_top, view_zoom, anchor_pnode_id, anchor_center_y, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at FROM project WHERE user_id = $1 ORDER BY name",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let pnodes = sqlx::query_as::<_, StoredPNode>(
+        "SELECT project_id, id, text, sort_order, position_x, position_y, parent_pnode_id FROM pnode WHERE user_id = $1 ORDER BY project_id, parent_pnode_id NULLS FIRST, sort_order, id",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let mut pnodes_by_project = HashMap::<i64, Vec<StoredPNode>>::new();
+    for pnode in pnodes {
+        pnodes_by_project
+            .entry(pnode.project_id)
+            .or_default()
+            .push(pnode);
+    }
+    Ok(projects
+        .into_iter()
+        .map(|project| {
+            let pnodes = pnodes_by_project.remove(&project.id).unwrap_or_default();
+            project_record(project, pnodes)
+        })
+        .collect())
+}
+
+fn project_record(project: StoredProject, pnodes: Vec<StoredPNode>) -> ProjectRecord {
+    let mut children_by_parent = HashMap::<Option<String>, Vec<StoredPNode>>::new();
+    for pnode in pnodes {
+        children_by_parent
+            .entry(pnode.parent_pnode_id.clone())
+            .or_default()
+            .push(pnode);
+    }
+    let mut roots = children_by_parent.remove(&None).unwrap_or_default();
+    roots.sort_by_key(|pnode| (pnode.sort_order, pnode.id.clone()));
+    let nodes: Vec<Value> = roots
+        .into_iter()
+        .map(|root| project_node_value(root, &mut children_by_parent))
+        .collect();
+    let mut state = json!({
+        "version": 1,
+        "nodes": nodes,
+        "view": {
+            "left": json_number(project.view_left),
+            "top": json_number(project.view_top),
+            "zoom": json_number(project.view_zoom),
+        },
+    });
+    if let Some((id, center_y)) = project.anchor_pnode_id.zip(project.anchor_center_y) {
+        state["anchor"] = json!({"id": id, "centerY": json_number(center_y)});
+    }
+
+    ProjectRecord {
+        name: project.name,
+        state,
+        updated_at: project.updated_at,
+    }
+}
+
+fn project_node_value(
+    pnode: StoredPNode,
+    children_by_parent: &mut HashMap<Option<String>, Vec<StoredPNode>>,
+) -> Value {
+    let mut children = children_by_parent
+        .remove(&Some(pnode.id.clone()))
+        .unwrap_or_default();
+    children.sort_by_key(|pnode| (pnode.sort_order, pnode.id.clone()));
+    let next = children
+        .into_iter()
+        .map(|child| project_node_value(child, children_by_parent))
+        .collect::<Vec<_>>();
+    let position = pnode
+        .position_x
+        .zip(pnode.position_y)
+        .map(|(x, y)| json!({"x": json_number(x), "y": json_number(y)}));
+    let mut node = json!({"id": pnode.id, "text": pnode.text});
+    if let Some(position) = position {
+        node["position"] = position;
+    }
+    if !next.is_empty() {
+        node["next"] = Value::Array(next);
+    }
+    node
+}
+
+fn json_number(value: f64) -> Value {
+    if value.fract() == 0.0 && value >= i64::MIN as f64 && value < i64::MAX as f64 {
+        Value::from(value as i64)
+    } else {
+        Value::from(value)
+    }
+}
+
+fn valid_project_state(state: &ProjectState) -> bool {
+    state.version == 1
+        && state.view.left.is_finite()
+        && state.view.top.is_finite()
+        && state.view.zoom.is_finite()
+        && (0.25..=2.5).contains(&state.view.zoom)
+        && state
+            .anchor
+            .as_ref()
+            .is_none_or(|anchor| anchor.center_y.is_finite())
+        && valid_pnodes(&state.nodes, 0, &mut HashSet::new())
+}
+
+fn valid_pnodes<'a>(nodes: &'a [ProjectNode], depth: usize, ids: &mut HashSet<&'a str>) -> bool {
+    if depth >= 100 {
+        return false;
+    }
+    nodes.iter().all(|node| {
+        !node.id.is_empty()
+            && ids.insert(&node.id)
+            && node
+                .position
+                .as_ref()
+                .is_none_or(|position| position.x.is_finite() && position.y.is_finite())
+            && valid_pnodes(node.next.as_deref().unwrap_or_default(), depth + 1, ids)
+    })
+}
+
+fn flatten_pnodes<'a>(
+    nodes: &'a [ProjectNode],
+    parent_pnode_id: Option<&'a str>,
+    flattened: &mut Vec<NewPNode<'a>>,
+) {
+    for (sort_order, node) in nodes.iter().enumerate() {
+        flattened.push(NewPNode {
+            node,
+            parent_pnode_id,
+            sort_order: sort_order as i64,
+        });
+        flatten_pnodes(
+            node.next.as_deref().unwrap_or_default(),
+            Some(&node.id),
+            flattened,
+        );
+    }
 }
 
 async fn validate_session(
