@@ -12,11 +12,13 @@ import { createShortcut } from "@solid-primitives/keyboard";
 import {
   connectionPath,
   deleteNode,
+  findNode,
   insertSibling,
   layoutMindMap,
   navigationTarget,
   NODE_MIN_HEIGHT,
   reorderNode,
+  setNodeColor,
   translateSubtree,
   updateNode,
 } from "./mind-map";
@@ -31,6 +33,8 @@ import {
   userProjectStorage,
 } from "./projects";
 import type { Project } from "./projects";
+import { NODE_COLORS } from "./node-colors";
+import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
 import { AccountControls } from "./AccountControls";
 import type { User } from "./AccountControls";
@@ -107,6 +111,7 @@ function NodeEditor(props: {
 function Node(props: {
   id: string;
   text: string;
+  color?: NodeColor;
   x: number;
   y: number;
   selected: boolean;
@@ -120,6 +125,9 @@ function Node(props: {
   onTextChange: (text: string) => void;
 }) {
   let container!: HTMLDivElement;
+  const color = () =>
+    NODE_COLORS.find((option) => option.value === props.color) ??
+    NODE_COLORS[0];
   onMount(() => {
     const observer = new ResizeObserver(([entry]) => {
       // Layout sizes stay in canvas units even when the viewport is zoomed.
@@ -135,7 +143,7 @@ function Node(props: {
     // biome-ignore lint/a11y/noStaticElementInteractions: The wrapper handles pointer dragging and bubbled clicks from its button.
     <div
       ref={container}
-      class="bg-blue-300 text-blue-950 border border-blue-500 rounded-sm shadow-sm/10 cursor-pointer px-2.5 py-0.75 select-none absolute grid items-center box-border w-max max-w-40 leading-6"
+      class={`border rounded-sm shadow-sm/10 cursor-pointer px-2.5 py-0.75 select-none absolute grid items-center box-border w-max max-w-40 leading-6 ${color().nodeClass}`}
       classList={{
         "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200":
           props.selected,
@@ -341,6 +349,7 @@ export function App() {
     { id: crypto.randomUUID(), text: "New idea" },
   ]);
   const [selectedId, setSelectedId] = createSignal<string>();
+  const [colorScope, setColorScope] = createSignal<"node" | "branch">("node");
   const [writing, setWriting] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<
     ContextMenuState | undefined
@@ -353,6 +362,10 @@ export function App() {
   const positionedNodes = createMemo(
     () => new Map(layout().nodes.map((node) => [node.id, node])),
   );
+  const selectedNode = createMemo(() => {
+    const id = selectedId();
+    return id ? findNode(nodes(), id) : undefined;
+  });
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
   const [top, setTop] = createSignal(0);
@@ -398,6 +411,7 @@ export function App() {
         project?.nodes ?? [{ id: crypto.randomUUID(), text: "New idea" }],
       );
       setSelectedId(undefined);
+      setColorScope("node");
       setNodeSizes(new Map());
       setLayoutAnchor(project?.anchor);
       setLeft(project?.view.left ?? 0);
@@ -528,7 +542,10 @@ export function App() {
 
   function select(id: string) {
     if (suppressClick) return;
-    if (selectedId() !== id) finishWriting();
+    if (selectedId() !== id) {
+      finishWriting();
+      setColorScope("node");
+    }
     setSelectedId(id);
   }
 
@@ -543,6 +560,7 @@ export function App() {
   function write(id: string) {
     if (writing() && selectedId() === id) return;
     finishWriting();
+    if (selectedId() !== id) setColorScope("node");
     setSelectedId(id);
     editSnapshot = snapshot();
     setWriting(true);
@@ -633,6 +651,7 @@ export function App() {
     finishWriting();
     const before = snapshot();
     setSelectedId(undefined);
+    setColorScope("node");
     setNodes((current) => deleteNode(current, id));
     history.record(before, nodes());
     setNodeSizes(
@@ -640,6 +659,16 @@ export function App() {
         new Map([...current].filter(([key]) => nodeIds().includes(key))),
     );
     canvas.focus({ preventScroll: true });
+  }
+
+  function colorSelectedNode(color: NodeColor) {
+    const id = selectedId();
+    if (!id || writing()) return;
+    const before = snapshot();
+    setNodes((current) =>
+      setNodeColor(current, id, color, colorScope() === "branch"),
+    );
+    history.record(before, nodes());
   }
 
   function changeZoom(value: number, clientX?: number, clientY?: number) {
@@ -772,6 +801,7 @@ export function App() {
           if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
         }
         setSelectedId(undefined);
+        setColorScope("node");
         canvas.focus({ preventScroll: true });
         return;
       }
@@ -845,7 +875,10 @@ export function App() {
       ) {
         e.preventDefault();
         const target = navigationTarget(nodes(), selectedId()!, arrow);
-        if (target) setSelectedId(target);
+        if (target) {
+          setColorScope("node");
+          setSelectedId(target);
+        }
       } else if (e.key === "F2") {
         e.preventDefault();
         write(selectedId()!);
@@ -1019,6 +1052,103 @@ export function App() {
           onUser={accountChanged}
         />
       </div>
+      <Show when={selectedId() && !writing()}>
+        <section
+          data-no-pan
+          data-toolbar
+          aria-label="Selected node color controls"
+          class="node-color-panel map-toolbar absolute top-4 right-4 z-20 flex flex-col gap-2 cursor-default"
+        >
+          <div class="px-2 pt-1">
+            <p class="text-xs font-medium text-stone-500">Node color</p>
+            <p class="max-w-60 truncate text-sm font-semibold text-stone-800">
+              {selectedNode()?.text || "New idea"}
+            </p>
+          </div>
+          <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
+            <legend class="sr-only">Apply color to</legend>
+            <label
+              class="color-scope"
+              classList={{ "color-scope-selected": colorScope() === "node" }}
+            >
+              <input
+                class="sr-only"
+                type="radio"
+                name="node-color-scope"
+                value="node"
+                checked={colorScope() === "node"}
+                onChange={() => setColorScope("node")}
+              />
+              <span>This node</span>
+            </label>
+            <label
+              class="color-scope"
+              classList={{
+                "color-scope-selected": colorScope() === "branch",
+              }}
+            >
+              <input
+                class="sr-only"
+                type="radio"
+                name="node-color-scope"
+                value="branch"
+                checked={colorScope() === "branch"}
+                onChange={() => setColorScope("branch")}
+              />
+              <span>This branch</span>
+            </label>
+          </fieldset>
+          <fieldset class="grid grid-cols-4 gap-1 px-1 pb-1">
+            <legend class="sr-only">
+              Choose a color for{" "}
+              {colorScope() === "node" ? "this node" : "this branch"}
+            </legend>
+            <For each={NODE_COLORS}>
+              {(color) => (
+                <button
+                  type="button"
+                  class="color-choice"
+                  aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
+                  aria-pressed={
+                    (selectedNode()?.color ?? "blue") === color.value
+                  }
+                  title={`${color.label} · ${colorScope() === "node" ? "This node" : "This branch"}`}
+                  onClick={() => colorSelectedNode(color.value)}
+                >
+                  <span
+                    aria-hidden="true"
+                    class={`grid size-8 place-items-center rounded-full border-2 ${color.swatchClass}`}
+                  >
+                    <Show
+                      when={(selectedNode()?.color ?? "blue") === color.value}
+                    >
+                      <svg
+                        viewBox="0 0 20 20"
+                        fill="none"
+                        class="size-4 text-slate-950"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="m4 10 4 4 8-8"
+                          stroke="currentColor"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2.5"
+                        />
+                      </svg>
+                    </Show>
+                  </span>
+                </button>
+              )}
+            </For>
+          </fieldset>
+          <p class="px-2 pb-1 text-xs text-stone-500">
+            {colorScope() === "node"
+              ? "Changes only the selected node."
+              : "Changes this node and all its descendants."}
+          </p>
+        </section>
+      </Show>
       <div
         class="absolute w-full h-full origin-top-left"
         style={{
@@ -1048,6 +1178,7 @@ export function App() {
               <Node
                 id={id}
                 text={node().text}
+                color={node().color}
                 x={node().x}
                 y={node().y}
                 selected={selectedId() === id}

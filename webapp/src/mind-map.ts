@@ -1,6 +1,9 @@
+import type { NodeColor } from "./node-colors";
+
 export interface MindMapNode {
   id: string;
   text: string;
+  color?: NodeColor;
   position?: NodePosition;
   next?: MindMapNode[];
 }
@@ -24,6 +27,7 @@ export interface NodeSize {
 interface PositionedNode extends NodeSize {
   id: string;
   text: string;
+  color?: NodeColor;
   x: number;
   y: number;
 }
@@ -78,6 +82,7 @@ export function layoutMindMap(
     const positioned = {
       id: node.id,
       text: node.text,
+      color: node.color,
       x,
       y,
       ...node.position,
@@ -148,6 +153,27 @@ export function updateNode(
         ? { ...node, next: updateNode(node.next, id, update) }
         : node,
   );
+}
+
+export function setNodeColor(
+  nodes: MindMapNode[],
+  id: string,
+  color: NodeColor,
+  includeDescendants = false,
+): MindMapNode[] {
+  function colorBranch(branch: MindMapNode[]): MindMapNode[] {
+    return branch.map((node) => ({
+      ...node,
+      color,
+      ...(node.next && { next: colorBranch(node.next) }),
+    }));
+  }
+
+  return updateNode(nodes, id, (node) => ({
+    ...node,
+    color,
+    ...(includeDescendants && node.next && { next: colorBranch(node.next) }),
+  }));
 }
 
 export function deleteNode(nodes: MindMapNode[], id: string): MindMapNode[] {
