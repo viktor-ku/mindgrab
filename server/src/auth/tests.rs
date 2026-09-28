@@ -274,6 +274,8 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     }
     let mut next_node_id = 0;
     assign_test_uuids(&mut project_state["nodes"], &mut next_node_id);
+    project_state["nodes"][0]["color"] = json!("rose");
+    project_state["nodes"][0]["next"][0]["color"] = json!("teal");
     project_state["anchor"] = json!({"id":project_state["nodes"][0]["id"], "centerY":20});
     let mut depth = 0;
     let mut node = &project_state["nodes"][0];
@@ -301,6 +303,22 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
         .as_array_mut()
         .unwrap()
         .push(json!({"id":sibling_id.clone(), "text":"Round trip sibling"}));
+    fn add_default_colors(nodes: &mut Value) {
+        let Some(nodes) = nodes.as_array_mut() else {
+            return;
+        };
+        for node in nodes {
+            node.as_object_mut()
+                .unwrap()
+                .entry("color")
+                .or_insert_with(|| json!("blue"));
+            if let Some(children) = node.get_mut("next") {
+                add_default_colors(children);
+            }
+        }
+    }
+    let mut expected_project_state = project_state.clone();
+    add_default_colors(&mut expected_project_state["nodes"]);
     fn count_nodes(nodes: &Value) -> usize {
         nodes.as_array().map_or(0, |nodes| {
             nodes
@@ -356,6 +374,17 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     )
     .await;
     assert_eq!(invalid_node_id_write.status(), StatusCode::BAD_REQUEST);
+    let mut invalid_color_state = project_state.clone();
+    invalid_color_state["nodes"][0]["color"] = json!("magenta");
+    let invalid_node_color_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        &first_cookie,
+        json!({"name":"Invalid color", "state":invalid_color_state}),
+    )
+    .await;
+    assert_eq!(invalid_node_color_write.status(), StatusCode::BAD_REQUEST);
     let first_write = request_json(
         &f,
         "PUT",
@@ -395,7 +424,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     let first_projects: Value = serde_json::from_slice(&first_body).unwrap();
     assert_eq!(first_projects.as_array().unwrap().len(), 1);
     assert_eq!(first_projects[0]["name"], project_name);
-    assert_eq!(first_projects[0]["state"], project_state);
+    assert_eq!(first_projects[0]["state"], expected_project_state);
     assert!(first_projects[0]["updated_at"].as_str().is_some());
 
     let database_node_count: i64 = sqlx::query_scalar(
@@ -406,6 +435,27 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .await
     .unwrap();
     assert_eq!(database_node_count as usize, expected_node_count);
+    let (database_root_color, database_child_color): (String, String) =
+        sqlx::query_as(
+            "SELECT (SELECT color FROM pnode WHERE project_id = project.id AND id::TEXT = $2), (SELECT color FROM pnode WHERE project_id = project.id AND id::TEXT = $3) FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')",
+        )
+        .bind(project_name)
+        .bind(root_id)
+        .bind(child_id)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(database_root_color, "rose");
+    assert_eq!(database_child_color, "teal");
+    let database_default_color: String = sqlx::query_scalar(
+        "SELECT color FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id::TEXT = $2",
+    )
+    .bind(project_name)
+    .bind(sibling_id)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_eq!(database_default_color, "blue");
     let database_parent: Option<String> = sqlx::query_scalar(
         "SELECT parent.id::TEXT FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.id::TEXT = $2",
     )
@@ -491,11 +541,11 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
         .await
         .unwrap();
     let first_projects: Value = serde_json::from_slice(&first_body).unwrap();
-    assert_eq!(first_projects[0]["state"], project_state);
+    assert_eq!(first_projects[0]["state"], expected_project_state);
 }
 
 #[sqlx::test]
-async fn pnode_migration_preserves_existing_state_without_backfill(pool: PgPool) {
+async fn pnode_migrations_preserve_existing_state_without_backfill(pool: PgPool) {
     let mut connection = pool.acquire().await.unwrap();
     sqlx::query("CREATE SCHEMA min25_migration_test")
         .execute(&mut *connection)
@@ -544,8 +594,13 @@ async fn pnode_migration_preserves_existing_state_without_backfill(pool: PgPool)
         .await
         .unwrap();
 
+    sqlx::raw_sql(include_str!("../../migrations/0005_pnode_colors.sql"))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+
     let pnode_id_types: Vec<(String, String)> = sqlx::query_as(
-        "SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pnode' AND column_name IN ('id', 'parent_pnode_id') ORDER BY column_name",
+        "SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pnode' AND column_name IN ('color', 'id', 'parent_pnode_id') ORDER BY column_name",
     )
     .fetch_all(&mut *connection)
     .await
@@ -553,10 +608,18 @@ async fn pnode_migration_preserves_existing_state_without_backfill(pool: PgPool)
     assert_eq!(
         pnode_id_types,
         vec![
+            ("color".into(), "text".into()),
             ("id".into(), "uuid".into()),
             ("parent_pnode_id".into(), "uuid".into())
         ]
     );
+    let color_is_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pnode' AND column_name = 'color'",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(color_is_nullable, "NO");
 
     let migrated_state: Value =
         sqlx::query_scalar("SELECT state FROM project WHERE name = 'Existing map'")
