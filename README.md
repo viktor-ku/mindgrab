@@ -76,9 +76,9 @@ an owner ID from the browser. Projects downloaded from the cloud are copied to
 `localStorage`, so they remain available if the server is temporarily unavailable.
 Project names and project-level canvas data, including the view and layout
 anchor, are stored in the `project.state` JSONB value. Each map node is stored
-in `pnode` with a generated BIGINT key, its client-generated ID, text, layout
-position, sibling order, and an optional parent node. The API rebuilds the
-nested project state from those rows while preserving client-generated IDs. The
+in `pnode` with its client-generated UUID as a native UUID primary key, text,
+layout position, sibling order, and an optional UUID parent node. The API
+rebuilds the nested project state from those rows while preserving node IDs. The
 migration keeps project state intact and starts the `pnode` table empty; there
 is no existing user data to backfill. Project names remain unique per user.
 

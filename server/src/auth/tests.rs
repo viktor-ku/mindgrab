@@ -254,6 +254,26 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
         });
     let project_name = project_payload["name"].as_str().unwrap();
     let mut project_state = project_payload["state"].clone();
+    fn assign_test_uuids(nodes: &mut Value, next_id: &mut u128) {
+        let Some(nodes) = nodes.as_array_mut() else {
+            return;
+        };
+        for node in nodes {
+            *next_id += 1;
+            node["id"] = json!(format!("00000000-0000-4000-8000-{:012x}", *next_id));
+            let has_children = node
+                .get("next")
+                .and_then(Value::as_array)
+                .is_some_and(|children| !children.is_empty());
+            if has_children {
+                assign_test_uuids(&mut node["next"], next_id);
+            } else if let Some(object) = node.as_object_mut() {
+                object.remove("next");
+            }
+        }
+    }
+    let mut next_node_id = 0;
+    assign_test_uuids(&mut project_state["nodes"], &mut next_node_id);
     project_state["anchor"] = json!({"id":project_state["nodes"][0]["id"], "centerY":20});
     let mut depth = 0;
     let mut node = &project_state["nodes"][0];
@@ -269,9 +289,11 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
                 .any(|node| node["id"].as_str() == Some(id) || has_node_id(&node["next"], id))
         })
     }
-    let mut sibling_id = "min25-roundtrip-sibling".to_owned();
+    let mut sibling_counter = next_node_id + 1;
+    let mut sibling_id = format!("00000000-0000-4000-8000-{sibling_counter:012x}");
     while has_node_id(&project_state["nodes"], &sibling_id) {
-        sibling_id.push('_');
+        sibling_counter += 1;
+        sibling_id = format!("00000000-0000-4000-8000-{sibling_counter:012x}");
     }
     project_state["nodes"][0]["position"] = json!({"x":-24, "y":16});
     let sibling_order = project_state["nodes"][0]["next"].as_array().unwrap().len() as i64;
@@ -325,6 +347,15 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     )
     .await;
     assert_eq!(malformed_write.status(), StatusCode::BAD_REQUEST);
+    let invalid_node_id_write = request_json(
+        &f,
+        "PUT",
+        "/api/projects",
+        &first_cookie,
+        json!({"name":"Invalid ID", "state":{"version":1, "nodes":[{"id":"not-a-uuid", "text":"Idea"}], "view":{"left":0, "top":0, "zoom":1}}}),
+    )
+    .await;
+    assert_eq!(invalid_node_id_write.status(), StatusCode::BAD_REQUEST);
     let first_write = request_json(
         &f,
         "PUT",
@@ -376,7 +407,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .unwrap();
     assert_eq!(database_node_count as usize, expected_node_count);
     let database_parent: Option<String> = sqlx::query_scalar(
-        "SELECT parent.client_node_id FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.client_node_id = $2",
+        "SELECT parent.id::TEXT FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.id::TEXT = $2",
     )
     .bind(project_name)
     .bind(child_id)
@@ -384,8 +415,8 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .await
     .unwrap();
     assert_eq!(database_parent.as_deref(), Some(root_id));
-    let database_root_parent: Option<i64> = sqlx::query_scalar(
-        "SELECT parent_pnode_id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
+    let database_root_parent: Option<String> = sqlx::query_scalar(
+        "SELECT parent_pnode_id::TEXT FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id::TEXT = $2",
     )
     .bind(project_name)
     .bind(root_id)
@@ -393,17 +424,17 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .await
     .unwrap();
     assert_eq!(database_root_parent, None);
-    let database_node_id: i64 = sqlx::query_scalar(
-        "SELECT id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
+    let database_node_id: String = sqlx::query_scalar(
+        "SELECT id::TEXT FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id::TEXT = $2",
     )
     .bind(project_name)
     .bind(root_id)
     .fetch_one(&f.state.pool)
     .await
     .unwrap();
-    assert!(database_node_id > 0);
+    assert_eq!(database_node_id, root_id);
     let (position_x, position_y): (Option<f64>, Option<f64>) = sqlx::query_as(
-        "SELECT position_x, position_y FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
+        "SELECT position_x, position_y FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id::TEXT = $2",
     )
     .bind(project_name)
     .bind(root_id)
@@ -412,7 +443,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .unwrap();
     assert_eq!((position_x, position_y), (Some(-24.0), Some(16.0)));
     let (sibling_parent, stored_sibling_order): (Option<String>, i64) = sqlx::query_as(
-        "SELECT parent.client_node_id, child.sort_order FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.client_node_id = $2",
+        "SELECT parent.id::TEXT, child.sort_order FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.id::TEXT = $2",
     )
     .bind(project_name)
     .bind(sibling_id)
@@ -512,6 +543,20 @@ async fn pnode_migration_preserves_existing_state_without_backfill(pool: PgPool)
         .execute(&mut *connection)
         .await
         .unwrap();
+
+    let pnode_id_types: Vec<(String, String)> = sqlx::query_as(
+        "SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'pnode' AND column_name IN ('id', 'parent_pnode_id') ORDER BY column_name",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        pnode_id_types,
+        vec![
+            ("id".into(), "uuid".into()),
+            ("parent_pnode_id".into(), "uuid".into())
+        ]
+    );
 
     let migrated_state: Value =
         sqlx::query_scalar("SELECT state FROM project WHERE name = 'Existing map'")
