@@ -7,6 +7,7 @@ CREATE TABLE pnode (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_id BIGINT NOT NULL,
     project_id BIGINT NOT NULL,
+    -- Stable browser UUID from project JSON; distinct from the BIGINT row key.
     client_node_id TEXT NOT NULL,
     text TEXT NOT NULL,
     parent_pnode_id BIGINT,
