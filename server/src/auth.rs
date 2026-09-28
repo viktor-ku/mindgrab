@@ -352,12 +352,13 @@ struct StoredProject {
 #[derive(sqlx::FromRow)]
 struct StoredPNode {
     project_id: i64,
-    id: String,
+    id: i64,
+    client_node_id: String,
     text: String,
     sort_order: i64,
     position_x: Option<f64>,
     position_y: Option<f64>,
-    parent_pnode_id: Option<String>,
+    parent_pnode_id: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -368,7 +369,7 @@ struct SavedProject {
 
 struct NewPNode<'a> {
     node: &'a ProjectNode,
-    parent_pnode_id: Option<&'a str>,
+    parent_client_id: Option<&'a str>,
     sort_order: i64,
 }
 
@@ -418,25 +419,36 @@ async fn save_project(
     .fetch_one(&mut *tx)
     .await?;
 
+    let mut database_ids_by_client_id = HashMap::<String, i64>::with_capacity(new_nodes.len());
     for entry in &new_nodes {
+        let parent_pnode_id = entry
+            .parent_client_id
+            .map(|parent_id| {
+                database_ids_by_client_id
+                    .get(parent_id)
+                    .copied()
+                    .ok_or(AuthError::BadRequest)
+            })
+            .transpose()?;
         let position_x = entry.node.position.as_ref().map(|position| position.x);
         let position_y = entry.node.position.as_ref().map(|position| position.y);
-        sqlx::query(
-            "INSERT INTO pnode (id, user_id, project_id, text, parent_pnode_id, sort_order, position_x, position_y) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, id) DO UPDATE SET text = EXCLUDED.text, parent_pnode_id = EXCLUDED.parent_pnode_id, sort_order = EXCLUDED.sort_order, position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, updated_at = NOW()",
+        let pnode_id: i64 = sqlx::query_scalar(
+            "INSERT INTO pnode (user_id, project_id, client_node_id, text, parent_pnode_id, sort_order, position_x, position_y) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, client_node_id) DO UPDATE SET text = EXCLUDED.text, parent_pnode_id = EXCLUDED.parent_pnode_id, sort_order = EXCLUDED.sort_order, position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, updated_at = NOW() RETURNING id",
         )
-        .bind(&entry.node.id)
         .bind(user.id)
         .bind(saved.id)
+        .bind(&entry.node.id)
         .bind(&entry.node.text)
-        .bind(entry.parent_pnode_id)
+        .bind(parent_pnode_id)
         .bind(entry.sort_order)
         .bind(position_x)
         .bind(position_y)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        database_ids_by_client_id.insert(entry.node.id.clone(), pnode_id);
     }
 
-    sqlx::query("DELETE FROM pnode WHERE project_id = $1 AND id <> ALL($2)")
+    sqlx::query("DELETE FROM pnode WHERE project_id = $1 AND client_node_id <> ALL($2)")
         .bind(saved.id)
         .bind(node_ids)
         .execute(&mut *tx)
@@ -462,7 +474,7 @@ async fn load_projects(pool: &PgPool, user_id: i64) -> Result<Vec<ProjectRecord>
     .fetch_all(&mut *tx)
     .await?;
     let pnodes = sqlx::query_as::<_, StoredPNode>(
-        "SELECT project_id, id, text, sort_order, position_x, position_y, parent_pnode_id FROM pnode WHERE user_id = $1 ORDER BY project_id, parent_pnode_id NULLS FIRST, sort_order, id",
+        "SELECT project_id, id, client_node_id, text, sort_order, position_x, position_y, parent_pnode_id FROM pnode WHERE user_id = $1 ORDER BY project_id, parent_pnode_id NULLS FIRST, sort_order, id",
     )
     .bind(user_id)
     .fetch_all(&mut *tx)
@@ -486,15 +498,15 @@ async fn load_projects(pool: &PgPool, user_id: i64) -> Result<Vec<ProjectRecord>
 }
 
 fn project_record(project: StoredProject, pnodes: Vec<StoredPNode>) -> ProjectRecord {
-    let mut children_by_parent = HashMap::<Option<String>, Vec<StoredPNode>>::new();
+    let mut children_by_parent = HashMap::<Option<i64>, Vec<StoredPNode>>::new();
     for pnode in pnodes {
         children_by_parent
-            .entry(pnode.parent_pnode_id.clone())
+            .entry(pnode.parent_pnode_id)
             .or_default()
             .push(pnode);
     }
     let mut roots = children_by_parent.remove(&None).unwrap_or_default();
-    roots.sort_by_key(|pnode| (pnode.sort_order, pnode.id.clone()));
+    roots.sort_by_key(|pnode| (pnode.sort_order, pnode.id));
     let nodes: Vec<Value> = roots
         .into_iter()
         .map(|root| project_node_value(root, &mut children_by_parent))
@@ -511,12 +523,12 @@ fn project_record(project: StoredProject, pnodes: Vec<StoredPNode>) -> ProjectRe
 
 fn project_node_value(
     pnode: StoredPNode,
-    children_by_parent: &mut HashMap<Option<String>, Vec<StoredPNode>>,
+    children_by_parent: &mut HashMap<Option<i64>, Vec<StoredPNode>>,
 ) -> Value {
     let mut children = children_by_parent
-        .remove(&Some(pnode.id.clone()))
+        .remove(&Some(pnode.id))
         .unwrap_or_default();
-    children.sort_by_key(|pnode| (pnode.sort_order, pnode.id.clone()));
+    children.sort_by_key(|pnode| (pnode.sort_order, pnode.id));
     let next = children
         .into_iter()
         .map(|child| project_node_value(child, children_by_parent))
@@ -525,7 +537,7 @@ fn project_node_value(
         .position_x
         .zip(pnode.position_y)
         .map(|(x, y)| json!({"x": json_number(x), "y": json_number(y)}));
-    let mut node = json!({"id": pnode.id, "text": pnode.text});
+    let mut node = json!({"id": pnode.client_node_id, "text": pnode.text});
     if let Some(position) = position {
         node["position"] = position;
     }
@@ -573,13 +585,13 @@ fn valid_pnodes<'a>(nodes: &'a [ProjectNode], depth: usize, ids: &mut HashSet<&'
 
 fn flatten_pnodes<'a>(
     nodes: &'a [ProjectNode],
-    parent_pnode_id: Option<&'a str>,
+    parent_client_id: Option<&'a str>,
     flattened: &mut Vec<NewPNode<'a>>,
 ) {
     for (sort_order, node) in nodes.iter().enumerate() {
         flattened.push(NewPNode {
             node,
-            parent_pnode_id,
+            parent_client_id,
             sort_order: sort_order as i64,
         });
         flatten_pnodes(

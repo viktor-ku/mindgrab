@@ -376,7 +376,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .unwrap();
     assert_eq!(database_node_count as usize, expected_node_count);
     let database_parent: Option<String> = sqlx::query_scalar(
-        "SELECT parent_pnode_id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id = $2",
+        "SELECT parent.client_node_id FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.client_node_id = $2",
     )
     .bind(project_name)
     .bind(child_id)
@@ -384,8 +384,8 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .await
     .unwrap();
     assert_eq!(database_parent.as_deref(), Some(root_id));
-    let database_root_parent: Option<String> = sqlx::query_scalar(
-        "SELECT parent_pnode_id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id = $2",
+    let database_root_parent: Option<i64> = sqlx::query_scalar(
+        "SELECT parent_pnode_id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
     )
     .bind(project_name)
     .bind(root_id)
@@ -393,8 +393,17 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .await
     .unwrap();
     assert_eq!(database_root_parent, None);
+    let database_node_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
+    )
+    .bind(project_name)
+    .bind(root_id)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert!(database_node_id > 0);
     let (position_x, position_y): (Option<f64>, Option<f64>) = sqlx::query_as(
-        "SELECT position_x, position_y FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id = $2",
+        "SELECT position_x, position_y FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND client_node_id = $2",
     )
     .bind(project_name)
     .bind(root_id)
@@ -403,7 +412,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .unwrap();
     assert_eq!((position_x, position_y), (Some(-24.0), Some(16.0)));
     let (sibling_parent, stored_sibling_order): (Option<String>, i64) = sqlx::query_as(
-        "SELECT parent_pnode_id, sort_order FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND id = $2",
+        "SELECT parent.client_node_id, child.sort_order FROM pnode AS child LEFT JOIN pnode AS parent ON parent.project_id = child.project_id AND parent.id = child.parent_pnode_id WHERE child.project_id = (SELECT id FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')) AND child.client_node_id = $2",
     )
     .bind(project_name)
     .bind(sibling_id)
