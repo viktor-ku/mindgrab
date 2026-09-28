@@ -254,6 +254,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
         });
     let project_name = project_payload["name"].as_str().unwrap();
     let mut project_state = project_payload["state"].clone();
+    project_state["anchor"] = json!({"id":project_state["nodes"][0]["id"], "centerY":20});
     let mut depth = 0;
     let mut node = &project_state["nodes"][0];
     while !node.is_null() {
@@ -417,7 +418,17 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
     .fetch_one(&f.state.pool)
     .await
     .unwrap();
-    assert!(!state_column_exists);
+    assert!(state_column_exists);
+    let stored_state: Value = sqlx::query_scalar(
+        "SELECT state FROM project WHERE name = $1 AND user_id = (SELECT id FROM users WHERE external_id = 'user_test')",
+    )
+    .bind(project_name)
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    let mut expected_metadata = project_state.clone();
+    expected_metadata.as_object_mut().unwrap().remove("nodes");
+    assert_eq!(stored_state, expected_metadata);
 
     let second_read = request(&f, "GET", "/api/projects", &second_cookie, None).await;
     assert_eq!(second_read.status(), StatusCode::OK);
@@ -444,7 +455,7 @@ async fn project_api_requires_authentication_and_scopes_records_to_each_user(poo
 }
 
 #[sqlx::test]
-async fn pnode_migration_backfills_existing_project_trees(pool: PgPool) {
+async fn pnode_migration_preserves_existing_state_without_backfill(pool: PgPool) {
     let mut connection = pool.acquire().await.unwrap();
     sqlx::query("CREATE SCHEMA min25_migration_test")
         .execute(&mut *connection)
@@ -493,56 +504,40 @@ async fn pnode_migration_backfills_existing_project_trees(pool: PgPool) {
         .await
         .unwrap();
 
-    let tree_rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT id, parent_pnode_id, sort_order FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = 'Existing map') ORDER BY parent_pnode_id NULLS FIRST, sort_order",
-    )
-    .fetch_all(&mut *connection)
-    .await
-    .unwrap();
-    assert_eq!(
-        tree_rows,
-        vec![
-            ("root-z".into(), None, 0),
-            ("root-a".into(), None, 1),
-            ("child-z".into(), Some("root-z".into()), 0),
-            ("child-a".into(), Some("root-z".into()), 1),
-        ]
-    );
-    let (position_x, position_y): (Option<f64>, Option<f64>) =
-        sqlx::query_as("SELECT position_x, position_y FROM pnode WHERE id = 'root-z'")
+    let migrated_state: Value =
+        sqlx::query_scalar("SELECT state FROM project WHERE name = 'Existing map'")
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-    assert_eq!((position_x, position_y), (Some(4.0), Some(8.0)));
-    let (view_left, view_top, view_zoom, anchor_id, anchor_center_y): (
-        f64,
-        f64,
-        f64,
-        Option<String>,
-        Option<f64>,
-    ) = sqlx::query_as(
-        "SELECT view_left, view_top, view_zoom, anchor_pnode_id, anchor_center_y FROM project WHERE name = 'Existing map'",
+    assert_eq!(
+        migrated_state,
+        json!({
+            "version": 1,
+            "nodes": [
+                {"id":"root-z", "text":"Root", "position":{"x":4, "y":8}, "next":[
+                    {"id":"child-z", "text":"First child"},
+                    {"id":"child-a", "text":"Second child"}
+                ]},
+                {"id":"root-a", "text":"Second root"}
+            ],
+            "anchor":{"id":"root-z", "centerY":20},
+            "view":{"left":12, "top":-7, "zoom":1.5}
+        })
+    );
+    let pnode_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pnode WHERE project_id = (SELECT id FROM project WHERE name = 'Existing map')",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(
-        (
-            view_left,
-            view_top,
-            view_zoom,
-            anchor_id.as_deref(),
-            anchor_center_y,
-        ),
-        (12.0, -7.0, 1.5, Some("root-z"), Some(20.0))
-    );
+    assert_eq!(pnode_count, 0);
     let state_column_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'project' AND column_name = 'state')",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert!(!state_column_exists);
+    assert!(state_column_exists);
 
     sqlx::query("DROP SCHEMA min25_migration_test CASCADE")
         .execute(&mut *connection)

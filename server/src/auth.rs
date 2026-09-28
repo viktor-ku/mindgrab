@@ -345,11 +345,7 @@ struct SaveProject {
 struct StoredProject {
     id: i64,
     name: String,
-    view_left: f64,
-    view_top: f64,
-    view_zoom: f64,
-    anchor_pnode_id: Option<String>,
-    anchor_center_y: Option<f64>,
+    state: Value,
     updated_at: String,
 }
 
@@ -400,6 +396,11 @@ async fn save_project(
     if !valid_project_state(&project_state) {
         return Err(AuthError::BadRequest);
     }
+    let mut state_metadata = state_value.clone();
+    state_metadata
+        .as_object_mut()
+        .ok_or(AuthError::BadRequest)?
+        .remove("nodes");
 
     let mut new_nodes = Vec::new();
     flatten_pnodes(&project_state.nodes, None, &mut new_nodes);
@@ -407,23 +408,13 @@ async fn save_project(
         .iter()
         .map(|entry| entry.node.id.clone())
         .collect::<Vec<_>>();
-    let anchor_id = project_state
-        .anchor
-        .as_ref()
-        .map(|anchor| anchor.id.as_str());
-    let anchor_center_y = project_state.anchor.as_ref().map(|anchor| anchor.center_y);
-
     let mut tx = state.pool.begin().await?;
     let saved: SavedProject = sqlx::query_as(
-        "INSERT INTO project (user_id, name, view_left, view_top, view_zoom, anchor_pnode_id, anchor_center_y) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (user_id, name) DO UPDATE SET view_left = EXCLUDED.view_left, view_top = EXCLUDED.view_top, view_zoom = EXCLUDED.view_zoom, anchor_pnode_id = EXCLUDED.anchor_pnode_id, anchor_center_y = EXCLUDED.anchor_center_y, updated_at = NOW() RETURNING id, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at",
+        "INSERT INTO project (user_id, name, state) VALUES ($1, $2, $3) ON CONFLICT (user_id, name) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW() RETURNING id, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at",
     )
     .bind(user.id)
     .bind(name)
-    .bind(project_state.view.left)
-    .bind(project_state.view.top)
-    .bind(project_state.view.zoom)
-    .bind(anchor_id)
-    .bind(anchor_center_y)
+    .bind(state_metadata)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -465,7 +456,7 @@ async fn load_projects(pool: &PgPool, user_id: i64) -> Result<Vec<ProjectRecord>
         .execute(&mut *tx)
         .await?;
     let projects = sqlx::query_as::<_, StoredProject>(
-        "SELECT id, name, view_left, view_top, view_zoom, anchor_pnode_id, anchor_center_y, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at FROM project WHERE user_id = $1 ORDER BY name",
+        "SELECT id, name, state, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at FROM project WHERE user_id = $1 ORDER BY name",
     )
     .bind(user_id)
     .fetch_all(&mut *tx)
@@ -508,18 +499,8 @@ fn project_record(project: StoredProject, pnodes: Vec<StoredPNode>) -> ProjectRe
         .into_iter()
         .map(|root| project_node_value(root, &mut children_by_parent))
         .collect();
-    let mut state = json!({
-        "version": 1,
-        "nodes": nodes,
-        "view": {
-            "left": json_number(project.view_left),
-            "top": json_number(project.view_top),
-            "zoom": json_number(project.view_zoom),
-        },
-    });
-    if let Some((id, center_y)) = project.anchor_pnode_id.zip(project.anchor_center_y) {
-        state["anchor"] = json!({"id": id, "centerY": json_number(center_y)});
-    }
+    let mut state = project.state;
+    state["nodes"] = Value::Array(nodes);
 
     ProjectRecord {
         name: project.name,
@@ -571,7 +552,7 @@ fn valid_project_state(state: &ProjectState) -> bool {
         && state
             .anchor
             .as_ref()
-            .is_none_or(|anchor| anchor.center_y.is_finite())
+            .is_none_or(|anchor| !anchor.id.is_empty() && anchor.center_y.is_finite())
         && valid_pnodes(&state.nodes, 0, &mut HashSet::new())
 }
 
