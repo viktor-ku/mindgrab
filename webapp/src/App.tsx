@@ -1,5 +1,6 @@
 import {
   batch,
+  createEffect,
   createMemo,
   createSignal,
   For,
@@ -56,8 +57,15 @@ function NodeEditor(props: {
 }) {
   let input!: HTMLTextAreaElement;
   onMount(() => {
-    input.focus();
+    const canvas = input.closest<HTMLElement>("[aria-label='Mind map canvas']");
+    const scrollLeft = canvas?.scrollLeft ?? 0;
+    const scrollTop = canvas?.scrollTop ?? 0;
+    input.focus({ preventScroll: true });
     input.select();
+    if (canvas) {
+      canvas.scrollLeft = scrollLeft;
+      canvas.scrollTop = scrollTop;
+    }
   });
 
   return (
@@ -165,6 +173,13 @@ function Node(props: {
       </Show>
     </div>
   );
+}
+
+interface ContextMenuState {
+  x: number;
+  y: number;
+  nodeId?: string;
+  rootPosition?: NodePosition;
 }
 
 export function App() {
@@ -327,6 +342,9 @@ export function App() {
   ]);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [writing, setWriting] = createSignal(false);
+  const [contextMenu, setContextMenu] = createSignal<
+    ContextMenuState | undefined
+  >();
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
   const [layoutAnchor, setLayoutAnchor] = createSignal<LayoutAnchor>();
   const layout = createMemo(() =>
@@ -342,6 +360,7 @@ export function App() {
   const [panning, setPanning] = createSignal(false);
   const [draggingId, setDraggingId] = createSignal<string>();
   let canvas!: HTMLDivElement;
+  let contextMenuElement: HTMLDivElement | undefined;
   let pointer:
     | {
         id: number;
@@ -529,10 +548,58 @@ export function App() {
     setWriting(true);
   }
 
-  function add(kind: "child" | "sibling" | "root") {
+  function openContextMenu(e: MouseEvent) {
+    const target = e.target instanceof Element ? e.target : undefined;
+    const toolbar = target?.closest("[data-toolbar]");
+    const nodeElement = target?.closest<HTMLElement>("[data-node-id]");
+    if (toolbar) {
+      setContextMenu(undefined);
+      return;
+    }
+
+    e.preventDefault();
+    finishWriting();
+    const nodeId = nodeElement?.dataset.nodeId;
+    setSelectedId(nodeId);
+
+    const bounds = canvas.getBoundingClientRect();
+    const rootPosition = nodeId
+      ? undefined
+      : {
+          x:
+            (e.clientX -
+              bounds.left -
+              bounds.width / 2 -
+              left() +
+              canvas.scrollLeft) /
+            zoom(),
+          y:
+            (e.clientY -
+              bounds.top -
+              bounds.height / 2 -
+              top() +
+              canvas.scrollTop) /
+            zoom(),
+        };
+
+    const menuWidth = 208;
+    const menuHeight = nodeId ? 104 : 56;
+    setContextMenu({
+      x: Math.max(8, Math.min(e.clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(e.clientY, window.innerHeight - menuHeight - 8)),
+      nodeId,
+      rootPosition,
+    });
+  }
+
+  function add(kind: "child" | "sibling" | "root", position?: NodePosition) {
     finishWriting();
     const before = snapshot();
-    const node: MindMapNode = { id: crypto.randomUUID(), text: "New idea" };
+    const node: MindMapNode = {
+      id: crypto.randomUUID(),
+      text: "New idea",
+      ...(position && { position }),
+    };
     const id = selectedId();
     const anchorId =
       kind === "sibling"
@@ -686,6 +753,14 @@ export function App() {
           e.target.closest("textarea, input, [contenteditable=true]"))
       )
         return;
+      if (contextMenu()) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setContextMenu(undefined);
+          canvas.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         if (pointer) {
@@ -803,6 +878,14 @@ export function App() {
     createShortcut(["Control", "S"], saveShortcut, { preventDefault: false });
     createShortcut(["Meta", "S"], saveShortcut, { preventDefault: false });
     window.addEventListener("keydown", keydown);
+    const dismissContextMenu = (e: PointerEvent) => {
+      if (
+        !(e.target instanceof Element) ||
+        !e.target.closest("[data-context-menu]")
+      )
+        setContextMenu(undefined);
+    };
+    window.addEventListener("pointerdown", dismissContextMenu);
     window.addEventListener("pointerup", stopOutside);
     canvas.addEventListener("wheel", wheel, { passive: false });
     function stopOutside(e: PointerEvent) {
@@ -810,8 +893,18 @@ export function App() {
     }
     onCleanup(() => {
       window.removeEventListener("keydown", keydown);
+      window.removeEventListener("pointerdown", dismissContextMenu);
       window.removeEventListener("pointerup", stopOutside);
       canvas.removeEventListener("wheel", wheel);
+    });
+  });
+
+  createEffect(() => {
+    if (!contextMenu()) return;
+    queueMicrotask(() => {
+      contextMenuElement
+        ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+        ?.focus();
     });
   });
 
@@ -829,6 +922,7 @@ export function App() {
       onPointerUp={(e) => stopPointer(e, true)}
       onPointerCancel={(e) => stopPointer(e, false)}
       onLostPointerCapture={(e) => stopPointer(e, false)}
+      onContextMenu={openContextMenu}
       class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
@@ -996,6 +1090,93 @@ export function App() {
           <button type="button" class="map-control" onClick={() => add("root")}>
             Create an idea
           </button>
+        </div>
+      </Show>
+      <Show when={contextMenu()}>
+        <div
+          ref={contextMenuElement}
+          data-no-pan
+          data-toolbar
+          data-context-menu
+          role="menu"
+          aria-label={contextMenu()?.nodeId ? "Node actions" : "Canvas actions"}
+          class="map-toolbar fixed z-50 flex min-w-52 flex-col gap-1 text-sm cursor-default"
+          style={{
+            left: `${contextMenu()?.x ?? 0}px`,
+            top: `${contextMenu()?.y ?? 0}px`,
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              setContextMenu(undefined);
+              canvas.focus({ preventScroll: true });
+              return;
+            }
+            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+            e.preventDefault();
+            const items = Array.from(
+              e.currentTarget.querySelectorAll<HTMLButtonElement>(
+                '[role="menuitem"]',
+              ),
+            );
+            const current = items.indexOf(
+              document.activeElement as HTMLButtonElement,
+            );
+            const direction = e.key === "ArrowDown" ? 1 : -1;
+            items[(current + direction + items.length) % items.length]?.focus();
+          }}
+        >
+          <Show
+            when={contextMenu()?.nodeId}
+            fallback={
+              <button
+                type="button"
+                role="menuitem"
+                class="map-control w-full text-left"
+                onClick={() => {
+                  const position = contextMenu()?.rootPosition;
+                  setContextMenu(undefined);
+                  add("root", position);
+                }}
+              >
+                Create root node
+              </button>
+            }
+          >
+            <button
+              type="button"
+              role="menuitem"
+              class="map-control w-full text-left"
+              onClick={() => {
+                const id = contextMenu()?.nodeId;
+                setContextMenu(undefined);
+                if (id) {
+                  setSelectedId(id);
+                  removeSelected();
+                }
+              }}
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              class="map-control w-full text-left"
+              onClick={() => {
+                const id = contextMenu()?.nodeId;
+                setContextMenu(undefined);
+                if (id) {
+                  setSelectedId(id);
+                  add("child");
+                }
+              }}
+            >
+              Add child node
+            </button>
+          </Show>
         </div>
       </Show>
       <fieldset
