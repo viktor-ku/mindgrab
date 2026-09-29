@@ -9,7 +9,7 @@ export type User = {
 };
 
 export function AccountControls(props: {
-  beforeNavigate: () => boolean;
+  beforeNavigate: () => boolean | Promise<boolean>;
   onUser: (user: User | undefined) => void;
 }) {
   const [user, setUser] = createSignal<User>();
@@ -82,7 +82,11 @@ export function AccountControls(props: {
               class="map-control block"
               href={backendEndpoint("/api/auth/login")}
               onClick={(event) => {
-                if (!props.beforeNavigate()) event.preventDefault();
+                event.preventDefault();
+                const href = event.currentTarget.href;
+                void Promise.resolve(props.beforeNavigate()).then((saved) => {
+                  if (saved) window.location.assign(href);
+                });
               }}
             >
               Sign in
@@ -101,7 +105,11 @@ export function AccountControls(props: {
                 method="post"
                 action={backendEndpoint("/api/auth/logout")}
                 onSubmit={(event) => {
-                  if (!props.beforeNavigate()) event.preventDefault();
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  void Promise.resolve(props.beforeNavigate()).then((saved) => {
+                    if (saved) form.submit();
+                  });
                 }}
               >
                 <button type="submit" class="map-control">
