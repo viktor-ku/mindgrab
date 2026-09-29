@@ -34,7 +34,12 @@ run = "bun --bun run dev"
 [tasks."webapp:test"]
 description = "Run webapp tests"
 dir = "webapp"
-run = "bun --bun test"
+run = "bun --bun test --conditions browser"
+
+[tasks."webapp:test:browser"]
+description = "Run webapp interaction tests in headless Chromium"
+dir = "webapp"
+run = "bun --bun test ./tests/browser/editor.browser.ts"
 
 [tasks."webapp:build"]
 description = "Build the webapp"
@@ -48,7 +53,7 @@ run = "bun --bun run check"
 
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:build", "crdt:test", "crdt:check"]
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:build", "crdt:test", "crdt:check"]
 
 [tasks."crdt:install"]
 description = "Install locked CRDT proof-of-concept dependencies"

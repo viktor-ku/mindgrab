@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "bun test",
+    "test": "bun test --conditions browser",
+    "test:browser": "bun test ./tests/browser/editor.browser.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "biome lint .",
@@ -26,6 +27,7 @@
     "@biomejs/biome": "2.5.14",
     "@tailwindcss/vite": "=4.3.3",
     "@types/bun": "=1.4.2",
+    "playwright": "1.62.0",
     "tailwindcss": "=4.3.3",
     "typescript": "=7.0.2",
     "vite": "=8.3.0",

@@ -138,7 +138,12 @@ real WorkOS credentials, users, or emails are used by tests. The RSA key under
 mise run webapp:check
 mise run webapp:build
 mise run webapp:test
+mise run webapp:test:browser
 ```
+
+`webapp:test:browser` drives the editor in headless Chromium through Playwright
+(`bunx playwright install chromium` once). Its harness page links the app's
+document to a second in-process replica to simulate edits from another device.
 
 ## Yjs migration contract
 

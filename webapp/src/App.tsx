@@ -7,23 +7,38 @@ import {
   onCleanup,
   onMount,
   Show,
+  untrack,
 } from "solid-js";
 import { createShortcut } from "@solid-primitives/keyboard";
+import * as Y from "yjs";
 import {
   connectionPath,
-  deleteNode,
   findNode,
-  insertSibling,
   layoutMindMap,
   navigationTarget,
   NODE_MIN_HEIGHT,
+  translateSubtree as translatePreview,
+} from "./mind-map";
+import {
+  createChild,
+  createProjectDocument,
+  createRoot,
+  createSibling,
+  deleteSubtree,
+  LIMITS,
+  ORIGIN,
+  renameProject,
   reorderNode,
   setNodeColor,
   translateSubtree,
-  updateNode,
-} from "./mind-map";
-import { createHistory } from "./history";
-import type { MapSnapshot } from "./history";
+} from "./project-document";
+import {
+  normalizeSnapshot,
+  openSnapshot,
+  snapshotProject,
+} from "./project-snapshot";
+import { createProjectView } from "./project-view";
+import { bindTextarea } from "./text-binding";
 import {
   listProjects,
   loadLatestProject,
@@ -61,13 +76,11 @@ const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
     ["ArrowDown", "down"],
   ]);
 
-function NodeEditor(props: {
-  text: string;
-  onTextChange: (text: string) => void;
-  onFinish: () => void;
-}) {
+function NodeEditor(props: { doc: Y.Doc; id: string; onFinish: () => void }) {
   let input!: HTMLTextAreaElement;
+  const [value, setValue] = createSignal("");
   onMount(() => {
+    onCleanup(bindTextarea(input, props.doc, props.id, setValue));
     const canvas = input.closest<HTMLElement>("[aria-label='Mind map canvas']");
     const scrollLeft = canvas?.scrollLeft ?? 0;
     const scrollTop = canvas?.scrollTop ?? 0;
@@ -85,15 +98,14 @@ function NodeEditor(props: {
         class="block whitespace-pre-wrap wrap-anywhere invisible"
         aria-hidden="true"
       >
-        {props.text + "\u200b"}
+        {value() + "\u200b"}
       </span>
       <textarea
         ref={input}
         aria-label="Node text"
         rows={1}
+        maxLength={LIMITS.text}
         class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-center outline-none select-text cursor-text"
-        value={props.text}
-        onInput={(e) => props.onTextChange(e.currentTarget.value)}
         onBlur={props.onFinish}
         onKeyDown={(e) => {
           e.stopPropagation();
@@ -116,6 +128,7 @@ function NodeEditor(props: {
 }
 
 function Node(props: {
+  doc: Y.Doc;
   id: string;
   text: string;
   color?: NodeColor;
@@ -129,7 +142,6 @@ function Node(props: {
   onWrite: () => void;
   onFinish: () => void;
   onPointerDown: (event: PointerEvent) => void;
-  onTextChange: (text: string) => void;
 }) {
   let container!: HTMLDivElement;
   const color = () =>
@@ -180,11 +192,7 @@ function Node(props: {
           </button>
         }
       >
-        <NodeEditor
-          text={props.text}
-          onTextChange={props.onTextChange}
-          onFinish={props.onFinish}
-        />
+        <NodeEditor doc={props.doc} id={props.id} onFinish={props.onFinish} />
       </Show>
     </div>
   );
@@ -197,7 +205,7 @@ interface ContextMenuState {
   rootPosition?: NodePosition;
 }
 
-export function App() {
+export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   const [signedIn, setSignedIn] = createSignal(false);
   const cachedUserKey = "mindgrab/cached-user-id";
   const anonymousOwnerKey = "mindgrab/anonymous-projects-owner";
@@ -232,7 +240,9 @@ export function App() {
       restoreFromStorage = !loadLatestProject(projectStorage());
       activeWasSaved =
         JSON.stringify(
-          loadProject(projectStorage(), `proj/${activeBefore.name}`),
+          normalizeSnapshot(
+            loadProject(projectStorage(), `proj/${activeBefore.name}`),
+          ),
         ) === JSON.stringify(activeBefore);
     } catch {
       restoreFromStorage = true;
@@ -334,8 +344,48 @@ export function App() {
     return generateProjectName(used);
   }
 
-  const [projectName, setProjectName] = createSignal(newProjectName());
-  const [projectNameDraft, setProjectNameDraft] = createSignal(projectName());
+  function newDocument(previousName?: string) {
+    return createProjectDocument(
+      crypto.randomUUID(),
+      newProjectName(previousName),
+      { text: "New idea" },
+    );
+  }
+
+  // The document is the only writable project content. Everything else here
+  // (selection, viewport, measurements, drag previews) is local UI state.
+  const [doc, setDoc] = createSignal(newDocument());
+  const session = createMemo(() => {
+    const current = doc();
+    const view = createProjectView(current);
+    const undo = new Y.UndoManager(current.getMap("project"), {
+      trackedOrigins: new Set([ORIGIN.local]),
+      // Steps are separated explicitly: see `command` and text editing.
+      captureTimeout: Number.POSITIVE_INFINITY,
+    });
+    untrack(() => props.onDocument?.(current));
+    onCleanup(() => {
+      undo.destroy();
+      current.destroy();
+    });
+    return { doc: current, view, undo };
+  });
+  const view = () => session().view;
+  const forest = () => view().forest();
+
+  // Each command is its own undo step, never merged with typing around it.
+  function command<T>(action: (doc: Y.Doc) => T): T {
+    const { doc, undo } = session();
+    undo.stopCapturing();
+    try {
+      return action(doc);
+    } finally {
+      undo.stopCapturing();
+    }
+  }
+
+  // Undefined while the name field is not being edited.
+  const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [savedKeys, setSavedKeys] = createSignal<string[]>([]);
   const [showLoad, setShowLoad] = createSignal(false);
   const [storageMessage, setStorageMessage] = createSignal("");
@@ -353,9 +403,6 @@ export function App() {
   }
 
   onCleanup(clearSaveStatus);
-  const [nodes, setNodes] = createSignal<MindMapNode[]>([
-    { id: crypto.randomUUID(), text: "New idea" },
-  ]);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [colorScope, setColorScope] = createSignal<"node" | "branch">("node");
   const [writing, setWriting] = createSignal(false);
@@ -364,22 +411,52 @@ export function App() {
   >();
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
   const [layoutAnchor, setLayoutAnchor] = createSignal<LayoutAnchor>();
-  const layout = createMemo(() =>
-    layoutMindMap(nodes(), nodeSizes(), layoutAnchor()),
+  // A drag renders as a local preview over the current document and commits
+  // once on release.
+  const [drag, setDrag] = createSignal<{ id: string; delta: NodePosition }>();
+  const draggingId = () => drag()?.id;
+  const baseLayout = createMemo(() =>
+    layoutMindMap(forest(), nodeSizes(), layoutAnchor()),
   );
+  const basePositions = createMemo(
+    () => new Map(baseLayout().nodes.map((node) => [node.id, node])),
+  );
+  const layout = createMemo(() => {
+    const preview = drag();
+    if (!preview) return baseLayout();
+    return layoutMindMap(
+      translatePreview(forest(), preview.id, basePositions(), preview.delta),
+      nodeSizes(),
+      layoutAnchor(),
+    );
+  });
   const positionedNodes = createMemo(
     () => new Map(layout().nodes.map((node) => [node.id, node])),
   );
+  const visibleIds = createMemo(() => {
+    const ids = new Set<string>();
+    const visit = (nodes: MindMapNode[]) => {
+      for (const node of nodes) {
+        ids.add(node.id);
+        visit(node.next ?? []);
+      }
+    };
+    visit(forest());
+    return ids;
+  });
   const selectedNode = createMemo(() => {
     const id = selectedId();
-    return id ? findNode(nodes(), id) : undefined;
+    return id ? findNode(forest(), id) : undefined;
   });
+  const selectedText = () => {
+    const id = selectedId();
+    return id ? view().text(id) : "";
+  };
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const [left, setLeft] = createSignal(0);
   const [top, setTop] = createSignal(0);
   const [zoom, setZoom] = createSignal(1);
   const [panning, setPanning] = createSignal(false);
-  const [draggingId, setDraggingId] = createSignal<string>();
   let canvas!: HTMLDivElement;
   let contextMenuElement: HTMLDivElement | undefined;
   let pointer:
@@ -391,61 +468,80 @@ export function App() {
         top: number;
         zoom: number;
         nodeId?: string;
-        nodes: MindMapNode[];
-        snapshot: MapSnapshot;
-        positions: ReadonlyMap<string, NodePosition>;
       }
     | undefined;
   let suppressClick = false;
-  const history = createHistory();
-  let editSnapshot: MapSnapshot | undefined;
+
+  // Nodes can disappear through remote edits or undo, including the one being
+  // edited; local state that refers to them is released.
+  createEffect(() => {
+    const ids = visibleIds();
+    const id = selectedId();
+    if (id && !ids.has(id))
+      untrack(() => {
+        finishWriting();
+        setSelectedId(undefined);
+        setColorScope("node");
+      });
+    setNodeSizes((current) =>
+      [...current.keys()].every((key) => ids.has(key))
+        ? current
+        : new Map([...current].filter(([key]) => ids.has(key))),
+    );
+  });
+
+  // Discards only the local preview; the document is left untouched.
+  function cancelPointer() {
+    if (!pointer) return;
+    const id = pointer.id;
+    pointer = undefined;
+    batch(() => {
+      setDrag(undefined);
+      setPanning(false);
+    });
+    if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  }
 
   function replaceProject(project?: Project) {
+    const opened = project
+      ? openSnapshot(project)
+      : { doc: newDocument(view().name()), anchor: undefined };
     clearSaveStatus();
     finishWriting();
-    if (pointer) {
-      const id = pointer.id;
-      pointer = undefined;
-      if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
-    }
-    history.clear();
-    editSnapshot = undefined;
+    cancelPointer();
     suppressClick = false;
     batch(() => {
-      const name = project?.name ?? newProjectName(projectName());
-      setProjectName(name);
-      setProjectNameDraft(name);
-      setNodes(
-        project?.nodes ?? [{ id: crypto.randomUUID(), text: "New idea" }],
-      );
+      setDoc(opened.doc);
+      setProjectNameDraft(undefined);
       setSelectedId(undefined);
       setColorScope("node");
       setNodeSizes(new Map());
-      setLayoutAnchor(project?.anchor);
+      setLayoutAnchor(opened.anchor);
       setLeft(project?.view.left ?? 0);
       setTop(project?.view.top ?? 0);
       setZoom(project?.view.zoom ?? 1);
-      setDraggingId(undefined);
-      setPanning(false);
       setShowLoad(false);
     });
     canvas.focus({ preventScroll: true });
   }
 
   function finishProjectName() {
-    const name = projectNameDraft().trim() || projectName();
-    setProjectName(name);
-    setProjectNameDraft(name);
+    const name = projectNameDraft()?.trim();
+    setProjectNameDraft(undefined);
+    if (!name) return;
+    try {
+      command((doc) => renameProject(doc, name));
+    } catch {
+      setStorageMessage("Project names can be at most 200 bytes long.");
+    }
   }
 
   function currentProject(): Project {
-    return {
-      version: 1,
-      name: projectName(),
-      nodes: nodes(),
-      anchor: layoutAnchor(),
-      view: { left: left(), top: top(), zoom: zoom() },
-    };
+    return snapshotProject(session().doc, layoutAnchor(), {
+      left: left(),
+      top: top(),
+      zoom: zoom(),
+    });
   }
 
   function save() {
@@ -464,10 +560,6 @@ export function App() {
       saveTimer = undefined;
       try {
         const name = saveProject(projectStorage(), project);
-        if (projectName() === project.name) {
-          setProjectName(name);
-          setProjectNameDraft(name);
-        }
         if (signedIn()) {
           void uploadProject(projectStorage(), { ...project, name }).catch(() =>
             setStorageMessage(
@@ -586,24 +678,11 @@ export function App() {
     }
   }
 
-  function snapshot(): MapSnapshot {
-    return {
-      nodes: nodes(),
-      selectedId: selectedId(),
-      anchor: layoutAnchor(),
-      sizes: nodeSizes(),
-    };
-  }
-
+  // Reverts this session's own changes only; remote edits are preserved.
   function undo() {
-    const previous = history.undo();
-    if (!previous) return;
-    batch(() => {
-      setNodes(previous.nodes);
-      setSelectedId(previous.selectedId);
-      setLayoutAnchor(previous.anchor);
-      setNodeSizes(new Map(previous.sizes));
-    });
+    const { undo } = session();
+    undo.stopCapturing();
+    undo.undo();
     canvas.focus({ preventScroll: true });
   }
 
@@ -616,11 +695,11 @@ export function App() {
     setSelectedId(id);
   }
 
+  // One editing session is one undo step.
   function finishWriting() {
     if (!writing()) return;
-    if (editSnapshot) history.record(editSnapshot, nodes());
-    editSnapshot = undefined;
     setWriting(false);
+    session().undo.stopCapturing();
     canvas.focus({ preventScroll: true });
   }
 
@@ -629,7 +708,7 @@ export function App() {
     finishWriting();
     if (selectedId() !== id) setColorScope("node");
     setSelectedId(id);
-    editSnapshot = snapshot();
+    session().undo.stopCapturing();
     setWriting(true);
   }
 
@@ -679,12 +758,7 @@ export function App() {
 
   function add(kind: "child" | "sibling" | "root", position?: NodePosition) {
     finishWriting();
-    const before = snapshot();
-    const node: MindMapNode = {
-      id: crypto.randomUUID(),
-      text: "New idea",
-      ...(position && { position }),
-    };
+    const init = { text: "New idea", ...(position && { position }) };
     const id = selectedId();
     const anchorId =
       kind === "sibling"
@@ -693,22 +767,18 @@ export function App() {
           ? id
           : undefined;
     batch(() => {
-      const anchor = positionedNodes().get(anchorId ?? nodes()[0]?.id);
+      const anchor = positionedNodes().get(anchorId ?? forest()[0]?.id);
       setLayoutAnchor(
         anchor && { id: anchor.id, centerY: anchor.y + anchor.height / 2 },
       );
-      setNodes((current) =>
+      const created = command((doc) =>
         kind === "root" || !id
-          ? [...current, node]
+          ? createRoot(doc, init)
           : kind === "child"
-            ? updateNode(current, id, (parent) => ({
-                ...parent,
-                next: [...(parent.next ?? []), node],
-              }))
-            : insertSibling(current, id, node),
+            ? createChild(doc, id, init)
+            : createSibling(doc, id, init),
       );
-      history.record(before, nodes());
-      write(node.id);
+      if (created) write(created);
     });
   }
 
@@ -716,26 +786,16 @@ export function App() {
     const id = selectedId();
     if (!id) return;
     finishWriting();
-    const before = snapshot();
     setSelectedId(undefined);
     setColorScope("node");
-    setNodes((current) => deleteNode(current, id));
-    history.record(before, nodes());
-    setNodeSizes(
-      (current) =>
-        new Map([...current].filter(([key]) => nodeIds().includes(key))),
-    );
+    command((doc) => deleteSubtree(doc, id));
     canvas.focus({ preventScroll: true });
   }
 
   function colorSelectedNode(color: NodeColor) {
     const id = selectedId();
     if (!id || writing()) return;
-    const before = snapshot();
-    setNodes((current) =>
-      setNodeColor(current, id, color, colorScope() === "branch"),
-    );
-    history.record(before, nodes());
+    command((doc) => setNodeColor(doc, id, color, colorScope() === "branch"));
   }
 
   function changeZoom(value: number, clientX?: number, clientY?: number) {
@@ -780,9 +840,6 @@ export function App() {
       top: top(),
       zoom: zoom(),
       nodeId,
-      nodes: nodes(),
-      snapshot: snapshot(),
-      positions: positionedNodes(),
     };
     // Node clicks need their original target for double-click recognition. Capture on drag only.
     if (!nodeId) {
@@ -797,35 +854,32 @@ export function App() {
     const dx = e.clientX - pointer.x;
     const dy = e.clientY - pointer.y;
     if (pointer.nodeId) {
-      if (!draggingId() && Math.hypot(dx, dy) < 6) return;
+      if (!drag() && Math.hypot(dx, dy) < 6) return;
       canvas.setPointerCapture(e.pointerId);
-      setDraggingId(pointer.nodeId);
       suppressClick = true;
-      setNodes(
-        translateSubtree(pointer.nodes, pointer.nodeId, pointer.positions, {
-          x: dx / pointer.zoom,
-          y: dy / pointer.zoom,
-        }),
-      );
+      setDrag({
+        id: pointer.nodeId,
+        delta: { x: dx / pointer.zoom, y: dy / pointer.zoom },
+      });
     } else {
       setLeft(pointer.left + dx);
       setTop(pointer.top + dy);
     }
   }
 
+  // The commit starts from the document's current positions, so remote moves
+  // made during the drag survive and remotely deleted nodes are skipped.
   function stopPointer(e: PointerEvent, commit: boolean) {
     if (!pointer || e.pointerId !== pointer.id) return;
-    if (draggingId()) {
-      if (commit) {
-        movePointer(e);
-        history.record(pointer.snapshot, nodes());
-      } else setNodes(pointer.nodes);
+    if (commit && drag()) {
+      movePointer(e);
+      const { id, delta } = drag() as { id: string; delta: NodePosition };
+      batch(() => {
+        command((doc) => translateSubtree(doc, id, basePositions(), delta));
+        setDrag(undefined);
+      });
     }
-    pointer = undefined;
-    setDraggingId(undefined);
-    setPanning(false);
-    if (canvas.hasPointerCapture(e.pointerId))
-      canvas.releasePointerCapture(e.pointerId);
+    cancelPointer();
   }
 
   onMount(() => {
@@ -859,14 +913,7 @@ export function App() {
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        if (pointer) {
-          const id = pointer.id;
-          if (draggingId()) setNodes(pointer.nodes);
-          pointer = undefined;
-          setDraggingId(undefined);
-          setPanning(false);
-          if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
-        }
+        cancelPointer();
         setSelectedId(undefined);
         setColorScope("node");
         canvas.focus({ preventScroll: true });
@@ -928,11 +975,8 @@ export function App() {
         (e.key === "ArrowUp" || e.key === "ArrowDown")
       ) {
         e.preventDefault();
-        const before = snapshot();
-        setNodes((current) =>
-          reorderNode(current, selectedId()!, e.key === "ArrowUp" ? -1 : 1),
-        );
-        history.record(before, nodes());
+        const id = selectedId() as string;
+        command((doc) => reorderNode(doc, id, e.key === "ArrowUp" ? -1 : 1));
       } else if (
         arrow &&
         !e.shiftKey &&
@@ -941,7 +985,7 @@ export function App() {
         !e.metaKey
       ) {
         e.preventDefault();
-        const target = navigationTarget(nodes(), selectedId()!, arrow);
+        const target = navigationTarget(forest(), selectedId()!, arrow);
         if (target) {
           setColorScope("node");
           setSelectedId(target);
@@ -1039,7 +1083,7 @@ export function App() {
             type="text"
             required
             class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            value={projectNameDraft()}
+            value={projectNameDraft() ?? view().name()}
             onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
             onBlur={finishProjectName}
             onKeyDown={(e) => {
@@ -1143,7 +1187,7 @@ export function App() {
           <div class="px-2 pt-1">
             <p class="text-xs font-medium text-stone-500">Node color</p>
             <p class="max-w-60 truncate text-sm font-semibold text-stone-800">
-              {selectedNode()?.text || "New idea"}
+              {selectedText() || "New idea"}
             </p>
           </div>
           <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
@@ -1257,8 +1301,9 @@ export function App() {
             const node = () => positionedNodes().get(id)!;
             return (
               <Node
+                doc={session().doc}
                 id={id}
-                text={node().text}
+                text={view().text(id)}
                 color={node().color}
                 x={node().x}
                 y={node().y}
@@ -1282,17 +1327,12 @@ export function App() {
                   if (selectedId() === id) finishWriting();
                 }}
                 onPointerDown={(e) => startPointer(e, id)}
-                onTextChange={(text) =>
-                  setNodes((current) =>
-                    updateNode(current, id, (node) => ({ ...node, text })),
-                  )
-                }
               />
             );
           }}
         </For>
       </div>
-      <Show when={!nodes().length}>
+      <Show when={!forest().length}>
         <div
           data-no-pan
           data-toolbar
