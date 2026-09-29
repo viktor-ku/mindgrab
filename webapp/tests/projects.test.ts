@@ -127,6 +127,20 @@ test("rejects malformed, incompatible, and duplicate-ID projects", () => {
   expect(() => loadProject(storage(), "proj/missing")).toThrow();
 });
 
+test("rejects projects whose node tree exceeds the supported depth", () => {
+  type DeepNode = { id: string; text: string; next?: DeepNode[] };
+  let node: DeepNode = { id: "node-0", text: "Deep node" };
+  const root = node;
+  for (let depth = 1; depth < 101; depth++) {
+    const child = { id: `node-${depth}`, text: "Deep node" };
+    node.next = [child];
+    node = child;
+  }
+  expect(() =>
+    parseProject(JSON.stringify({ ...project, nodes: [root] })),
+  ).toThrow();
+});
+
 test("storage failures propagate so the UI can report failure", () => {
   const local = storage();
   local.setItem = () => {

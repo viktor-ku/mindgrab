@@ -28,6 +28,7 @@ import {
   listProjects,
   loadLatestProject,
   loadProject,
+  parseProject,
   projectUpdatedAt,
   saveProject,
   userProjectStorage,
@@ -36,6 +37,12 @@ import type { Project } from "./projects";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
+import {
+  findDuplicateProject,
+  saveImportedProject,
+  readProjectFile,
+  writeProjectFile,
+} from "./project-import-export";
 import { AccountControls } from "./AccountControls";
 import type { User } from "./AccountControls";
 import { syncProjects, uploadProject } from "./project-sync";
@@ -333,6 +340,7 @@ export function App() {
   const [showLoad, setShowLoad] = createSignal(false);
   const [storageMessage, setStorageMessage] = createSignal("");
   const [saveStatus, setSaveStatus] = createSignal<"" | "saving" | "done">("");
+  const [fileBusy, setFileBusy] = createSignal(false);
   let saveTimer: number | undefined;
   let saveStatusTimer: number | undefined;
 
@@ -516,6 +524,65 @@ export function App() {
       setStorageMessage(
         "Could not load this project. It may be missing, damaged, or unavailable.",
       );
+    }
+  }
+
+  async function exportCurrentProject() {
+    finishWriting();
+    finishProjectName();
+    setFileBusy(true);
+    try {
+      const project = currentProject();
+      await writeProjectFile(project);
+      setStorageMessage(`Exported “${project.name}”.`);
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setStorageMessage("Could not export this project.");
+      }
+    } finally {
+      setFileBusy(false);
+    }
+  }
+
+  async function importProjectFromFile() {
+    finishWriting();
+    setFileBusy(true);
+    try {
+      const file = await readProjectFile();
+      if (!file) return;
+      const imported = parseProject(await file.text());
+      const duplicateKey = findDuplicateProject(projectStorage(), imported);
+      const clone = duplicateKey
+        ? !window.confirm(
+            `“${imported.name}” already exists with the same project data. Choose OK to load the existing project, or Cancel to make a clone.`,
+          )
+        : false;
+      const result = saveImportedProject(projectStorage(), imported, clone);
+      replaceProject(result.project);
+      if (signedIn() && result.kind !== "existing") {
+        void uploadProject(projectStorage(), result.project).catch(() =>
+          setStorageMessage(
+            "Imported in this browser. Cloud sync will retry on your next save or when you return to the app.",
+          ),
+        );
+      }
+      setStorageMessage(
+        result.kind === "existing"
+          ? `Loaded existing project “${result.project.name}”.`
+          : result.kind === "clone"
+            ? `Created clone “${result.project.name}”.`
+            : `Imported “${result.project.name}”.`,
+      );
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        setStorageMessage(
+          error instanceof Error && error.message.includes("invalid")
+            ? "This file is not a valid Mindgrab project or uses an unsupported version."
+            : "Could not import this project file.",
+        );
+      }
+    } finally {
+      setFileBusy(false);
     }
   }
 
@@ -981,9 +1048,9 @@ export function App() {
           />
         </label>
         <fieldset
-          class="flex items-center text-sm"
+          class="flex flex-wrap items-center text-sm"
           aria-label="Project actions"
-          disabled={saveStatus() === "saving"}
+          disabled={saveStatus() === "saving" || fileBusy()}
         >
           <button
             type="button"
@@ -1008,6 +1075,20 @@ export function App() {
             onClick={() => (showLoad() ? setShowLoad(false) : openLoad())}
           >
             Load
+          </button>
+          <button
+            type="button"
+            class="map-control"
+            onClick={() => void importProjectFromFile()}
+          >
+            Import
+          </button>
+          <button
+            type="button"
+            class="map-control"
+            onClick={() => void exportCurrentProject()}
+          >
+            Export
           </button>
           <span role="status" class="ml-auto px-2 text-xs text-stone-500">
             {saveStatus() === "saving"
