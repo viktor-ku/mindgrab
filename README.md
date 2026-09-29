@@ -113,13 +113,15 @@ A project record is:
 ```json
 { "projectId": "10000000-0000-4000-8000-000000000000", "protocolVersion": 1,
   "schemaVersion": 1, "createdAt": "2026-09-29T18:00:00.000000Z", "name": null,
-  "lastSequence": "0", "contentUpdatedAt": null }
+  "nodeCount": null, "projectionSequence": null, "projectionVersion": null,
+  "projectionStatus": "uninitialized", "lastSequence": "0", "contentUpdatedAt": null }
 ```
 
 `projectId`, the owner, `createdAt`, and `protocolVersion` are immutable (a
 database trigger enforces it). `name`, `lastSequence` (a decimal string), and
 `contentUpdatedAt` describe accepted content. The update store advances sequence
-and time; name projection follows in MIN-38. Until content is accepted they are `null`/`"0"`,
+and time; a background Yrs projector supplies name and visible node count. Until
+content is accepted they are `null`/`"0"`,
 which a client should treat as a registered but uninitialized project. Names are
 not unique, and renaming never changes identity. Clients reconnect using
 `projectId`, `protocolVersion`, `schemaVersion`, and `lastSequence`.
@@ -167,6 +169,22 @@ production proxies must forward Upgrade/Connection, Cookie and Origin and allow
 the 20-second heartbeat. See [ADR 0004](docs/architecture/0004-authenticated-yjs-websocket-sync.md)
 for client setup, multi-process deployment, limits, close codes, and real-socket
 fault/restart tests. Browser cloud provider integration remains MIN-37.
+
+## Yjs inspection and read-model repair
+
+`GET /api/crdt/v1/projects/<uuid>/state` returns owner-authorized canonical
+content and effective node placements, with sequence/version freshness metadata.
+It catches up synchronously; causal gaps return the previous complete view with
+`current: false`. Catalog records also include `nodeCount`, `projectionSequence`,
+`projectionVersion`, and `projectionStatus`; catalog summaries catch up in the
+background and are current only when projection and log sequences match.
+The editor continues to render its local Y.Doc.
+
+Run `mise run server:rebuild-read-models` to recreate disposable summaries and
+node rows from verified binary checkpoints/updates. It requires only the
+database configuration and does not start the API or require WorkOS credentials.
+See [ADR 0005](docs/architecture/0005-yjs-read-models.md) for the response shape,
+causal-gap/failure policy, worker limits, concurrency guarantees and repair runbook.
 
 ## Health check
 

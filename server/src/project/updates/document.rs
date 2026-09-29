@@ -1,50 +1,18 @@
-use std::collections::BTreeMap;
-
-use serde::Deserialize;
 use yrs::types::ToJson;
 use yrs::updates::{decoder::Decode, encoder::Encode};
 use yrs::{Any, Doc, Map, OffsetKind, Options, Out, ReadTxn, Text, Transact, Update};
 
-use super::{super::ApiError, MAX_DOCUMENT_BYTES, wire::preflight};
+use super::{
+    super::{ApiError, projection::Content},
+    MAX_DOCUMENT_BYTES,
+    wire::preflight,
+};
 
 pub(super) struct Candidate {
     pub bytes: Vec<u8>,
     pub state_vector: Vec<u8>,
     pub validation: &'static str,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Content {
-    schema_version: u8,
-    metadata: Metadata,
-    nodes: BTreeMap<String, Node>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Metadata {
-    name: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Node {
-    text: String,
-    placement: Placement,
-    position: Option<Position>,
-    color: String,
-    deleted: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Placement {
-    parent: Option<String>,
-    rank: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Position {
-    x: f64,
-    y: f64,
+    pub content: Option<Content>,
 }
 
 fn node_id(id: &str) -> bool {
@@ -74,7 +42,7 @@ fn valid_rank(rank: &str) -> bool {
         && (bytes.len() == integer_len || bytes.last() != Some(&b'0'))
 }
 
-fn schema(doc: &Doc) -> Result<(), ApiError> {
+fn schema(doc: &Doc) -> Result<Content, ApiError> {
     let txn = doc.transact();
     if txn.root_refs().count() != 1 {
         return Err(ApiError::InvalidSchema);
@@ -155,11 +123,11 @@ fn schema(doc: &Doc) -> Result<(), ApiError> {
     if content.metadata.name.trim().is_empty() {
         return Err(ApiError::InvalidSchema);
     }
-    for (id, node) in content.nodes {
+    for (id, node) in &content.nodes {
         if node.text.encode_utf16().count() > 65_536 || node.placement.rank.len() > 128 {
             return Err(ApiError::ResourceLimit);
         }
-        if !node_id(&id)
+        if !node_id(id)
             || !valid_rank(&node.placement.rank)
             || node
                 .placement
@@ -172,6 +140,7 @@ fn schema(doc: &Doc) -> Result<(), ApiError> {
             .contains(&node.color.as_str())
             || node
                 .position
+                .as_ref()
                 .is_some_and(|p| !p.x.is_finite() || !p.y.is_finite())
         {
             return Err(ApiError::InvalidSchema);
@@ -179,7 +148,7 @@ fn schema(doc: &Doc) -> Result<(), ApiError> {
         // Deserialization validates the boolean even though projection uses it later.
         let _ = node.deleted;
     }
-    Ok(())
+    Ok(content)
 }
 
 /// Merge original bytes before applying to a fresh document. Never replay a
@@ -213,12 +182,11 @@ pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> 
     let pending = hole || txn.has_missing_updates();
     let state_vector = txn.state_vector().encode_v1();
     drop(txn);
-    if !pending {
-        schema(&doc)?;
-    }
+    let content = if pending { None } else { Some(schema(&doc)?) };
     Ok(Candidate {
         bytes,
         state_vector,
+        content,
         validation: if pending {
             "pending_dependencies"
         } else {

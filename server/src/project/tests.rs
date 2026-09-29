@@ -210,6 +210,10 @@ async fn registration_is_idempotent_and_reports_reconnect_status(pool: PgPool) {
                 "schemaVersion",
                 "createdAt",
                 "name",
+                "nodeCount",
+                "projectionSequence",
+                "projectionVersion",
+                "projectionStatus",
                 "lastSequence",
                 "contentUpdatedAt"
             ]

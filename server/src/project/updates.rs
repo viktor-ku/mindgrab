@@ -57,7 +57,7 @@ pub(crate) struct Receipt {
     validation: String,
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub(super) fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -65,14 +65,14 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 #[derive(sqlx::FromRow)]
-struct ProjectState {
-    schema_version: i16,
-    protocol_version: i16,
-    last_sequence: i64,
-    validation: String,
+pub(super) struct ProjectState {
+    pub(super) schema_version: i16,
+    pub(super) protocol_version: i16,
+    pub(super) last_sequence: i64,
+    pub(super) validation: String,
 }
 
-async fn lock_project(
+pub(super) async fn lock_project(
     connection: &mut PgConnection,
     id: Uuid,
     owner: i64,
@@ -83,7 +83,7 @@ async fn lock_project(
 
 /// Read checkpoint and tail under the same project lock used by submission and
 /// future checkpoint workers. Never discard originals on the basis of a vector.
-async fn load(
+pub(super) async fn load(
     connection: &mut PgConnection,
     id: Uuid,
     last: i64,
@@ -377,3 +377,10 @@ pub(crate) async fn synchronization_baseline(
 
 #[cfg(test)]
 pub(super) mod tests;
+
+/// Validated canonical content, absent while causal dependencies are unresolved.
+pub(super) async fn materialized(
+    updates: Vec<Vec<u8>>,
+) -> Result<Option<super::projection::Content>, ApiError> {
+    Ok(document::candidate(updates).await?.content)
+}
