@@ -72,8 +72,6 @@ function NodeEditor(props: {
   doc: Y.Doc;
   id: string;
   onFinish: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
   onSelectionChange: (selection: TextSelection) => void;
 }) {
   let input!: HTMLTextAreaElement;
@@ -118,22 +116,12 @@ function NodeEditor(props: {
         onSelect={reportSelection}
         onKeyUp={reportSelection}
         onKeyDown={(e) => {
-          e.stopPropagation();
+          const historyShortcut =
+            (e.ctrlKey || e.metaKey) &&
+            !e.altKey &&
+            (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y");
+          if (!historyShortcut) e.stopPropagation();
           if (e.isComposing) return;
-          if ((e.ctrlKey || e.metaKey) && !e.altKey) {
-            const key = e.key.toLowerCase();
-            if (key === "z") {
-              e.preventDefault();
-              if (e.shiftKey) props.onRedo();
-              else props.onUndo();
-              return;
-            }
-            if (key === "y" && !e.shiftKey) {
-              e.preventDefault();
-              props.onRedo();
-              return;
-            }
-          }
           if (
             e.key === "Escape" ||
             (e.key === "Enter" &&
@@ -179,8 +167,6 @@ function Node(props: {
   onSelect: () => void;
   onWrite: () => void;
   onFinish: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
   onSelectionChange: (selection: TextSelection) => void;
   onPointerDown: (event: PointerEvent) => void;
 }) {
@@ -237,8 +223,6 @@ function Node(props: {
           doc={props.doc}
           id={props.id}
           onFinish={props.onFinish}
-          onUndo={props.onUndo}
-          onRedo={props.onRedo}
           onSelectionChange={props.onSelectionChange}
         />
       </Show>
@@ -831,16 +815,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     editorSelection = selection;
   }
 
-  function undoFromEditor() {
-    session().undo.stopCapturing();
-    session().undo.undo();
-  }
-
-  function redoFromEditor() {
-    session().undo.stopCapturing();
-    session().undo.redo();
-  }
-
   function select(id: string) {
     if (suppressClick) return;
     if (selectedId() !== id) {
@@ -1090,26 +1064,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       }
       if (pointer) return;
       if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.altKey &&
-        e.key.toLowerCase() === "z"
-      ) {
-        e.preventDefault();
-        if (e.shiftKey) redo();
-        else undo();
-        return;
-      }
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.key.toLowerCase() === "y"
-      ) {
-        e.preventDefault();
-        redo();
-        return;
-      }
-      if (
         !selectedId() &&
         e.key === "Enter" &&
         !e.shiftKey &&
@@ -1196,10 +1150,68 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       event.preventDefault();
       save();
     };
+    const historyShortcut = (
+      event: KeyboardEvent | null,
+      action: "undo" | "redo",
+    ) => {
+      if (
+        !event ||
+        event.isComposing ||
+        !storageReady() ||
+        contextMenu() ||
+        pointer
+      )
+        return;
+      const target = event.target;
+      const textEditor =
+        target instanceof Element &&
+        target.matches('textarea[aria-label="Node text"]');
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, [contenteditable=true]") &&
+        !textEditor
+      )
+        return;
+      if (writing() && !textEditor) return;
+      event.preventDefault();
+      if (textEditor) {
+        const manager = session().undo;
+        manager.stopCapturing();
+        if (action === "undo") manager.undo();
+        else manager.redo();
+      } else if (action === "undo") undo();
+      else redo();
+    };
     // Let the callback decide whether the target accepts text before suppressing
     // the browser's native save dialog.
     createShortcut(["Control", "S"], saveShortcut, { preventDefault: false });
     createShortcut(["Meta", "S"], saveShortcut, { preventDefault: false });
+    createShortcut(
+      ["Control", "Z"],
+      (event) => historyShortcut(event, "undo"),
+      { preventDefault: false },
+    );
+    createShortcut(["Meta", "Z"], (event) => historyShortcut(event, "undo"), {
+      preventDefault: false,
+    });
+    createShortcut(
+      ["Control", "Shift", "Z"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(
+      ["Meta", "Shift", "Z"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(
+      ["Control", "Y"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(["Meta", "Y"], (event) => historyShortcut(event, "redo"), {
+      preventDefault: false,
+    });
     window.addEventListener("keydown", keydown);
     const dismissContextMenu = (e: PointerEvent) => {
       if (
@@ -1521,8 +1533,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                 onFinish={() => {
                   if (selectedId() === id) finishWriting();
                 }}
-                onUndo={undoFromEditor}
-                onRedo={redoFromEditor}
                 onSelectionChange={recordEditorSelection}
                 onPointerDown={(e) => startPointer(e, id)}
               />
