@@ -206,6 +206,8 @@ Create project: `POST /api/crdt/v1/projects` with
 idempotent for the same owner/id; no name uniqueness requirement. Initialization
 is submitted as the first raw update through the following API. An uninitialized
 registered project remains loading, and another tab does not initialize it.
+Registration, owner-scoped listing and get-by-UUID are implemented; see the
+[project catalog API](../../README.md#project-catalog-api-yjs-protocol-v1).
 
 Submit: `PUT /api/crdt/v1/projects/<uuid>/updates/<updateUUID>`,
 `Content-Type: application/octet-stream`, `X-Mindgrab-Schema-Version: 1`, body

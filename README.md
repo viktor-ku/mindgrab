@@ -80,7 +80,62 @@ in `pnode` with its client-generated UUID as a native UUID primary key, text,
 layout position, sibling order, and an optional UUID parent node. The API
 rebuilds the nested project state from those rows while preserving node IDs. The
 migration keeps project state intact and starts the `pnode` table empty; there
-is no existing user data to backfill. Project names remain unique per user.
+is no existing user data to backfill. Project names remain unique per user in
+this legacy snapshot path.
+
+## Project catalog API (Yjs protocol v1)
+
+Yjs projects are identified by a client-generated UUID rather than by name.
+The catalog lives in `crdt_project` and is served from `server/src/project.rs`.
+The name-keyed snapshot endpoints above (`server/src/project/legacy.rs`) are
+fenced: they only read and write `project`/`pnode`, never the catalog, and are
+removed at cutover. All catalog endpoints use the session cookie; the owner is
+always the signed-in user and is never read from the request body, query, or
+document content. Responses are `Cache-Control: no-store`.
+
+- `POST /api/crdt/v1/projects` with `{ "projectId": "<uuid>", "schemaVersion": 1 }`
+  registers a project, including one created offline. It requires the app's
+  `Origin` header. `projectId` must be a canonical lowercase, non-nil RFC 4122
+  version 4 UUID. Unknown fields such as `ownerId` are rejected. Returns `201`
+  with a `Location` header on first registration and `200` with the current
+  record on a retry by the same owner. The first committed registration claims
+  the UUID permanently; any other user receives `409 project_id_conflict`.
+  Concurrent registrations produce exactly one project.
+- `GET /api/crdt/v1/projects?limit=50&cursor=<nextCursor>` lists the signed-in
+  user's projects, newest first (creation time, then UUID). `limit` is 1–100
+  (default 50). Pass the returned opaque `nextCursor` to fetch the next page;
+  it is `null` on the last page. Records never include document bodies.
+- `GET /api/crdt/v1/projects/<uuid>` returns one owned project. Another user's
+  project and a missing project both return `404 project_not_found`.
+
+A project record is:
+
+```json
+{ "projectId": "10000000-0000-4000-8000-000000000000", "protocolVersion": 1,
+  "schemaVersion": 1, "createdAt": "2026-09-29T18:00:00.000000Z", "name": null,
+  "lastSequence": "0", "contentUpdatedAt": null }
+```
+
+`projectId`, the owner, `createdAt`, and `protocolVersion` are immutable (a
+database trigger enforces it). `name`, `lastSequence` (a decimal string), and
+`contentUpdatedAt` are rebuildable summaries projected from accepted document
+content by the update store. Until content is accepted they are `null`/`"0"`,
+which a client should treat as a registered but uninitialized project. Names are
+not unique, and renaming never changes identity. Clients reconnect using
+`projectId`, `protocolVersion`, `schemaVersion`, and `lastSequence`.
+
+Errors use `{ "error": { "code": "...", "message": "..." } }`: `400`
+(`invalid_request`, `invalid_project_id`, or `invalid_cursor`), `401
+unauthenticated`, `403 invalid_origin`, `404 project_not_found`, `409
+project_id_conflict`, `426 unsupported_schema` for any `schemaVersion` other
+than 1, and `503 unavailable` for retryable storage or authentication failures.
+
+**Development reset impact:** migration `0006_crdt_project_catalog.sql` only
+adds the new table, and it starts empty. Existing `project`/`pnode` development
+data is neither converted nor modified and remains available through the legacy
+endpoints. No database reset is required to apply the migration. To start from
+a clean database anyway, run `docker compose down -v && mise run db`, which
+deletes all local users, sessions, and projects.
 
 ## Health check
 
