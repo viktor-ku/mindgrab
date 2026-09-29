@@ -48,4 +48,30 @@ run = "bun --bun run check"
 
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:build"]
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:build", "crdt:test", "crdt:check"]
+
+[tasks."crdt:install"]
+description = "Install locked CRDT proof-of-concept dependencies"
+dir = "tools/yjs-contract"
+run = "bun --bun install --frozen-lockfile"
+
+[tasks."crdt:test"]
+description = "Run Yjs/Yrs interoperability and document contract tests"
+depends = ["crdt:install"]
+dir = "tools/yjs-contract"
+run = "bun --bun test"
+
+[tasks."crdt:check"]
+description = "Check CRDT contract TypeScript and Rust"
+depends = ["crdt:install"]
+run = '''
+(cd tools/yjs-contract && bun --bun run check)
+mise -C server exec -- cargo fmt --manifest-path "{{config_root}}/tools/yjs-contract/rust/Cargo.toml" --check
+mise -C server exec -- cargo clippy --locked --manifest-path "{{config_root}}/tools/yjs-contract/rust/Cargo.toml" --all-targets -- -D warnings
+'''
+
+[tasks."crdt:fixtures"]
+description = "Regenerate reviewed Yjs binary and JSON golden fixtures"
+depends = ["crdt:install"]
+dir = "tools/yjs-contract"
+run = "bun --bun run fixtures"
