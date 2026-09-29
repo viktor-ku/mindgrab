@@ -139,3 +139,11 @@ mise run webapp:check
 mise run webapp:build
 mise run webapp:test
 ```
+
+## Yjs migration contract
+
+The isolated [Yjs/Yrs proof of concept](tools/yjs-contract/README.md) defines the
+[document and synchronization contract](docs/architecture/0001-yjs-document-contract.md).
+Run `mise run crdt:test` for binary interoperability fixtures and seeded tests, and
+`mise run crdt:check` for static checks. The existing application still uses
+snapshot persistence; see the ADR for scope and excluded upstream regressions.

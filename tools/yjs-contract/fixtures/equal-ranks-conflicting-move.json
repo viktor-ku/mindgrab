@@ -1,0 +1,103 @@
+{
+  "updates": [
+    "equal-ranks-conflicting-move.0.bin",
+    "equal-ranks-conflicting-move.1.bin",
+    "equal-ranks-conflicting-move.2.bin",
+    "equal-ranks-conflicting-move.3.bin",
+    "equal-ranks-conflicting-move.4.bin"
+  ],
+  "expected": {
+    "schemaVersion": 1,
+    "metadata": {
+      "name": "Ideas 🌍"
+    },
+    "nodes": {
+      "20000000-0000-4000-8000-000000000001": {
+        "text": "A😀é中B",
+        "placement": {
+          "parent": null,
+          "rank": "a0"
+        },
+        "deleted": false,
+        "color": "teal",
+        "position": {
+          "x": 12.5,
+          "y": -8
+        }
+      },
+      "20000000-0000-4000-8000-000000000002": {
+        "text": "Child",
+        "placement": {
+          "parent": "20000000-0000-4000-8000-000000000001",
+          "rank": "a0"
+        },
+        "deleted": false,
+        "color": "blue"
+      },
+      "20000000-0000-4000-8000-000000000003": {
+        "text": "Other root",
+        "placement": {
+          "parent": null,
+          "rank": "Zz"
+        },
+        "deleted": false,
+        "color": "blue"
+      },
+      "20000000-0000-4000-8000-000000000005": {
+        "text": "Equal A",
+        "placement": {
+          "parent": null,
+          "rank": "a0"
+        },
+        "deleted": false,
+        "color": "blue"
+      },
+      "20000000-0000-4000-8000-000000000006": {
+        "text": "Equal B",
+        "placement": {
+          "parent": null,
+          "rank": "a0"
+        },
+        "deleted": false,
+        "color": "blue"
+      }
+    }
+  },
+  "forest": [
+    {
+      "id": "20000000-0000-4000-8000-000000000003",
+      "text": "Other root",
+      "color": "blue",
+      "children": []
+    },
+    {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "text": "A😀é中B",
+      "color": "teal",
+      "position": {
+        "x": 12.5,
+        "y": -8
+      },
+      "children": [
+        {
+          "id": "20000000-0000-4000-8000-000000000002",
+          "text": "Child",
+          "color": "blue",
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "20000000-0000-4000-8000-000000000005",
+      "text": "Equal A",
+      "color": "blue",
+      "children": []
+    },
+    {
+      "id": "20000000-0000-4000-8000-000000000006",
+      "text": "Equal B",
+      "color": "blue",
+      "children": []
+    }
+  ]
+}
