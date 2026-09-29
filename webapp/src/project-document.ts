@@ -112,8 +112,10 @@ function invalid(message: string): never {
   throw new ProjectDocumentError("invalid", message);
 }
 
+export const isNodeId = (id: string) => UUID.test(id);
+
 function assertId(id: string) {
-  if (!UUID.test(id)) invalid("Expected a canonical UUID.");
+  if (!isNodeId(id)) invalid("Expected a canonical UUID.");
 }
 
 export interface NewNode {
@@ -143,6 +145,23 @@ export function createProjectDocument(
         }
       : {},
   });
+  return installContent(projectId, content, ORIGIN.create);
+}
+
+// Creates a new document from complete content, such as a snapshot file.
+export function importProjectDocument(
+  projectId: string,
+  content: ProjectContent,
+): Y.Doc {
+  assertId(projectId);
+  return installContent(projectId, parseContent(content), ORIGIN.import);
+}
+
+function installContent(
+  projectId: string,
+  content: ProjectContent,
+  origin: symbol,
+) {
   const doc = new Y.Doc({ guid: projectId });
   doc.transact(() => {
     const project = doc.getMap(ROOT);
@@ -154,7 +173,7 @@ export function createProjectDocument(
     for (const [id, node] of Object.entries(content.nodes))
       nodes.set(id, sharedNode(node));
     project.set("nodes", nodes);
-  }, ORIGIN.create);
+  }, origin);
   return doc;
 }
 
@@ -517,6 +536,63 @@ const splitsPair = (text: string, index: number) =>
   isHighSurrogate(text.charCodeAt(index - 1)) &&
   isLowSurrogate(text.charCodeAt(index));
 
+// Reads only the edited node, so typing never materializes the whole project.
+// Visible nodes are exactly the nondeleted ones; deletion covers whole subtrees.
+function liveText(doc: Y.Doc, id: string): Y.Text | undefined {
+  const project = doc.getMap(ROOT);
+  if (project.get("schemaVersion") !== SCHEMA_VERSION) return;
+  const nodes = project.get("nodes");
+  const node = nodes instanceof Y.Map ? nodes.get(id) : undefined;
+  if (!(node instanceof Y.Map) || node.get("deleted") !== false) return;
+  const text = node.get("text");
+  return text instanceof Y.Text ? text : undefined;
+}
+
+export interface TextChange {
+  index: number;
+  deleteCount: number;
+  insert: string;
+}
+
+// The smallest single replacement turning `previous` into `next`. With a
+// `cursor` (the caret after an input event), the changed range ends at or after
+// it, so repeated characters resolve to where the user typed. Never splits a
+// surrogate pair.
+export function diffText(
+  previous: string,
+  next: string,
+  cursor?: number,
+): TextChange {
+  const shortest = Math.min(previous.length, next.length);
+  let prefix = 0;
+  let suffix = 0;
+  const matchPrefix = (limit: number) => {
+    while (prefix < limit && previous[prefix] === next[prefix]) prefix++;
+  };
+  const matchSuffix = (limit: number) => {
+    while (
+      suffix < limit &&
+      previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]
+    )
+      suffix++;
+  };
+  if (cursor === undefined) {
+    matchPrefix(shortest);
+    matchSuffix(shortest - prefix);
+  } else {
+    matchSuffix(Math.min(shortest, Math.max(0, next.length - cursor)));
+    matchPrefix(shortest - suffix);
+  }
+  if (prefix && isHighSurrogate(previous.charCodeAt(prefix - 1))) prefix--;
+  if (suffix && isLowSurrogate(previous.charCodeAt(previous.length - suffix)))
+    suffix--;
+  return {
+    index: prefix,
+    deleteCount: previous.length - prefix - suffix,
+    insert: next.slice(prefix, next.length - suffix),
+  };
+}
+
 // Offsets are UTF-16 code units, matching browser inputs and Yrs' Utf16 offsets.
 export function editNodeText(
   doc: Y.Doc,
@@ -525,9 +601,9 @@ export function editNodeText(
   deleteCount: number,
   insert: string,
 ): boolean {
-  const view = observe(doc);
-  if (!view.parents.has(id)) return false;
-  const current = view.content.nodes[id].text;
+  const text = liveText(doc, id);
+  if (!text) return false;
+  const current = text.toString();
   const end = index + deleteCount;
   if (
     !Number.isInteger(index) ||
@@ -542,7 +618,6 @@ export function editNodeText(
   if (current.length - deleteCount + insert.length > LIMITS.text)
     invalid("Node text is too long.");
   if (current.slice(index, end) === insert) return false;
-  const text = nodeText(doc, id) as Y.Text;
   doc.transact(() => {
     if (deleteCount) text.delete(index, deleteCount);
     if (insert) text.insert(index, insert);
@@ -552,28 +627,16 @@ export function editNodeText(
 
 // Applies the smallest single replacement, so concurrent edits elsewhere in the
 // same text are preserved.
-export function replaceNodeText(doc: Y.Doc, id: string, next: string) {
-  const current = materializeProject(doc).nodes[id]?.text;
+export function replaceNodeText(
+  doc: Y.Doc,
+  id: string,
+  next: string,
+  cursor?: number,
+) {
+  const current = liveText(doc, id)?.toString();
   if (current === undefined || current === next) return false;
-  const shortest = Math.min(current.length, next.length);
-  let prefix = 0;
-  while (prefix < shortest && current[prefix] === next[prefix]) prefix++;
-  if (prefix && isHighSurrogate(current.charCodeAt(prefix - 1))) prefix--;
-  let suffix = 0;
-  while (
-    suffix < shortest - prefix &&
-    current[current.length - 1 - suffix] === next[next.length - 1 - suffix]
-  )
-    suffix++;
-  if (suffix && isLowSurrogate(current.charCodeAt(current.length - suffix)))
-    suffix--;
-  return editNodeText(
-    doc,
-    id,
-    prefix,
-    current.length - prefix - suffix,
-    next.slice(prefix, next.length - suffix),
-  );
+  const { index, deleteCount, insert } = diffText(current, next, cursor);
+  return editNodeText(doc, id, index, deleteCount, insert);
 }
 
 export function setNodeColor(
