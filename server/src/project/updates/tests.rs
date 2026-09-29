@@ -16,10 +16,11 @@ use yrs::{Doc, Map, ReadTxn, StateVector, Text, Transact, Update, updates::decod
 use super::*;
 use crate::auth::tests::{fixture, session_for, sign_in};
 
-const INITIAL: &[u8] = include_bytes!("../../../../tools/yjs-contract/fixtures/unicode.0.bin");
+pub(crate) const INITIAL: &[u8] =
+    include_bytes!("../../../../tools/yjs-contract/fixtures/unicode.0.bin");
 const PROJECTS: &str = "/api/crdt/v1/projects";
 
-fn new_id() -> Uuid {
+pub(crate) fn new_id() -> Uuid {
     uuid::Builder::from_random_bytes(rand::random()).into_uuid()
 }
 
@@ -48,7 +49,7 @@ async fn send(
     (status, serde_json::from_slice(&body).unwrap())
 }
 
-async fn register(state: &Arc<AppState>, cookie: &str) -> Uuid {
+pub(crate) async fn register(state: &Arc<AppState>, cookie: &str) -> Uuid {
     let id = new_id();
     let response = send(
         state,
@@ -68,7 +69,7 @@ async fn register(state: &Arc<AppState>, cookie: &str) -> Uuid {
     id
 }
 
-async fn put(
+pub(crate) async fn put(
     state: &Arc<AppState>,
     cookie: &str,
     id: Uuid,
@@ -90,7 +91,12 @@ async fn put(
     .await
 }
 
-async fn get(state: &Arc<AppState>, cookie: &str, id: Uuid, suffix: &str) -> (StatusCode, Value) {
+pub(crate) async fn get(
+    state: &Arc<AppState>,
+    cookie: &str,
+    id: Uuid,
+    suffix: &str,
+) -> (StatusCode, Value) {
     send(
         state,
         cookie,
@@ -102,7 +108,7 @@ async fn get(state: &Arc<AppState>, cookie: &str, id: Uuid, suffix: &str) -> (St
     .await
 }
 
-fn binary(value: &Value) -> Vec<u8> {
+pub(crate) fn binary(value: &Value) -> Vec<u8> {
     value
         .as_array()
         .unwrap()
@@ -111,7 +117,7 @@ fn binary(value: &Value) -> Vec<u8> {
         .collect()
 }
 
-fn javascript(input: Value) -> Value {
+pub(crate) fn javascript(input: Value) -> Value {
     let mut child = Command::new("bun")
         .args(["--bun", "storage-fixtures.ts"])
         .current_dir(concat!(

@@ -1,10 +1,21 @@
 // Called by the SQLx storage API suite. Uses the same pinned browser library.
 import * as Y from "yjs";
-import { materialize, nodeMap, present, projectForest } from "./contract";
-import { base, capture, ID, text } from "./scenarios";
+import {
+  addNode,
+  materialize,
+  nodeMap,
+  present,
+  projectForest,
+} from "./contract";
+import { base, capture, ID, node, text } from "./scenarios";
 
 const input = await Bun.stdin.json();
-if (input.verify || input.inspect) {
+if (input.large) {
+  const doc = base();
+  for (let i = 10; i < 266; i++) addNode(doc, ID(i), node("x".repeat(32_000)));
+  console.log(JSON.stringify({ checkpoint: [...Y.encodeStateAsUpdate(doc)] }));
+  doc.destroy();
+} else if (input.verify || input.inspect) {
   const doc = new Y.Doc();
   for (const bytes of input.updates) Y.applyUpdate(doc, new Uint8Array(bytes));
   if (input.verify && (doc.store.pendingStructs || doc.store.pendingDs))

@@ -4,6 +4,7 @@
 //! identity and rebuildable summaries only, never document bodies.
 
 mod legacy;
+mod sync;
 pub(crate) mod updates;
 
 use std::sync::Arc;
@@ -54,6 +55,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/crdt/v1/projects/{project_id}", get(get_project))
         .merge(updates::router())
+        .merge(sync::router())
         .merge(legacy::router())
         .layer(middleware::from_fn(private_response))
         .with_state(state)
