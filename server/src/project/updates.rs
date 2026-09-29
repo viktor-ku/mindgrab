@@ -376,4 +376,4 @@ pub(crate) async fn synchronization_baseline(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

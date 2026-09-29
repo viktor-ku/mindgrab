@@ -207,6 +207,10 @@ pub(crate) async fn session_for(f: &Fixture, external_id: &str) -> String {
     format!("{SESSION_COOKIE}={token}")
 }
 
+pub(crate) fn refresh_status(f: &Fixture, status: u16) {
+    f.mock.refresh_status.store(status, Ordering::SeqCst);
+}
+
 async fn session_count(f: &Fixture) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions")
         .fetch_one(&f.state.pool)
@@ -214,7 +218,7 @@ async fn session_count(f: &Fixture) -> i64 {
         .unwrap()
 }
 
-async fn expire_access_token(f: &Fixture) {
+pub(crate) async fn expire_access_token(f: &Fixture) {
     sqlx::query("UPDATE auth_sessions SET access_token = $1")
         .bind(signed_token(
             jsonwebtoken::get_current_timestamp() - 60,

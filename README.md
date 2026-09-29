@@ -148,8 +148,25 @@ identical retries are idempotent. Owner-scoped `/updates`, `/status`, and
 See [ADR 0003](docs/architecture/0003-durable-yjs-update-store.md) for request and
 response shapes, pending/quarantine behavior, limits, and the shared ingestion
 and reconstruction APIs for WebSocket sync and read models. Migration `0007`
-adds binary storage without resetting legacy data. WebSocket transport and browser
-cloud synchronization remain subsequent tasks.
+adds binary storage without resetting legacy data. Authenticated WebSocket
+transport is described below; browser cloud-sync integration remains MIN-37.
+
+## Authenticated Yjs WebSocket sync
+
+Registered project UUIDs connect at `/api/crdt/v1/sync/<projectUUID>` using the
+session cookie and configured app Origin. This supports the pinned
+`y-websocket` provider's state-vector/diff protocol; accepted updates propagate
+only after Postgres commit. Separate API processes share the committed log and
+poll every 250 ms, so HTTP submissions and writes on another instance reach
+connected devices without sticky sessions. Auth is revalidated while connected;
+temporary failures preserve the session and close retryably.
+
+Socket sync is not a durable save receipt: clients still use the companion HTTP
+update/receipt API. Awareness is omitted. Vite forwards WebSocket upgrades locally;
+production proxies must forward Upgrade/Connection, Cookie and Origin and allow
+the 20-second heartbeat. See [ADR 0004](docs/architecture/0004-authenticated-yjs-websocket-sync.md)
+for client setup, multi-process deployment, limits, close codes, and real-socket
+fault/restart tests. Browser cloud provider integration remains MIN-37.
 
 ## Health check
 

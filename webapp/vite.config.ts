@@ -10,7 +10,10 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: {
-        "/api": env.VITE_BACKEND_URL || "http://localhost:3000",
+        "/api": {
+          target: env.VITE_BACKEND_URL || "http://localhost:3000",
+          ws: true,
+        },
       },
     },
   };
