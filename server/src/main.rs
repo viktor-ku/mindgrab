@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod health;
 mod local_seed;
+mod project;
 mod workos;
 
 use std::{sync::Arc, time::Duration};
@@ -64,7 +65,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(|| async { "Mindgrab API" }))
         .merge(health)
-        .merge(auth::router(state))
+        .merge(auth::router(state.clone()))
+        .merge(project::router(state))
         .layer(cors);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Mindgrab API listening on http://localhost:3000");
