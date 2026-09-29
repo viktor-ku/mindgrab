@@ -4,6 +4,7 @@
 //! identity and rebuildable summaries only, never document bodies.
 
 mod legacy;
+pub(crate) mod updates;
 
 use std::sync::Arc;
 
@@ -52,13 +53,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(list_projects).post(create_project),
         )
         .route("/api/crdt/v1/projects/{project_id}", get(get_project))
+        .merge(updates::router())
         .merge(legacy::router())
         .layer(middleware::from_fn(private_response))
         .with_state(state)
 }
 
 #[derive(Debug)]
-enum ApiError {
+pub(crate) enum ApiError {
     InvalidRequest,
     InvalidProjectId,
     InvalidCursor,
@@ -67,6 +69,11 @@ enum ApiError {
     NotFound,
     ProjectIdConflict,
     UnsupportedSchema,
+    InvalidUpdate,
+    InvalidSchema,
+    ResourceLimit,
+    UpdateIdConflict,
+    Quarantined,
     Unavailable,
 }
 
@@ -117,6 +124,31 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "unavailable",
                 "Projects are temporarily unavailable. Please retry.",
+            ),
+            Self::InvalidUpdate => (
+                StatusCode::BAD_REQUEST,
+                "invalid_update",
+                "Expected a complete Yjs V1 binary update.",
+            ),
+            Self::InvalidSchema => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_schema",
+                "The document does not match schema v1.",
+            ),
+            Self::ResourceLimit => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "resource_limit",
+                "The update or document exceeds a resource limit.",
+            ),
+            Self::UpdateIdConflict => (
+                StatusCode::CONFLICT,
+                "update_id_conflict",
+                "This update ID already identifies different bytes.",
+            ),
+            Self::Quarantined => (
+                StatusCode::CONFLICT,
+                "project_quarantined",
+                "This document requires recovery before further editing.",
             ),
         };
         (

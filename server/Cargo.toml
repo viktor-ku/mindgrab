@@ -20,6 +20,7 @@ tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "net", "
 uuid = { version = "=1.26.1", features = ["serde"] }
 tower-http = { version = "=0.6.11", features = ["cors"] }
 tracing-subscriber = "=0.3.23"
+yrs = { version = "=0.28.0", features = ["small-client"] }
 
 [dev-dependencies]
 tower = { version = "=0.5.3", features = ["util"] }

@@ -12,6 +12,7 @@ run = "mise -C server exec -- cargo run"
 
 [tasks."server:test"]
 description = "Run server tests against local Postgres"
+depends = ["crdt:install"]
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test"
 
 [tasks."server:fmt"]

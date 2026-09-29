@@ -118,8 +118,8 @@ A project record is:
 
 `projectId`, the owner, `createdAt`, and `protocolVersion` are immutable (a
 database trigger enforces it). `name`, `lastSequence` (a decimal string), and
-`contentUpdatedAt` are rebuildable summaries projected from accepted document
-content by the update store. Until content is accepted they are `null`/`"0"`,
+`contentUpdatedAt` describe accepted content. The update store advances sequence
+and time; name projection follows in MIN-38. Until content is accepted they are `null`/`"0"`,
 which a client should treat as a registered but uninitialized project. Names are
 not unique, and renaming never changes identity. Clients reconnect using
 `projectId`, `protocolVersion`, `schemaVersion`, and `lastSequence`.
@@ -136,6 +136,20 @@ data is neither converted nor modified and remains available through the legacy
 endpoints. No database reset is required to apply the migration. To start from
 a clean database anyway, run `docker compose down -v && mise run db`, which
 deletes all local users, sessions, and projects.
+
+## Durable Yjs update API
+
+Registered projects accept Yjs V1 bytes at
+`PUT /api/crdt/v1/projects/<projectUUID>/updates/<updateUUID>`, with
+`Content-Type: application/octet-stream` and `X-Mindgrab-Schema-Version: 1`.
+Receipts identify the exact committed bytes by UUID, SHA-256 and sequence;
+identical retries are idempotent. Owner-scoped `/updates`, `/status`, and
+`/baseline` endpoints support raw replay and reconstruction after restart.
+See [ADR 0003](docs/architecture/0003-durable-yjs-update-store.md) for request and
+response shapes, pending/quarantine behavior, limits, and the shared ingestion
+and reconstruction APIs for WebSocket sync and read models. Migration `0007`
+adds binary storage without resetting legacy data. WebSocket transport and browser
+cloud synchronization remain subsequent tasks.
 
 ## Health check
 
@@ -206,7 +220,9 @@ The isolated [Yjs/Yrs proof of concept](tools/yjs-contract/README.md) defines th
 [document and synchronization contract](docs/architecture/0001-yjs-document-contract.md).
 Run `mise run crdt:test` for binary interoperability fixtures and seeded tests, and
 `mise run crdt:check` for static checks. The existing application still uses
-snapshot persistence; see the ADR for scope and excluded upstream regressions.
+snapshot cloud synchronization. Local editing/persistence uses Yjs and IndexedDB.
+The durable backend update store adds application-level causal-gap workarounds
+without patching Yrs; its API/database regression suite runs in `server:test`.
 Browser persistence in IndexedDB — y-indexeddb document storage, the local
 project catalog, durability notifications, and failure handling — is specified
 in [ADR 0002](docs/architecture/0002-local-project-repository.md), with its
