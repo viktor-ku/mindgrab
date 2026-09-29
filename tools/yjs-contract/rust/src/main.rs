@@ -1,7 +1,7 @@
 //! Line-oriented fixture worker, not an HTTP server or an untrusted-input gateway.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 use yrs::types::ToJson;
 use yrs::updates::{decoder::Decode, encoder::Encode};
@@ -23,40 +23,9 @@ struct Edit {
     delete: u32,
     insert: String,
 }
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Content {
-    schema_version: u8,
-    metadata: Metadata,
-    nodes: BTreeMap<String, Node>,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Metadata {
-    name: String,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Node {
-    text: String,
-    placement: Placement,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    position: Option<Position>,
-    color: String,
-    deleted: bool,
-}
-#[derive(Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-struct Position {
-    x: f64,
-    y: f64,
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Placement {
-    parent: Option<String>,
-    rank: String,
-}
+#[path = "../../../../server/src/project/projection.rs"]
+mod projection;
+use projection::{Content, Position};
 #[derive(Serialize)]
 struct ForestNode {
     id: String,
@@ -67,52 +36,16 @@ struct ForestNode {
     children: Vec<ForestNode>,
 }
 fn project(content: &Content) -> Vec<ForestNode> {
-    let mut parents: BTreeMap<String, Option<String>> = content
-        .nodes
-        .iter()
-        .filter(|(_, n)| !n.deleted)
-        .map(|(id, n)| {
-            (
-                id.clone(),
-                n.placement
-                    .parent
-                    .clone()
-                    .filter(|p| content.nodes.get(p).is_some_and(|n| !n.deleted)),
-            )
-        })
-        .collect();
-    let mut done = BTreeSet::new();
-    for start in parents.keys().cloned().collect::<Vec<_>>() {
-        let mut path: Vec<String> = Vec::new();
-        let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-        let mut cursor = Some(start);
-        while let Some(id) = cursor {
-            if done.contains(&id) {
-                break;
-            }
-            if let Some(&index) = seen.get(&id) {
-                let smallest = path[index..].iter().min().unwrap().clone();
-                parents.insert(smallest, None);
-                break;
-            }
-            seen.insert(id.clone(), path.len());
-            path.push(id.clone());
-            cursor = parents[&id].clone();
-        }
-        done.extend(path);
-    }
+    let placements = projection::project(content);
     let mut children: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
-    for (id, parent) in parents {
-        children.entry(parent).or_default().push(id);
+    for (id, placement) in &placements {
+        children
+            .entry(placement.parent.clone())
+            .or_default()
+            .push(id.clone());
     }
     for ids in children.values_mut() {
-        ids.sort_by(|a, b| {
-            content.nodes[a]
-                .placement
-                .rank
-                .cmp(&content.nodes[b].placement.rank)
-                .then(a.cmp(b))
-        });
+        ids.sort_by_key(|id| placements[id].sibling_order);
     }
     fn build(
         id: &str,

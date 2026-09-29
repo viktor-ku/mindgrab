@@ -10,6 +10,10 @@ run = "docker compose up -d postgres"
 description = "Run the API server"
 run = "mise -C server exec -- cargo run"
 
+[tasks."server:rebuild-read-models"]
+description = "Rebuild Yjs inspection indexes from canonical binary storage"
+run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- rebuild-read-models"
+
 [tasks."server:test"]
 description = "Run server tests against local Postgres"
 depends = ["crdt:install"]

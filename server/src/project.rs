@@ -4,6 +4,8 @@
 //! identity and rebuildable summaries only, never document bodies.
 
 mod legacy;
+mod projection;
+pub(crate) mod read_model;
 mod sync;
 pub(crate) mod updates;
 
@@ -41,7 +43,7 @@ macro_rules! project_columns {
     () => {
         "id, protocol_version, schema_version, \
          to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS created_at, \
-         name, last_sequence, \
+         COALESCE(name_utf8, convert_to(name, 'UTF8')) AS name, node_count, projection_sequence, projection_version, projection_status, last_sequence, \
          to_char(content_updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS content_updated_at, \
          (EXTRACT(EPOCH FROM created_at) * 1000000)::BIGINT AS created_at_micros"
     };
@@ -55,6 +57,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/crdt/v1/projects/{project_id}", get(get_project))
         .merge(updates::router())
+        .merge(read_model::router())
         .merge(sync::router())
         .merge(legacy::router())
         .layer(middleware::from_fn(private_response))
@@ -186,7 +189,12 @@ struct CatalogProject {
     protocol_version: i16,
     schema_version: i16,
     created_at: String,
-    name: Option<String>,
+    name: Option<read_model::Utf8Text>,
+    node_count: Option<i32>,
+    #[serde(serialize_with = "read_model::optional_sequence")]
+    projection_sequence: Option<i64>,
+    projection_version: Option<i16>,
+    projection_status: String,
     #[serde(serialize_with = "decimal_string")]
     last_sequence: i64,
     content_updated_at: Option<String>,

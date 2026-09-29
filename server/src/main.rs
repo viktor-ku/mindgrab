@@ -21,6 +21,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => return Err("Could not parse .env".into()),
     }
     tracing_subscriber::fmt::init();
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["rebuild-read-models"] {
+        let database_url = std::env::var("DATABASE_URL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        project::read_model::rebuild_all(&pool)
+            .await
+            .map_err(|_| "Read-model rebuild failed; see project errors above")?;
+        println!("Read models rebuilt from canonical binary storage");
+        return Ok(());
+    }
+    if !args.is_empty() {
+        return Err("Usage: server [rebuild-read-models]".into());
+    }
     let config = Config::from_env()?;
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -37,6 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+
+    project::read_model::start_worker(pool.clone());
 
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {

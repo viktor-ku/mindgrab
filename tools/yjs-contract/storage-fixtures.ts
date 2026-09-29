@@ -10,7 +10,25 @@ import {
 import { base, capture, ID, node, text } from "./scenarios";
 
 const input = await Bun.stdin.json();
-if (input.large) {
+if (input.nul || input.empty) {
+  const doc = base();
+  if (input.empty) nodeMap(doc).clear();
+  else {
+    (doc.getMap("project").get("metadata") as Y.Map<unknown>).set(
+      "name",
+      "Ideas\u0000🌍",
+    );
+    text(doc).insert(0, "\u0000");
+  }
+  console.log(
+    JSON.stringify({
+      initial: [...Y.encodeStateAsUpdate(doc)],
+      content: materialize(doc),
+      forest: projectForest(materialize(doc)),
+    }),
+  );
+  doc.destroy();
+} else if (input.large) {
   const doc = base();
   for (let i = 10; i < 266; i++) addNode(doc, ID(i), node("x".repeat(32_000)));
   console.log(JSON.stringify({ checkpoint: [...Y.encodeStateAsUpdate(doc)] }));
