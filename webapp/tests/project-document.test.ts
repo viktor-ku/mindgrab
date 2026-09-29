@@ -29,6 +29,7 @@ import {
   translateSubtree,
 } from "../src/project-document";
 import type { ProjectContent } from "../src/project-document";
+import { retainUndoHistory } from "../src/undo-history";
 
 const PROJECT = "10000000-0000-4000-8000-000000000000";
 const ID = (n: number) =>
@@ -64,10 +65,14 @@ function capture(doc: Y.Doc, action: () => unknown) {
 const fork = (doc: Y.Doc) =>
   openProjectDocument(PROJECT, [Y.encodeStateAsUpdate(doc)], ORIGIN.remote);
 const undoManager = (doc: Y.Doc) =>
-  new Y.UndoManager(doc.getMap("project"), {
-    trackedOrigins: new Set([ORIGIN.local]),
-    captureTimeout: 0,
-  });
+  (() => {
+    const manager = new Y.UndoManager(doc.getMap("project"), {
+      trackedOrigins: new Set([ORIGIN.local]),
+      captureTimeout: 0,
+    });
+    retainUndoHistory(manager);
+    return manager;
+  })();
 function visibleIds(nodes: MindMapNode[]): string[] {
   return nodes.flatMap((node) => [node.id, ...visibleIds(node.next ?? [])]);
 }
@@ -552,6 +557,18 @@ describe("tree commands", () => {
 });
 
 describe("atomicity and undo", () => {
+  test("undo history keeps at most 100 user actions", () => {
+    const doc = tree();
+    const undo = undoManager(doc);
+    for (let action = 0; action < 101; action++) {
+      renameProject(doc, `Ideas ${action}`);
+      undo.stopCapturing();
+    }
+    expect(undo.undoStack).toHaveLength(100);
+    undo.destroy();
+    doc.destroy();
+  });
+
   const commands: [string, (doc: Y.Doc) => unknown][] = [
     ["create root", (doc) => createRoot(doc, { text: "R" })],
     ["create child", (doc) => createChild(doc, B, { text: "R" })],

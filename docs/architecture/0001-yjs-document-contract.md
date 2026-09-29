@@ -164,8 +164,14 @@ project boundaries. The reference uses captureTimeout=0 for deterministic tests.
 | UndoManager instance | Undo/redo changes | Managed by Yjs |
 
 Origins are process-local identities, not strings serialized on the wire.
-`createUndoManager` tracks only `ORIGIN.local`. Create/destroy it per open editing
-session; opening a new project starts empty history. Import before attaching undo.
+The editor creates one `Y.UndoManager` per open project session, tracks only
+`ORIGIN.local`, and retains at most 100 user actions. Opening or importing a
+project creates a fresh manager; switching projects destroys the old one.
+Each semantic command and committed drag is a separate step. Consecutive text
+changes within one node editing session group into one step; blur, Enter, Escape,
+switching nodes, and other commands end that group. Undo and redo are available
+from the toolbar, on the canvas, and while editing node text. Undo stacks remain
+local to the editing session and are never synchronized.
 
 Future browser persistence uses `y-indexeddb` under an owner/project key plus a
 separate durable submission outbox. A local edit (including undo/redo) queues raw
