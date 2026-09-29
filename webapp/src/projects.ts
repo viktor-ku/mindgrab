@@ -1,13 +1,7 @@
-import type { LayoutAnchor, MindMapNode } from "./mind-map";
-import { isNodeColor } from "./node-colors";
+import { ProjectFileSchema } from "./project-schema";
+import type { Project } from "./project-schema";
 
-export interface Project {
-  version: 1;
-  name: string;
-  nodes: MindMapNode[];
-  anchor?: LayoutAnchor;
-  view: { left: number; top: number; zoom: number };
-}
+export type { Project } from "./project-schema";
 
 const PREFIX = "proj/";
 const LATEST_PROJECT_KEY = "mindgrab/latest-project";
@@ -53,60 +47,14 @@ function rememberProject(storage: Storage, key: string) {
   }
 }
 
-const finite = (value: unknown): value is number =>
-  typeof value === "number" && Number.isFinite(value);
-const object = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 export function parseProject(json: string): Project {
-  const value: unknown = JSON.parse(json);
-  const ids = new Set<string>();
-  function validNodes(nodes: unknown, depth = 0): nodes is MindMapNode[] {
-    return (
-      depth < 100 &&
-      Array.isArray(nodes) &&
-      nodes.every((node: unknown) => {
-        if (
-          !object(node) ||
-          typeof node.id !== "string" ||
-          !node.id ||
-          ids.has(node.id) ||
-          typeof node.text !== "string"
-        )
-          return false;
-        ids.add(node.id);
-        return (
-          (node.color === undefined || isNodeColor(node.color)) &&
-          (node.position === undefined ||
-            (object(node.position) &&
-              finite(node.position.x) &&
-              finite(node.position.y))) &&
-          (node.next === undefined || validNodes(node.next, depth + 1))
-        );
-      })
-    );
-  }
-  if (
-    !object(value) ||
-    value.version !== 1 ||
-    typeof value.name !== "string" ||
-    !value.name.trim() ||
-    !validNodes(value.nodes) ||
-    !object(value.view) ||
-    !finite(value.view.left) ||
-    !finite(value.view.top) ||
-    !finite(value.view.zoom) ||
-    value.view.zoom < 0.25 ||
-    value.view.zoom > 2.5 ||
-    (value.anchor !== undefined &&
-      (!object(value.anchor) ||
-        typeof value.anchor.id !== "string" ||
-        !finite(value.anchor.centerY)))
-  )
+  try {
+    return ProjectFileSchema.parse(JSON.parse(json));
+  } catch {
     throw new Error(
       "This saved project is invalid or uses an unsupported format.",
     );
-  return value as unknown as Project;
+  }
 }
 
 const UPDATED_PREFIX = "project-updated/";
