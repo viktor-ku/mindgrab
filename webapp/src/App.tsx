@@ -37,6 +37,7 @@ import {
 import { openSnapshot, snapshotProject } from "./project-snapshot";
 import { createProjectView } from "./project-view";
 import { bindTextarea } from "./text-binding";
+import { retainUndoHistory } from "./undo-history";
 import {
   ProjectRepository,
   accountNamespace,
@@ -67,8 +68,21 @@ const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
     ["ArrowDown", "down"],
   ]);
 
-function NodeEditor(props: { doc: Y.Doc; id: string; onFinish: () => void }) {
+function NodeEditor(props: {
+  doc: Y.Doc;
+  id: string;
+  onFinish: () => void;
+  onSelectionChange: (selection: TextSelection) => void;
+}) {
   let input!: HTMLTextAreaElement;
+  const reportSelection = () =>
+    props.onSelectionChange({
+      id: props.id,
+      start: input.selectionStart,
+      end: input.selectionEnd,
+      direction: input.selectionDirection,
+      writing: true,
+    });
   const [value, setValue] = createSignal("");
   onMount(() => {
     onCleanup(bindTextarea(input, props.doc, props.id, setValue));
@@ -98,8 +112,15 @@ function NodeEditor(props: { doc: Y.Doc; id: string; onFinish: () => void }) {
         maxLength={LIMITS.text}
         class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-center outline-none select-text cursor-text"
         onBlur={props.onFinish}
+        onInput={reportSelection}
+        onSelect={reportSelection}
+        onKeyUp={reportSelection}
         onKeyDown={(e) => {
-          e.stopPropagation();
+          const historyShortcut =
+            (e.ctrlKey || e.metaKey) &&
+            !e.altKey &&
+            (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y");
+          if (!historyShortcut) e.stopPropagation();
           if (e.isComposing) return;
           if (
             e.key === "Escape" ||
@@ -118,6 +139,20 @@ function NodeEditor(props: { doc: Y.Doc; id: string; onFinish: () => void }) {
   );
 }
 
+interface TextSelection {
+  id: string;
+  start: number;
+  end: number;
+  direction: "forward" | "backward" | "none";
+  writing: boolean;
+}
+
+interface UndoSelection {
+  id?: string;
+  writing: boolean;
+  text?: TextSelection;
+}
+
 function Node(props: {
   doc: Y.Doc;
   id: string;
@@ -132,6 +167,7 @@ function Node(props: {
   onSelect: () => void;
   onWrite: () => void;
   onFinish: () => void;
+  onSelectionChange: (selection: TextSelection) => void;
   onPointerDown: (event: PointerEvent) => void;
 }) {
   let container!: HTMLDivElement;
@@ -183,7 +219,12 @@ function Node(props: {
           </button>
         }
       >
-        <NodeEditor doc={props.doc} id={props.id} onFinish={props.onFinish} />
+        <NodeEditor
+          doc={props.doc}
+          id={props.id}
+          onFinish={props.onFinish}
+          onSelectionChange={props.onSelectionChange}
+        />
       </Show>
     </div>
   );
@@ -317,6 +358,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   // The document is the only writable project content. Everything else here
   // (selection, viewport, measurements, drag previews) is local UI state.
   const [doc, setDoc] = createSignal(ephemeralDocument());
+  const [historyRevision, setHistoryRevision] = createSignal(0);
+  let editorSelection: TextSelection | undefined;
   const [storageReady, setStorageReady] = createSignal(false);
   const [saveStatus, setSaveStatus] = createSignal<
     "" | "saving" | "done" | "error"
@@ -328,12 +371,61 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     const view = createProjectView(current);
     const undo = new Y.UndoManager(current.getMap("project"), {
       trackedOrigins: new Set([ORIGIN.local]),
-      // Steps are separated explicitly: see `command` and text editing.
+      // Commands are separate steps; typing groups for one focus session.
       captureTimeout: Number.POSITIVE_INFINITY,
     });
+    const releaseHistoryLimit = retainUndoHistory(undo);
+    let selectionBefore: UndoSelection = { writing: false };
+    const captureSelection = (): UndoSelection => ({
+      id: selectedId(),
+      writing: writing(),
+      ...(editorSelection && { text: { ...editorSelection } }),
+    });
+    const beforeTransaction = () => {
+      selectionBefore = captureSelection();
+    };
+    current.on("beforeTransaction", beforeTransaction);
+    undo.on("stack-item-added", ({ stackItem }) => {
+      setHistoryRevision((n) => n + 1);
+      stackItem.meta.set("selection-before", selectionBefore);
+      queueMicrotask(() =>
+        stackItem.meta.set("selection-after", captureSelection()),
+      );
+    });
+    undo.on("stack-item-popped", ({ stackItem, type }) => {
+      setHistoryRevision((n) => n + 1);
+      const selection = stackItem.meta.get(
+        type === "undo" ? "selection-before" : "selection-after",
+      ) as UndoSelection | undefined;
+      if (!selection) return;
+      setSelectedId(selection.id);
+      setWriting(selection.writing);
+      editorSelection = selection.text;
+      if (selection.writing && selection.text) {
+        queueMicrotask(() => {
+          const editor = canvas.querySelector<HTMLTextAreaElement>(
+            '[aria-label="Node text"]',
+          );
+          if (!editor) return;
+          editor.focus({ preventScroll: true });
+          const start = Math.min(
+            selection.text?.start ?? 0,
+            editor.value.length,
+          );
+          const end = Math.min(
+            selection.text?.end ?? start,
+            editor.value.length,
+          );
+          editor.setSelectionRange(start, end, selection.text?.direction);
+        });
+      }
+    });
+    undo.on("stack-cleared", () => setHistoryRevision((n) => n + 1));
     untrack(() => props.onDocument?.(current));
     onCleanup(() => {
       undo.destroy();
+      releaseHistoryLimit();
+      current.off("beforeTransaction", beforeTransaction);
       if (handle) void handle.close();
       else current.destroy();
     });
@@ -486,6 +578,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   function resetProjectUi() {
     clearSaveStatus();
     finishWriting();
+    editorSelection = undefined;
     cancelPointer();
     suppressClick = false;
     batch(() => {
@@ -702,6 +795,26 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
+  function redo() {
+    const { undo } = session();
+    undo.stopCapturing();
+    undo.redo();
+    canvas.focus({ preventScroll: true });
+  }
+
+  const canUndo = () => {
+    historyRevision();
+    return session().undo.canUndo();
+  };
+  const canRedo = () => {
+    historyRevision();
+    return session().undo.canRedo();
+  };
+
+  function recordEditorSelection(selection: TextSelection) {
+    editorSelection = selection;
+  }
+
   function select(id: string) {
     if (suppressClick) return;
     if (selectedId() !== id) {
@@ -802,9 +915,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     const id = selectedId();
     if (!id) return;
     finishWriting();
+    command((doc) => deleteSubtree(doc, id));
     setSelectedId(undefined);
     setColorScope("node");
-    command((doc) => deleteSubtree(doc, id));
     canvas.focus({ preventScroll: true });
   }
 
@@ -951,16 +1064,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       }
       if (pointer) return;
       if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        e.key.toLowerCase() === "z"
-      ) {
-        e.preventDefault();
-        undo();
-        return;
-      }
-      if (
         !selectedId() &&
         e.key === "Enter" &&
         !e.shiftKey &&
@@ -1047,10 +1150,68 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       event.preventDefault();
       save();
     };
+    const historyShortcut = (
+      event: KeyboardEvent | null,
+      action: "undo" | "redo",
+    ) => {
+      if (
+        !event ||
+        event.isComposing ||
+        !storageReady() ||
+        contextMenu() ||
+        pointer
+      )
+        return;
+      const target = event.target;
+      const textEditor =
+        target instanceof Element &&
+        target.matches('textarea[aria-label="Node text"]');
+      if (
+        target instanceof Element &&
+        target.closest("input, textarea, [contenteditable=true]") &&
+        !textEditor
+      )
+        return;
+      if (writing() && !textEditor) return;
+      event.preventDefault();
+      if (textEditor) {
+        const manager = session().undo;
+        manager.stopCapturing();
+        if (action === "undo") manager.undo();
+        else manager.redo();
+      } else if (action === "undo") undo();
+      else redo();
+    };
     // Let the callback decide whether the target accepts text before suppressing
     // the browser's native save dialog.
     createShortcut(["Control", "S"], saveShortcut, { preventDefault: false });
     createShortcut(["Meta", "S"], saveShortcut, { preventDefault: false });
+    createShortcut(
+      ["Control", "Z"],
+      (event) => historyShortcut(event, "undo"),
+      { preventDefault: false },
+    );
+    createShortcut(["Meta", "Z"], (event) => historyShortcut(event, "undo"), {
+      preventDefault: false,
+    });
+    createShortcut(
+      ["Control", "Shift", "Z"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(
+      ["Meta", "Shift", "Z"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(
+      ["Control", "Y"],
+      (event) => historyShortcut(event, "redo"),
+      { preventDefault: false },
+    );
+    createShortcut(["Meta", "Y"], (event) => historyShortcut(event, "redo"), {
+      preventDefault: false,
+    });
     window.addEventListener("keydown", keydown);
     const dismissContextMenu = (e: PointerEvent) => {
       if (
@@ -1136,6 +1297,24 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
           </button>
           <button type="button" class="map-control" onClick={save}>
             Save
+          </button>
+          <button
+            type="button"
+            class="map-control"
+            aria-label="Undo"
+            disabled={!canUndo()}
+            onClick={undo}
+          >
+            Undo
+          </button>
+          <button
+            type="button"
+            class="map-control"
+            aria-label="Redo"
+            disabled={!canRedo()}
+            onClick={redo}
+          >
+            Redo
           </button>
           <button
             type="button"
@@ -1354,6 +1533,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                 onFinish={() => {
                   if (selectedId() === id) finishWriting();
                 }}
+                onSelectionChange={recordEditorSelection}
                 onPointerDown={(e) => startPointer(e, id)}
               />
             );

@@ -140,6 +140,30 @@ describe("remote documents", () => {
 });
 
 describe("text editing", () => {
+  test("undo and redo are available in the editor and toolbar", async () => {
+    const id = await rootId();
+    const undo = page.getByRole("button", { name: "Undo", exact: true });
+    const redo = page.getByRole("button", { name: "Redo", exact: true });
+    expect(await undo.isDisabled()).toBe(true);
+    expect(await redo.isDisabled()).toBe(true);
+
+    await edit(id);
+    await page.keyboard.press("End");
+    await page.keyboard.type("!");
+    await page.keyboard.press("Control+z");
+    expect(await selection()).toEqual(["New idea", 8, 8]);
+    await page.keyboard.press("Control+Shift+z");
+    expect((await selection())[0]).toBe("New idea!");
+    await page.keyboard.press("Escape");
+
+    await undo.click();
+    expect(await node(id).innerText()).toBe("New idea");
+    expect(await redo.isEnabled()).toBe(true);
+    await redo.click();
+    expect(await node(id).innerText()).toBe("New idea!");
+    expect(await undo.isEnabled()).toBe(true);
+  });
+
   test("typing, newlines, emoji, and paste become incremental operations", async () => {
     const id = await rootId();
     await edit(id);
@@ -336,6 +360,7 @@ describe("existing interactions", () => {
     expect(await call("ids")).toEqual([root, second]);
     await page.keyboard.press("Control+z");
     expect(await call("ids")).toEqual([root, second, first]);
+    expect(await node(first).getAttribute("data-selected")).toBe("true");
     await page.keyboard.press("Control+z");
     expect(await call("ids")).toEqual([root, first, second]);
     await page.keyboard.press("Control+z");
