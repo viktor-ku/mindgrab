@@ -271,6 +271,13 @@ export function readProject(doc: Y.Doc): ProjectState {
   }
 }
 
+// A cheap read for catalog indexes; it does not validate the document.
+export function projectName(doc: Y.Doc): string | undefined {
+  const metadata = doc.getMap(ROOT).get("metadata");
+  const name = metadata instanceof Y.Map ? metadata.get("name") : undefined;
+  return typeof name === "string" ? name : undefined;
+}
+
 export function materializeProject(doc: Y.Doc): ProjectContent {
   const state = readProject(doc);
   if (state.status === "ready") return state.content;

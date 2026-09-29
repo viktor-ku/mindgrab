@@ -207,3 +207,8 @@ The isolated [Yjs/Yrs proof of concept](tools/yjs-contract/README.md) defines th
 Run `mise run crdt:test` for binary interoperability fixtures and seeded tests, and
 `mise run crdt:check` for static checks. The existing application still uses
 snapshot persistence; see the ADR for scope and excluded upstream regressions.
+Browser persistence in IndexedDB — y-indexeddb document storage, the local
+project catalog, durability notifications, and failure handling — is specified
+in [ADR 0002](docs/architecture/0002-local-project-repository.md), with its
+storage lifecycle APIs tested against real Chromium IndexedDB by
+`mise run webapp:test`.
