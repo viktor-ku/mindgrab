@@ -26,3 +26,10 @@ Yrs #670/#673 regressions and arbitrary independent same-client gaps are exclude
 at the task owner's request. The seeded suite documents its delivery constraints.
 Provider versions are pinned but live IndexedDB/WebSocket behavior is not tested.
 See the ADR for the exact compatibility evidence, limitations and proposed API.
+
+The production [durable update store](../../docs/architecture/0003-durable-yjs-update-store.md)
+now covers those causal-gap topologies with a Mindgrab workaround, without a Yrs
+patch. `storage-fixtures.ts` supplies JS bytes and round-trip verification to the
+SQLx storage API suite (`mise run server:test`); that suite also launches a fresh
+Rust process to verify committed reconstruction between arrivals. Run both suites
+on upgrades. This does not change the trusted POC worker's replay algorithm.

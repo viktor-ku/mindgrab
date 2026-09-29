@@ -90,7 +90,11 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
             axum::http::Method::POST,
             axum::http::Method::PUT,
         ])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-mindgrab-schema-version"),
+        ])
         .expose_headers([HeaderName::from_static("server-timing")]))
 }
 
