@@ -1,4 +1,5 @@
 import type { LayoutAnchor, MindMapNode } from "./mind-map";
+import { isNodeColor } from "./node-colors";
 
 export interface Project {
   version: 1;
@@ -75,6 +76,7 @@ export function parseProject(json: string): Project {
           return false;
         ids.add(node.id);
         return (
+          (node.color === undefined || isNodeColor(node.color)) &&
           (node.position === undefined ||
             (object(node.position) &&
               finite(node.position.x) &&

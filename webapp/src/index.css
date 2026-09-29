@@ -18,6 +18,45 @@
   outline: 2px solid #2563eb;
   outline-offset: 2px;
 }
+.color-scope {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.375rem;
+  padding: 0.375rem 0.5rem;
+  color: #57534e;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.color-scope:hover {
+  color: #292524;
+}
+.color-scope:focus-within,
+.color-choice:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.color-scope-selected {
+  background: white;
+  color: #292524;
+  box-shadow: 0 1px 2px #1c19171a;
+}
+.color-choice {
+  display: grid;
+  min-height: 2.75rem;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+.color-choice:hover {
+  background: #f5f5f4;
+}
+.color-choice[aria-pressed="true"] {
+  border-color: #292524;
+  box-shadow: 0 0 0 1px #292524;
+}
 .map-toolbar {
   padding: 0.25rem;
   background: white;

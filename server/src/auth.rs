@@ -311,9 +311,39 @@ struct ProjectNode {
     id: Uuid,
     text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<NodeColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     position: Option<NodePosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next: Option<Vec<ProjectNode>>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum NodeColor {
+    Blue,
+    Teal,
+    Green,
+    Amber,
+    Orange,
+    Rose,
+    Violet,
+    Slate,
+}
+
+impl NodeColor {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Amber => "amber",
+            Self::Orange => "orange",
+            Self::Rose => "rose",
+            Self::Violet => "violet",
+            Self::Slate => "slate",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -355,6 +385,7 @@ struct StoredPNode {
     project_id: i64,
     id: Uuid,
     text: String,
+    color: String,
     sort_order: i64,
     position_x: Option<f64>,
     position_y: Option<f64>,
@@ -422,13 +453,15 @@ async fn save_project(
     for entry in &new_nodes {
         let position_x = entry.node.position.as_ref().map(|position| position.x);
         let position_y = entry.node.position.as_ref().map(|position| position.y);
+        let color = entry.node.color.unwrap_or(NodeColor::Blue).as_str();
         sqlx::query(
-            "INSERT INTO pnode (id, user_id, project_id, text, parent_pnode_id, sort_order, position_x, position_y) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, id) DO UPDATE SET text = EXCLUDED.text, parent_pnode_id = EXCLUDED.parent_pnode_id, sort_order = EXCLUDED.sort_order, position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, updated_at = NOW()",
+            "INSERT INTO pnode (id, user_id, project_id, text, color, parent_pnode_id, sort_order, position_x, position_y) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (project_id, id) DO UPDATE SET text = EXCLUDED.text, color = EXCLUDED.color, parent_pnode_id = EXCLUDED.parent_pnode_id, sort_order = EXCLUDED.sort_order, position_x = EXCLUDED.position_x, position_y = EXCLUDED.position_y, updated_at = NOW()",
         )
         .bind(entry.node.id)
         .bind(user.id)
         .bind(saved.id)
         .bind(&entry.node.text)
+        .bind(color)
         .bind(entry.parent_pnode_id)
         .bind(entry.sort_order)
         .bind(position_x)
@@ -463,7 +496,7 @@ async fn load_projects(pool: &PgPool, user_id: i64) -> Result<Vec<ProjectRecord>
     .fetch_all(&mut *tx)
     .await?;
     let pnodes = sqlx::query_as::<_, StoredPNode>(
-        "SELECT project_id, id, text, sort_order, position_x, position_y, parent_pnode_id FROM pnode WHERE user_id = $1 ORDER BY project_id, parent_pnode_id NULLS FIRST, sort_order, id",
+        "SELECT project_id, id, text, color, sort_order, position_x, position_y, parent_pnode_id FROM pnode WHERE user_id = $1 ORDER BY project_id, parent_pnode_id NULLS FIRST, sort_order, id",
     )
     .bind(user_id)
     .fetch_all(&mut *tx)
@@ -527,6 +560,7 @@ fn project_node_value(
         .zip(pnode.position_y)
         .map(|(x, y)| json!({"x": json_number(x), "y": json_number(y)}));
     let mut node = json!({"id": pnode.id.to_string(), "text": pnode.text});
+    node["color"] = json!(pnode.color);
     if let Some(position) = position {
         node["position"] = position;
     }

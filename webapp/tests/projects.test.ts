@@ -48,6 +48,30 @@ test("round trips the name, tree, manual positions, anchor, and view as readable
   expect(loadProject(local, "proj/My ideas")).toEqual(project);
 });
 
+test("round trips preset node colors and rejects unsupported colors", () => {
+  const local = storage();
+  const colored: Project = {
+    ...project,
+    nodes: [
+      {
+        ...project.nodes[0],
+        color: "teal",
+        next: [{ id: "child", text: "Child", color: "rose" }],
+      },
+    ],
+  };
+  saveProject(local, colored);
+  expect(loadProject(local, "proj/My ideas")).toEqual(colored);
+  expect(() =>
+    parseProject(
+      JSON.stringify({
+        ...colored,
+        nodes: [{ id: "a", text: "Bad", color: "not-a-preset" }],
+      }),
+    ),
+  ).toThrow("This saved project is invalid or uses an unsupported format.");
+});
+
 test("lists only projects and updates the same name without affecting others", () => {
   const local = storage();
   local.setItem("other-app", "keep");

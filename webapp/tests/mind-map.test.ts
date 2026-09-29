@@ -8,6 +8,7 @@ import {
   moveNode,
   navigationTarget,
   reorderNode,
+  setNodeColor,
   translateSubtree,
   updateNode,
 } from "../src/mind-map";
@@ -25,6 +26,29 @@ const tree = (): MindMapNode[] => [
   { id: "e", text: "E" },
 ];
 const ids = (nodes: MindMapNode[]) => nodes.map((node) => node.id);
+
+describe("node colors", () => {
+  test("colors one node without changing its children or other branches", () => {
+    const original = tree();
+    const changed = setNodeColor(original, "b", "rose");
+
+    expect(findNode(changed, "b")?.color).toBe("rose");
+    expect(findNode(changed, "c")?.color).toBeUndefined();
+    expect(findNode(changed, "a")?.color).toBeUndefined();
+    expect(findNode(changed, "d")?.color).toBeUndefined();
+    expect(findNode(original, "b")?.color).toBeUndefined();
+  });
+
+  test("colors the selected node and every descendant in its branch", () => {
+    const original = tree();
+    const changed = setNodeColor(original, "a", "teal", true);
+
+    for (const id of ["a", "b", "c", "d"])
+      expect(findNode(changed, id)?.color).toBe("teal");
+    expect(findNode(changed, "e")?.color).toBeUndefined();
+    expect(findNode(original, "a")?.color).toBeUndefined();
+  });
+});
 
 describe("free positioning", () => {
   const positions = (nodes: MindMapNode[]) =>
