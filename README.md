@@ -69,19 +69,21 @@ row lock; rotated refresh tokens are persisted before returning. Transient
 refresh failures receive one bounded retry and preserve the session. Expired
 records are cleaned up hourly.
 
-Projects are saved in browser `localStorage` first and restored from there on
-startup. When signed in, saved projects also sync to the `project` table. Cloud
-records are scoped to the authenticated local user ID, and the API never accepts
-an owner ID from the browser. Projects downloaded from the cloud are copied to
-`localStorage`, so they remain available if the server is temporarily unavailable.
-Project names and project-level canvas data, including the view and layout
-anchor, are stored in the `project.state` JSONB value. Each map node is stored
-in `pnode` with its client-generated UUID as a native UUID primary key, text,
-layout position, sibling order, and an optional UUID parent node. The API
-rebuilds the nested project state from those rows while preserving node IDs. The
-migration keeps project state intact and starts the `pnode` table empty; there
-is no existing user data to backfill. Project names remain unique per user in
-this legacy snapshot path.
+Project editing and automatic saving use Yjs and IndexedDB. **Saved locally**
+means the browser committed the update. When the account session is confirmed,
+projects register by UUID and synchronize incremental Yjs updates with the Rust
+API. **Saved to cloud** means durable baseline/receipt coverage and valid server
+content, rather than a WebSocket connection or timestamp comparison. Offline
+edits remain local and reconcile after reconnect or reload. Cloud-only projects
+are discovered into the account's local catalog; names may be duplicated.
+
+Documents and offline tab relays are scoped by deployment/account/project.
+Anonymous projects stay local. Anonymous claiming and the complete account
+lifecycle are MIN-41; offline application-shell caching is MIN-33. The fenced
+legacy `project`/`pnode` snapshot API remains for removal at MIN-43, but the
+browser never uploads name-keyed snapshots. See
+[ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
+recovery, lifetime fencing and the real-browser test command.
 
 ## Project catalog API (Yjs protocol v1)
 
@@ -151,7 +153,7 @@ See [ADR 0003](docs/architecture/0003-durable-yjs-update-store.md) for request a
 response shapes, pending/quarantine behavior, limits, and the shared ingestion
 and reconstruction APIs for WebSocket sync and read models. Migration `0007`
 adds binary storage without resetting legacy data. Authenticated WebSocket
-transport is described below; browser cloud-sync integration remains MIN-37.
+transport is described below; browser cloud-sync integration is described in [ADR 0006](docs/architecture/0006-browser-yjs-sync.md).
 
 ## Authenticated Yjs WebSocket sync
 
@@ -168,7 +170,7 @@ update/receipt API. Awareness is omitted. Vite forwards WebSocket upgrades local
 production proxies must forward Upgrade/Connection, Cookie and Origin and allow
 the 20-second heartbeat. See [ADR 0004](docs/architecture/0004-authenticated-yjs-websocket-sync.md)
 for client setup, multi-process deployment, limits, close codes, and real-socket
-fault/restart tests. Browser cloud provider integration remains MIN-37.
+fault/restart tests. Browser integration is described in [ADR 0006](docs/architecture/0006-browser-yjs-sync.md).
 
 ## Yjs inspection and read-model repair
 
@@ -243,6 +245,7 @@ mise run webapp:check
 mise run webapp:build
 mise run webapp:test
 mise run webapp:test:browser
+mise run webapp:test:cloud
 ```
 
 `webapp:test:browser` drives the editor in headless Chromium through Playwright
@@ -254,8 +257,8 @@ document to a second in-process replica to simulate edits from another device.
 The isolated [Yjs/Yrs proof of concept](tools/yjs-contract/README.md) defines the
 [document and synchronization contract](docs/architecture/0001-yjs-document-contract.md).
 Run `mise run crdt:test` for binary interoperability fixtures and seeded tests, and
-`mise run crdt:check` for static checks. The existing application still uses
-snapshot cloud synchronization. Local editing/persistence uses Yjs and IndexedDB.
+`mise run crdt:check` for static checks. The application synchronizes incremental Yjs updates and verified durable
+receipts. Local editing/persistence uses Yjs and IndexedDB.
 The durable backend update store adds application-level causal-gap workarounds
 without patching Yrs; its API/database regression suite runs in `server:test`.
 Browser persistence in IndexedDB — y-indexeddb document storage, the local

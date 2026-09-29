@@ -753,3 +753,58 @@ async fn schema_change_fences_an_already_connected_client(pool: PgPool) {
     };
     assert_eq!(u16::from(frame.code), 1008);
 }
+
+#[sqlx::test]
+#[ignore = "Run mise run webapp:test:cloud; requires built webapp and Chromium"]
+async fn browser_cloud_sync_recovers_offline_tabs_receipts_deletes_and_large_batches(pool: PgPool) {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let f = fixture(pool).await;
+    let cookie = sign_in(&f).await;
+    let server = server(f.state.clone()).await;
+    let owner: i64 = sqlx::query_scalar("SELECT id FROM users ORDER BY id LIMIT 1")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let input = json!({"serverUrl": server.address, "cookie": cookie, "ownerId": owner});
+    let result = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new("bun")
+            .args(["--bun", "tests/browser/cloud.integration.ts"])
+            .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../webapp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(result["converged"], true);
+    assert_eq!(result["nodes"], 29);
+    let id: Uuid = result["projectId"].as_str().unwrap().parse().unwrap();
+    let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let baseline = updates::synchronization_baseline(&f.state.pool, owner, id)
+        .await
+        .unwrap();
+    assert_eq!(baseline.validation, "valid");
+}
