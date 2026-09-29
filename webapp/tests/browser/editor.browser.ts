@@ -52,6 +52,7 @@ beforeEach(async () => {
   page.on("pageerror", (error) => errors.push(error));
   const url = server.resolvedUrls?.local[0] ?? "http://localhost:5199/";
   await page.goto(new URL("tests/browser/harness.html", url).href);
+  await page.waitForSelector('[data-storage-ready="true"]');
   await page.waitForSelector("[data-node-id]");
   (page as unknown as { errors: Error[] }).errors = errors;
 });
@@ -126,7 +127,9 @@ describe("remote documents", () => {
     const id = await rootId();
     await page.getByRole("button", { name: "New", exact: true }).click();
     await page.waitForFunction((id) => !window.harness.ids().includes(id), id);
-    expect(await call("retiredObservers")).toEqual([0]);
+    expect((await call("retiredObservers")).every((count) => count === 0)).toBe(
+      true,
+    );
     await call("editRetired", id, "Stale ");
     await frame();
     expect(await page.getByText("Stale", { exact: false }).count()).toBe(0);
@@ -293,6 +296,25 @@ describe("dragging", () => {
 });
 
 describe("existing interactions", () => {
+  test("automatically saves edits and restores the UUID project after reload", async () => {
+    const id = await rootId();
+    await node(id).dblclick();
+    await editor().fill("Saved without pressing Save");
+    expect(await node(id).textContent()).toContain(
+      "Saved without pressing Save",
+    );
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('[role="status"]')].some(
+        (element) => element.textContent?.trim() === "Saved locally",
+      ),
+    );
+    await page.reload();
+    await page.waitForSelector('[data-storage-ready="true"]');
+    expect(
+      await page.locator("[data-node-id]").first().textContent(),
+    ).toContain("Saved without pressing Save");
+  });
+
   test("add, edit, navigate, reorder, delete, undo, and zoom", async () => {
     const root = await rootId();
     await node(root).click();

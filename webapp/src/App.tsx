@@ -26,47 +26,38 @@ import {
   createSibling,
   deleteSubtree,
   LIMITS,
+  materializeProject,
   ORIGIN,
+  projectMindMap,
   renameProject,
   reorderNode,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
-import {
-  normalizeSnapshot,
-  openSnapshot,
-  snapshotProject,
-} from "./project-snapshot";
+import { openSnapshot, snapshotProject } from "./project-snapshot";
 import { createProjectView } from "./project-view";
 import { bindTextarea } from "./text-binding";
 import {
-  listProjects,
-  loadLatestProject,
-  loadProject,
-  parseProject,
-  projectUpdatedAt,
-  saveProject,
-  userProjectStorage,
-} from "./projects";
-import type { Project } from "./projects";
+  ProjectRepository,
+  accountNamespace,
+  ANONYMOUS_NAMESPACE,
+} from "./project-repository";
+import type { CatalogEntry, ProjectHandle } from "./project-repository";
+import type { Project } from "./project-schema";
+import { parseProject } from "./projects";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
-import {
-  findDuplicateProject,
-  saveImportedProject,
-  readProjectFile,
-  writeProjectFile,
-} from "./project-import-export";
+import { readProjectFile, writeProjectFile } from "./project-import-export";
 import { AccountControls } from "./AccountControls";
 import type { User } from "./AccountControls";
-import { syncProjects, uploadProject } from "./project-sync";
 import type {
   LayoutAnchor,
   MindMapNode,
   NodePosition,
   NodeSize,
 } from "./mind-map";
+import { backendEndpoint } from "./backend";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -206,157 +197,134 @@ interface ContextMenuState {
 }
 
 export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
-  const [signedIn, setSignedIn] = createSignal(false);
   const cachedUserKey = "mindgrab/cached-user-id";
-  const anonymousOwnerKey = "mindgrab/anonymous-projects-owner";
-  let activeProjectStorage: Storage = window.localStorage;
   let activeUserId: number | undefined;
   try {
     const cachedUserId = Number(window.localStorage.getItem(cachedUserKey));
     if (Number.isSafeInteger(cachedUserId) && cachedUserId > 0) {
-      activeProjectStorage = userProjectStorage(
-        window.localStorage,
-        cachedUserId,
-      );
       activeUserId = cachedUserId;
-      setSignedIn(true);
     }
   } catch {
     // Continue with browser storage when account-scoped storage is unavailable.
   }
 
-  function projectStorage() {
-    return activeProjectStorage;
+  const deployment = new URL(backendEndpoint("/")).origin;
+  let repository = new ProjectRepository({
+    deployment,
+    namespace: activeUserId
+      ? accountNamespace(activeUserId)
+      : ANONYMOUS_NAMESPACE,
+  });
+  let handleRepository = repository;
+  let activeHandle: ProjectHandle | undefined;
+  let stopDurability: (() => void) | undefined;
+  let stopCatalog: (() => void) | undefined;
+
+  function ephemeralDocument() {
+    return createProjectDocument(crypto.randomUUID(), generateProjectName([]), {
+      text: "New idea",
+    });
   }
 
-  let projectSync: Promise<void> | undefined;
-
-  function syncCloudProjects() {
-    if (projectSync) return projectSync;
-    let restoreFromStorage = false;
-    const activeBefore = currentProject();
-    let activeWasSaved = false;
-    try {
-      restoreFromStorage = !loadLatestProject(projectStorage());
-      activeWasSaved =
-        JSON.stringify(
-          normalizeSnapshot(
-            loadProject(projectStorage(), `proj/${activeBefore.name}`),
-          ),
-        ) === JSON.stringify(activeBefore);
-    } catch {
-      restoreFromStorage = true;
+  async function activate(handle: ProjectHandle, owner = repository) {
+    const previous = activeHandle;
+    if (previous && previous !== handle) {
+      await previous.flush();
+      await previous.close();
     }
-    projectSync = syncProjects(projectStorage())
-      .then((changedNames) => {
-        if (restoreFromStorage) {
-          const latest = loadLatestProject(projectStorage());
-          if (latest) replaceProject(latest);
-        } else if (
-          activeWasSaved &&
-          changedNames.includes(activeBefore.name) &&
-          JSON.stringify(currentProject()) === JSON.stringify(activeBefore)
-        ) {
-          const updated = loadProject(
-            projectStorage(),
-            `proj/${activeBefore.name}`,
-          );
-          replaceProject(updated);
-        }
-        setStorageMessage("");
-      })
-      .catch(() => {
-        setStorageMessage(
-          "Saved in this browser. Cloud sync will retry on your next save or when you return to the app.",
-        );
-      })
-      .finally(() => {
-        projectSync = undefined;
-      });
-    return projectSync;
+    stopDurability?.();
+    handleRepository = owner;
+    activeHandle = handle;
+    resetProjectUi();
+    setDoc(handle.doc);
+    setStorageReady(true);
+    setSaveStatus(handle.durability().status === "saved" ? "done" : "saving");
+    stopDurability = handle.onDurability((durability) => {
+      setSaveStatus(
+        durability.status === "saved"
+          ? "done"
+          : durability.status === "saving"
+            ? "saving"
+            : "error",
+      );
+      if (durability.status === "unsaved")
+        setStorageMessage(durability.error.message);
+      else if (durability.status === "saved") setStorageMessage("");
+    });
+    try {
+      const preference = await owner.preference(`project/${handle.id}/view`);
+      if (preference && typeof preference === "object") {
+        const view = preference as Project["view"] & { anchor?: LayoutAnchor };
+        setLayoutAnchor(view.anchor);
+        setLeft(view.left);
+        setTop(view.top);
+        setZoom(view.zoom);
+      }
+    } catch {
+      // A missing local viewport preference does not prevent opening content.
+    }
   }
 
-  function accountChanged(user: User | undefined) {
-    setSignedIn(Boolean(user));
-    if (!user) {
-      activeProjectStorage = window.localStorage;
-      activeUserId = undefined;
-      try {
-        window.localStorage.removeItem(cachedUserKey);
-        const latest = loadLatestProject(window.localStorage);
-        if (latest) replaceProject(latest);
-      } catch {
-        // Keep the current canvas if local storage is unavailable.
-      }
+  async function openLatestOrCreate(target = repository) {
+    const latest = await target.latestProject();
+    if (latest) {
+      await activate(await target.open(latest), target);
       return;
     }
-
-    const userChanged = activeUserId !== user.id;
-    const accountStorage = userProjectStorage(window.localStorage, user.id);
-    try {
-      window.localStorage.setItem(cachedUserKey, String(user.id));
-      if (!window.localStorage.getItem(anonymousOwnerKey)) {
-        const anonymousProjects = listProjects(window.localStorage).map((key) =>
-          loadProject(window.localStorage, key),
-        );
-        for (const project of anonymousProjects) {
-          if (!accountStorage.getItem(`proj/${project.name}`)) {
-            saveProject(
-              accountStorage,
-              project,
-              projectUpdatedAt(window.localStorage, project.name) ??
-                new Date().toISOString(),
-              false,
-            );
-          }
-        }
-        const latest = loadLatestProject(window.localStorage);
-        if (latest) saveProject(accountStorage, latest);
-        window.localStorage.setItem(anonymousOwnerKey, String(user.id));
-      }
-      activeProjectStorage = accountStorage;
-      activeUserId = user.id;
-      if (userChanged) {
-        const latest = loadLatestProject(accountStorage);
-        replaceProject(latest);
-      }
-    } catch {
-      activeProjectStorage = accountStorage;
-      activeUserId = user.id;
-      setStorageMessage(
-        "Could not prepare account storage. Your current project remains available in this browser.",
-      );
-    }
-    void syncCloudProjects();
-  }
-
-  function newProjectName(previousName?: string) {
-    const used = previousName ? [previousName] : [];
-    try {
-      used.push(
-        ...listProjects(projectStorage()).map((key) =>
-          key.slice("proj/".length),
-        ),
-      );
-    } catch {
-      // Creating a project also works when browser storage is unavailable.
-    }
-    return generateProjectName(used);
-  }
-
-  function newDocument(previousName?: string) {
-    return createProjectDocument(
-      crypto.randomUUID(),
-      newProjectName(previousName),
-      { text: "New idea" },
+    await activate(
+      await target.create({
+        name: generateProjectName([]),
+        root: { text: "New idea" },
+      }),
+      target,
     );
+  }
+
+  async function accountChanged(user: User | undefined) {
+    const nextUserId = user?.id;
+    try {
+      if (nextUserId)
+        window.localStorage.setItem(cachedUserKey, String(nextUserId));
+      else window.localStorage.removeItem(cachedUserKey);
+    } catch {
+      // Authentication remains usable when the cache hint cannot be written.
+    }
+    if (nextUserId === activeUserId) return;
+    activeUserId = nextUserId;
+    const previousRepository = repository;
+    const nextRepository = new ProjectRepository({
+      deployment,
+      namespace: nextUserId
+        ? accountNamespace(nextUserId)
+        : ANONYMOUS_NAMESPACE,
+    });
+    repository = nextRepository;
+    stopCatalog?.();
+    stopCatalog = nextRepository.onCatalogChange(() => {
+      void nextRepository
+        .list()
+        .then(setSavedProjects)
+        .catch(() => {});
+    });
+    try {
+      await openLatestOrCreate(nextRepository);
+    } catch {
+      setStorageMessage("Could not open this account’s local projects.");
+    }
+    await previousRepository.close();
   }
 
   // The document is the only writable project content. Everything else here
   // (selection, viewport, measurements, drag previews) is local UI state.
-  const [doc, setDoc] = createSignal(newDocument());
+  const [doc, setDoc] = createSignal(ephemeralDocument());
+  const [storageReady, setStorageReady] = createSignal(false);
+  const [saveStatus, setSaveStatus] = createSignal<
+    "" | "saving" | "done" | "error"
+  >("");
+  const [storageMessage, setStorageMessage] = createSignal("");
   const session = createMemo(() => {
     const current = doc();
+    const handle = activeHandle?.doc === current ? activeHandle : undefined;
     const view = createProjectView(current);
     const undo = new Y.UndoManager(current.getMap("project"), {
       trackedOrigins: new Set([ORIGIN.local]),
@@ -366,7 +334,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     untrack(() => props.onDocument?.(current));
     onCleanup(() => {
       undo.destroy();
-      current.destroy();
+      if (handle) void handle.close();
+      else current.destroy();
     });
     return { doc: current, view, undo };
   });
@@ -386,19 +355,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
-  const [savedKeys, setSavedKeys] = createSignal<string[]>([]);
+  const [savedProjects, setSavedProjects] = createSignal<CatalogEntry[]>([]);
   const [showLoad, setShowLoad] = createSignal(false);
-  const [storageMessage, setStorageMessage] = createSignal("");
-  const [saveStatus, setSaveStatus] = createSignal<"" | "saving" | "done">("");
   const [fileBusy, setFileBusy] = createSignal(false);
-  let saveTimer: number | undefined;
-  let saveStatusTimer: number | undefined;
 
   function clearSaveStatus() {
-    window.clearTimeout(saveTimer);
-    window.clearTimeout(saveStatusTimer);
-    saveTimer = undefined;
-    saveStatusTimer = undefined;
     setSaveStatus("");
   }
 
@@ -472,6 +433,26 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     | undefined;
   let suppressClick = false;
 
+  let viewSaveTimer: number | undefined;
+  createEffect(() => {
+    const handle = activeHandle;
+    const currentDoc = doc();
+    const value: Project["view"] & { anchor?: LayoutAnchor } = {
+      left: left(),
+      top: top(),
+      zoom: zoom(),
+      anchor: layoutAnchor(),
+    };
+    if (!handle || handle.doc !== currentDoc) return;
+    window.clearTimeout(viewSaveTimer);
+    viewSaveTimer = window.setTimeout(() => {
+      void handleRepository
+        .setPreference(`project/${handle.id}/view`, value)
+        .catch(() => {});
+    }, 200);
+  });
+  onCleanup(() => window.clearTimeout(viewSaveTimer));
+
   // Nodes can disappear through remote edits or undo, including the one being
   // edited; local state that refers to them is released.
   createEffect(() => {
@@ -502,27 +483,59 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
   }
 
-  function replaceProject(project?: Project) {
-    const opened = project
-      ? openSnapshot(project)
-      : { doc: newDocument(view().name()), anchor: undefined };
+  function resetProjectUi() {
     clearSaveStatus();
     finishWriting();
     cancelPointer();
     suppressClick = false;
     batch(() => {
-      setDoc(opened.doc);
       setProjectNameDraft(undefined);
       setSelectedId(undefined);
       setColorScope("node");
       setNodeSizes(new Map());
-      setLayoutAnchor(opened.anchor);
-      setLeft(project?.view.left ?? 0);
-      setTop(project?.view.top ?? 0);
-      setZoom(project?.view.zoom ?? 1);
+      setLayoutAnchor(undefined);
+      setLeft(0);
+      setTop(0);
+      setZoom(1);
       setShowLoad(false);
     });
     canvas.focus({ preventScroll: true });
+  }
+
+  async function openProject(id: string) {
+    try {
+      await activeHandle?.flush();
+      const handle = await repository.open(id);
+      await activate(handle);
+      const state = handle.state();
+      setStorageMessage(
+        state.status === "ready"
+          ? `Loaded “${state.content.metadata.name}”.`
+          : "Project is still loading.",
+      );
+    } catch (error) {
+      setStorageMessage(
+        error instanceof Error ? error.message : "Could not open this project.",
+      );
+    }
+  }
+
+  async function createNewProject() {
+    try {
+      await activeHandle?.flush();
+      const projects = await repository.list();
+      const name = generateProjectName(projects.map((project) => project.name));
+      const handle = await repository.create({
+        name,
+        root: { text: "New idea" },
+      });
+      await activate(handle);
+      setStorageMessage("");
+    } catch (error) {
+      setStorageMessage(
+        error instanceof Error ? error.message : "Could not create a project.",
+      );
+    }
   }
 
   function finishProjectName() {
@@ -544,46 +557,33 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     });
   }
 
-  function save() {
-    if (saveStatus() === "saving") return;
+  async function save() {
     finishWriting();
     finishProjectName();
-    clearSaveStatus();
-    const project = currentProject();
-    setStorageMessage("");
+    if (!activeHandle) {
+      setStorageMessage("Project storage is still opening.");
+      return;
+    }
     setShowLoad(false);
     setSaveStatus("saving");
-
-    // Give the status time to paint without relying on animation frames,
-    // which can pause when the page is in the background.
-    saveTimer = window.setTimeout(() => {
-      saveTimer = undefined;
-      try {
-        const name = saveProject(projectStorage(), project);
-        if (signedIn()) {
-          void uploadProject(projectStorage(), { ...project, name }).catch(() =>
-            setStorageMessage(
-              "Saved in this browser. Cloud sync will retry on your next save or when you return to the app.",
-            ),
-          );
-        }
-        setSaveStatus("done");
-        saveStatusTimer = window.setTimeout(clearSaveStatus, 1500);
-      } catch {
-        setSaveStatus("");
-        setStorageMessage(
-          "Could not save. Browser storage may be full or unavailable.",
-        );
-      }
-    }, 50);
+    try {
+      await activeHandle.flush();
+      setSaveStatus("done");
+      setStorageMessage("Saved locally.");
+    } catch (error) {
+      setSaveStatus("error");
+      setStorageMessage(
+        error instanceof Error ? error.message : "Could not save this project.",
+      );
+    }
   }
 
-  function saveBeforeAuth() {
+  async function saveBeforeAuth() {
     finishWriting();
     finishProjectName();
     clearSaveStatus();
     try {
-      saveProject(projectStorage(), currentProject());
+      await activeHandle?.flush();
       return true;
     } catch {
       setStorageMessage(
@@ -593,11 +593,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  function openLoad() {
+  async function openLoad() {
     clearSaveStatus();
     finishWriting();
     try {
-      setSavedKeys(listProjects(projectStorage()));
+      setSavedProjects(await repository.list());
       setStorageMessage("");
       setShowLoad(true);
     } catch {
@@ -607,16 +607,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  function load(key: string) {
-    try {
-      const project = loadProject(projectStorage(), key);
-      replaceProject(project);
-      setStorageMessage(`Loaded “${project.name}”.`);
-    } catch {
-      setStorageMessage(
-        "Could not load this project. It may be missing, damaged, or unavailable.",
-      );
-    }
+  function load(id: string) {
+    void openProject(id);
   }
 
   async function exportCurrentProject() {
@@ -640,31 +632,55 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     finishWriting();
     setFileBusy(true);
     try {
+      await activeHandle?.flush();
       const file = await readProjectFile();
       if (!file) return;
       const imported = parseProject(await file.text());
-      const duplicateKey = findDuplicateProject(projectStorage(), imported);
-      const clone = duplicateKey
-        ? !window.confirm(
-            `“${imported.name}” already exists with the same project data. Choose OK to load the existing project, or Cancel to make a clone.`,
-          )
-        : false;
-      const result = saveImportedProject(projectStorage(), imported, clone);
-      replaceProject(result.project);
-      if (signedIn() && result.kind !== "existing") {
-        void uploadProject(projectStorage(), result.project).catch(() =>
-          setStorageMessage(
-            "Imported in this browser. Cloud sync will retry on your next save or when you return to the app.",
-          ),
-        );
+      const existing = await repository.list();
+      const baseName = imported.name;
+      let name = baseName;
+      let suffix = 2;
+      while (existing.some((entry) => entry.name === name))
+        name = `${baseName} (copy ${suffix++})`;
+      const normalized = { ...imported, name };
+      const importedDoc = openSnapshot(normalized).doc;
+      const content = materializeProject(importedDoc);
+      importedDoc.destroy();
+      const roots = projectMindMap(content);
+      const first = roots[0];
+      const handle = await repository.create({
+        name,
+        root: first && {
+          id: first.id,
+          text: first.text,
+          color: first.color,
+          position: first.position,
+        },
+      });
+      const addBranch = (parentId: string, children: MindMapNode[]) => {
+        for (const child of children) {
+          const id = createChild(handle.doc, parentId, {
+            id: child.id,
+            text: child.text,
+            color: child.color,
+            position: child.position,
+          });
+          if (id) addBranch(id, child.next ?? []);
+        }
+      };
+      if (first) addBranch(first.id, first.next ?? []);
+      for (const root of roots.slice(1)) {
+        const id = createRoot(handle.doc, {
+          id: root.id,
+          text: root.text,
+          color: root.color,
+          position: root.position,
+        });
+        if (id) addBranch(id, root.next ?? []);
       }
-      setStorageMessage(
-        result.kind === "existing"
-          ? `Loaded existing project “${result.project.name}”.`
-          : result.kind === "clone"
-            ? `Created clone “${result.project.name}”.`
-            : `Imported “${result.project.name}”.`,
-      );
+      await handle.flush();
+      await activate(handle);
+      setStorageMessage(`Imported “${name}”.`);
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
@@ -817,6 +833,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   function startPointer(e: PointerEvent, nodeId?: string) {
     if (
+      !storageReady() ||
       !e.isPrimary ||
       e.button !== 0 ||
       pointer ||
@@ -883,20 +900,33 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   onMount(() => {
-    try {
-      const project = loadLatestProject(projectStorage());
-      if (project) {
-        replaceProject(project);
-        setStorageMessage(`Loaded “${project.name}”.`);
-      }
-    } catch {
+    const initialRepository = repository;
+    stopCatalog = initialRepository.onCatalogChange(() => {
+      void initialRepository
+        .list()
+        .then(setSavedProjects)
+        .catch(() => {});
+    });
+    void initialRepository
+      .list()
+      .then(setSavedProjects)
+      .catch(() => {});
+    void openLatestOrCreate(initialRepository).catch((error) => {
       setStorageMessage(
-        "Could not restore the latest project. It may be missing, damaged, or unavailable.",
+        error instanceof Error
+          ? error.message
+          : "Could not open local project storage.",
       );
-    }
+    });
+    onCleanup(() => {
+      stopCatalog?.();
+      stopDurability?.();
+      void repository.close();
+    });
 
     const keydown = (e: KeyboardEvent) => {
       if (
+        !storageReady() ||
         e.isComposing ||
         writing() ||
         (e.target instanceof Element &&
@@ -1057,6 +1087,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       ref={canvas}
       tabIndex={-1}
       aria-label="Mind map canvas"
+      data-storage-ready={storageReady()}
       onPointerDown={(e) => {
         if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
           return;
@@ -1094,17 +1125,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         <fieldset
           class="flex flex-wrap items-center text-sm"
           aria-label="Project actions"
-          disabled={saveStatus() === "saving" || fileBusy()}
+          disabled={!storageReady() || fileBusy()}
         >
           <button
             type="button"
             class="map-control"
-            onClick={() => {
-              replaceProject();
-              setStorageMessage(
-                "New project. Save to keep it in this browser.",
-              );
-            }}
+            onClick={() => void createNewProject()}
           >
             New
           </button>
@@ -1116,7 +1142,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             class="map-control"
             aria-expanded={showLoad()}
             aria-controls="saved-projects"
-            onClick={() => (showLoad() ? setShowLoad(false) : openLoad())}
+            onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
           >
             Load
           </button>
@@ -1139,7 +1165,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
               ? "Saving…"
               : saveStatus() === "done"
                 ? "Saved locally"
-                : ""}
+                : saveStatus() === "error"
+                  ? "Save failed"
+                  : ""}
           </span>
         </fieldset>
         <Show when={showLoad()}>
@@ -1147,21 +1175,21 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             <p class="px-2 text-xs text-stone-500">Saved in this browser</p>
             <ul class="max-h-60 overflow-y-auto text-sm">
               <For
-                each={savedKeys()}
+                each={savedProjects()}
                 fallback={
                   <li class="px-2 py-2 text-stone-500">
                     No saved projects yet.
                   </li>
                 }
               >
-                {(key) => (
+                {(project) => (
                   <li>
                     <button
                       type="button"
                       class="map-control w-full text-left whitespace-normal! break-words"
-                      onClick={() => load(key)}
+                      onClick={() => load(project.id)}
                     >
-                      {key.slice("proj/".length)}
+                      {project.name} · {project.id.slice(0, 8)}
                     </button>
                   </li>
                 )}
