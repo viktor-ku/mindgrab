@@ -1,4 +1,4 @@
-# Local-first release regression gate (MIN-42)
+# Release regression gate
 
 Run the focused release gate before cutting a Yjs release. It joins the **shipped
 Solid editor**, production shell/service worker, real Chromium IndexedDB,
@@ -28,7 +28,7 @@ failure stop API children, close Chromium and remove profiles/builds/restore DBs
 SQLx owns source database cleanup. Do not run two copies of the same SQLx test
 simultaneously against one Postgres server: SQLx reuses that test's database name.
 After externally killing the entire test runner, terminate its remaining children
-before rerunning, and remove only its `min42_restore_*` database/profile if needed.
+before rerunning, and remove only its `release_restore_*` database/profile if needed.
 
 The Rust SQLx fixture starts a separate loopback **test-only** control listener.
 Controls exist only under `cfg(test)`; the production API has no fault/maintenance
@@ -84,7 +84,7 @@ The gate proves these connected scenarios, rather than repeating command units:
   Owner-scoped catalog/baseline/state/update reads and binary writes reject the
   old account's UUID. Switching back restores the original workspace.
 - UI exports/downloads/imports preserve name, tree, Unicode text and colors with
-  fresh identities. No request reaches the legacy `/api/projects` snapshot path.
+  fresh identities. Requests use the UUID catalog and binary update APIs.
   This checkout runs Yjs by default; it has no separate editor feature flag.
 
 Existing gates retain their distinct responsibilities: `webapp:test:cloud`
@@ -139,42 +139,3 @@ Chromium, actual Rust/Postgres versions, budgets, p95/max edit cost, offline reo
 time, pre/post rows and payload sizes, receipt counts, replay means, and compaction
 cost. Rust is tested in its unoptimized test profile. Keep this JSON with release
 results; machine load and build profile materially affect comparisons.
-
-## Recovery regression fixed by this gate
-
-Chromium can buffer **localStorage** writes after `setItem` returns. An immediate
-SIGKILL after signing in and saving locally could retain the account's IndexedDB
-project but lose its new account hint; cold offline startup opened the anonymous
-workspace instead. The account hint/logout tombstone now also commits through a
-strict IndexedDB transaction before account confirmation or auth navigation is
-acknowledged. Startup hydrates this record before selecting/opening a workspace.
-A sequence allocated under the database write lock makes the committed record
-win over a stale localStorage copy, including stale login hints after logout.
-LocalStorage and BroadcastChannel still coordinate immediate cross-tab fences;
-they carry no token and cannot authorize cloud access. Failed writes block auth
-navigation and retain the prior committed hint. Existing local hints bootstrap
-into the new separate store without migrating or deleting project databases.
-
-Account browser regressions also verify missing/stale localStorage recovery,
-durable logout, delayed account results, and an aborted hint transaction followed
-by successful retry. If initial storage opening fails, export remains available
-and Retry local saving retries hydration before choosing a workspace.
-
-The 1,000-node fixture also exposed repeated full layouts from individual node ResizeObserver callbacks (about 5.5 seconds to reopen). Node measurements now publish together once per animation frame, preserving the same layout algorithm while keeping the original reopen budget. Existing drag, text, selection and project-switching browser checks validate the behavior.
-
-## Recorded run
-
-[MIN-42 result JSON](release-results/min-42.json) records the 2026-09-30 run on
-an AMD Ryzen 9 5950X, Linux, Bun 1.4.2, Chromium 151.0.7922.34, Rust 1.98.1
-(unoptimized test build), and PostgreSQL 17.11. The gate completed in 48.5 seconds.
-
-| Nodes | p95 edit | Offline reopen | Replay before / after | Raw bytes → checkpoint bytes | Rows before → after |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 0.3 ms | 75 ms | 3.8 / 3.5 ms | 4,071 → 3,978 | 7 → 0 |
-| 1,000 | 4.3 ms | 287 ms | 67.1 / 63.0 ms | 300,470 → 300,409 | 5 → 0 |
-
-The lost receipt retried twice with identical bytes; the injected COMMIT failure
-produced no receipt or changed durable content. All convergence, crash, recovery,
-account, undo and import/export assertions passed. Coalescing and socket echoes
-can vary pre-compaction row counts between runs; canonical content, bounds,
-receipt preservation and actual pruning are the acceptance criteria.

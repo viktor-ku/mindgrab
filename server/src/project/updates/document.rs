@@ -188,7 +188,8 @@ fn build(updates: Vec<Vec<u8>>, checkpoint: bool) -> Result<Candidate, ApiError>
         .map_err(|_| ApiError::InvalidUpdate)?;
     let txn = doc.transact();
     let pending = hole || txn.has_missing_updates();
-    let state_vector = txn.state_vector().encode_v1();
+    let applied_vector = txn.state_vector();
+    let state_vector = applied_vector.encode_v1();
     drop(txn);
     let content = if pending { None } else { Some(schema(&doc)?) };
     // #670/#673: neither successful encoding nor has_missing_updates proves
@@ -204,7 +205,8 @@ fn build(updates: Vec<Vec<u8>>, checkpoint: bool) -> Result<Candidate, ApiError>
             && check.insertions(true) == insertions
             && deletes.diff(check.delete_set()).is_empty()
             && check.state_vector() == contiguous
-            && check.state_vector().encode_v1() == state_vector
+            // Encoding order is not canonical, even for equal client clocks.
+            && check.state_vector() == applied_vector
         {
             let fresh = Doc::with_options(Options {
                 offset_kind: OffsetKind::Utf16,
@@ -280,6 +282,48 @@ async fn bounded(updates: Vec<Vec<u8>>, checkpoint: bool) -> Result<Candidate, A
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_multi_client_history_always_produces_a_checkpoint() {
+        let initial = super::super::tests::INITIAL.to_vec();
+        // Clients 1 (fixture) and 17 collide in the state-vector hash buckets;
+        // equivalent vectors can encode in different orders after reconstruction.
+        let doc = Doc::with_options(Options {
+            client_id: yrs::block::ClientID::new(17),
+            offset_kind: OffsetKind::Utf16,
+            skip_gc: true,
+            ..Options::default()
+        });
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(&initial).unwrap())
+            .unwrap();
+        let metadata = {
+            let txn = doc.transact();
+            let root = txn.get_map("project").unwrap();
+            let Some(Out::YMap(metadata)) = root.get(&txn, "metadata") else {
+                panic!("missing metadata")
+            };
+            metadata
+        };
+        let edit = {
+            let mut txn = doc.transact_mut();
+            metadata.insert(&mut txn, "name", "Two clients");
+            txn.encode_update_v1()
+        };
+        let expected = schema(&doc).unwrap();
+        // Repeated reconstruction must preserve both clients and deletions.
+        for _ in 0..64 {
+            let candidate = build(vec![initial.clone(), edit.clone()], true).unwrap();
+            assert_eq!(candidate.validation, "valid");
+            let checkpoint = candidate.checkpoint.expect("complete history is covered");
+            assert_eq!(
+                reconstruct(vec![checkpoint]).unwrap().content,
+                Some(expected.clone())
+            );
+        }
+    }
+
     #[test]
     fn ranks_accept_the_default_alphabet_and_fractional_minimum() {
         for rank in ["a0", "a0V", "Zz", "A00000000000000000000000000V"] {

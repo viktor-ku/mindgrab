@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import * as Y from "yjs";
 import { layoutMindMap } from "../src/mind-map";
-import type { DropTarget, MindMapNode } from "../src/mind-map";
+import type { MindMapNode } from "../src/mind-map";
+import type { DropTarget } from "../src/project-document";
 import {
   canMoveNode,
   createChild,

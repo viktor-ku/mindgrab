@@ -1,13 +1,10 @@
-# ADR 0007: Account workspaces, offline auth and anonymous claims
-
-Status: accepted for MIN-41.
+# Account workspaces, offline auth and anonymous claims
 
 ## Account authority and offline use
 
 `AuthSession` owns session checks and deployment-scoped account coordination.
 Its browser record contains a validated user hint, a revision, a navigation flag
-and an explicit logout tombstone. It contains no credential. The old global
-`cached-user-id` hint migrates once into this scope, without granting cloud access.
+and an explicit logout tombstone. It contains no credential.
 Only a successful `/api/me` response starts a `CloudWorkspace`.
 
 A network failure or 503 preserves the cached account and its local catalog.
@@ -34,7 +31,7 @@ A failed forced-transition flush parks the old document outside the new UI for
 
 These boundaries provide UI/account isolation, **not browser-disk encryption**.
 Anyone with access to the browser profile can inspect retained local caches.
-Cold application-shell caching is separate (MIN-33).
+[Offline reopening](../offline-reopening.md) describes application-shell caching.
 
 ## Navigation and network fencing
 
@@ -98,4 +95,4 @@ receipt recovery. It is independent of the shared development database and live
 WorkOS configuration. Browser fixtures use controlled auth and failure responses;
 manual verification uses an actual WorkOS browser session.
 
-MIN-42 also commits the account hint and logout tombstone in a separate strict IndexedDB transaction before acknowledging account confirmation/navigation. Startup hydrates this record before selecting a workspace; an IDB-allocated sequence supersedes stale localStorage copies after a crash. Project databases are unchanged. See the [release regression gate](../release-regression.md) for the crash reproduction and verification.
+The account hint and logout tombstone commit in a separate strict IndexedDB transaction before acknowledging account confirmation/navigation. Startup hydrates this record before selecting a workspace; an IDB-allocated sequence supersedes stale localStorage copies after a crash. Project databases are unchanged. The [release gate](../release-regression.md) verifies crash recovery.

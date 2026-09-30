@@ -13,7 +13,7 @@ import type { NewNode, ProjectContent, ProjectState } from "./project-document";
 
 import { CATALOG_VERSION, STORAGE_GENERATION } from "./offline-contract";
 
-// Lifecycle and guarantees: docs/architecture/0002-local-project-repository.md.
+// Lifecycle and guarantees: docs/architecture/local-storage.md.
 export { STORAGE_GENERATION } from "./offline-contract";
 export const ANONYMOUS_NAMESPACE = "anonymous";
 export const accountNamespace = (userId: number | string) =>

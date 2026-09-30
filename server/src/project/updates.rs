@@ -85,7 +85,7 @@ pub(super) async fn lock_project(
 }
 
 /// Read checkpoint and tail under the same project lock used by submission and
-/// future checkpoint workers. Never discard originals on the basis of a vector.
+/// checkpoint workers. Never discard originals on the basis of a vector.
 pub(super) async fn load(
     connection: &mut PgConnection,
     id: Uuid,
@@ -129,7 +129,7 @@ pub(super) async fn load(
     Ok(updates)
 }
 
-/// MIN-36 must call this boundary for binary socket ingestion, then broadcast
+/// HTTP and socket ingestion use this boundary, then broadcast
 /// the original committed bytes. Socket sync is not a durability receipt.
 pub(crate) async fn ingest(
     pool: &PgPool,
@@ -360,7 +360,7 @@ pub(crate) struct SynchronizationBaseline {
     pub(crate) validation: &'static str,
 }
 
-/// Shared reconstruction entry point for MIN-36 socket bootstrap and MIN-38
+/// Shared reconstruction entry point for socket bootstrap and read-model
 /// projection. Bytes include pending structures/deletes, not just visible state.
 pub(crate) async fn synchronization_baseline(
     pool: &PgPool,

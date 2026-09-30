@@ -1,13 +1,13 @@
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import * as Y from "yjs";
 import { z } from "zod";
-import type { DropTarget, MindMapNode, NodePosition } from "./mind-map";
+import type { MindMapNode, NodePosition } from "./mind-map";
 import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 import { DOCUMENT_VERSION } from "./offline-contract";
 
-// The executable contract is docs/architecture/0001-yjs-document-contract.md.
+// The executable contract is docs/architecture/document.md.
 export const SCHEMA_VERSION = DOCUMENT_VERSION;
 export const LIMITS = {
   nodes: 10_000,
@@ -120,6 +120,10 @@ function assertId(id: string) {
   if (!isNodeId(id)) invalid("Expected a canonical UUID.");
 }
 
+export type DropTarget =
+  | { id: string; placement: "child" | "before" | "after" }
+  | { placement: "root" };
+
 export interface NewNode {
   id?: string;
   text?: string;
@@ -150,7 +154,7 @@ export function createProjectDocument(
   return installContent(projectId, content, ORIGIN.create);
 }
 
-// Creates a new document from complete content, such as a snapshot file.
+// Installs validated semantic content into a fresh Yjs lineage.
 export function importProjectDocument(
   projectId: string,
   content: ProjectContent,

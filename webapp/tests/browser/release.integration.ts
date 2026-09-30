@@ -348,13 +348,13 @@ try {
   const bContext = await context(config.cookie, "device-b");
   const { page: a } = await load(aContext);
   await cloudSaved(a);
-  await a.getByLabel("Project name").fill("MIN42 Shared");
+  await a.getByLabel("Project name").fill("Shared release project");
   await a.getByLabel("Project name").press("Tab");
   await cloudSaved(a);
   let id = await a.evaluate(() => mg.doc().guid);
   const { page: b } = await load(bContext);
   await cloudSaved(b);
-  await choose(b, "MIN42 Shared");
+  await choose(b, "Shared release project");
   await cloudSaved(b);
   // Independent API processes share Postgres, including live browser sockets.
   active = 1;
@@ -584,13 +584,13 @@ try {
       document.querySelector('[data-storage-ready="true"]'),
     id,
   );
-  await ar.getByLabel("Project name").fill("MIN42 Compaction");
+  await ar.getByLabel("Project name").fill("Compaction release project");
   await ar.getByLabel("Project name").press("Tab");
   await cloudSaved(ar);
   id = await ar.evaluate(() => mg.doc().guid);
   await b.reload();
   await b.waitForSelector('[data-storage-ready="true"]');
-  await choose(b, "MIN42 Compaction");
+  await choose(b, "Compaction release project");
   await cloudSaved(b);
   await offline(bContext, true);
   const offlineBranch = await b.evaluate(() =>
@@ -649,7 +649,7 @@ try {
   const restoredContext = await context(restored.cookie);
   const { page: restorePage } = await load(restoredContext);
   await cloudSaved(restorePage);
-  await choose(restorePage, "MIN42 Compaction");
+  await choose(restorePage, "Compaction release project");
   await cloudSaved(restorePage);
   expect(await canonical(restorePage)).toEqual(finalContent);
   await restoredContext.close();

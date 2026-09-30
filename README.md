@@ -1,19 +1,18 @@
 # Mindgrab
 
-SolidJS mind maps with a Rust/Axum API and WorkOS AuthKit login.
+SolidJS mind maps with local-first Yjs state, automatic IndexedDB saving,
+durable Rust/Axum/Postgres synchronization and WorkOS AuthKit login.
 
 ## Run locally
 
-1. Copy `.env.example` to `.env` if you do not already have one. Fill in the
-   WorkOS client ID and API key. The Rust server loads the root `.env` when
-   launched from either the repository root or `server/`; exported environment
-   variables take precedence. Credentials never enter the Vite bundle.
-2. In your WorkOS application's redirect settings, register:
-   - Redirect URI: `http://localhost:5173/api/auth/callback`
-   - Initiate login URI: `http://localhost:5173/api/auth/login`
-   - Sign-out URI: `http://localhost:5173/`
-   Enable the desired authentication methods in WorkOS. AuthKit's hosted page
-   handles signup, sign-in, password resets, and email verification.
+1. Copy `.env.example` to `.env` and set the WorkOS client ID and API key.
+   The server loads the root `.env` from the repository root or `server/`;
+   exported variables take precedence. Credentials never enter the Vite bundle.
+2. Register these local URLs in WorkOS and enable password or another desired
+   authentication method:
+   - Redirect: `http://localhost:5173/api/auth/callback`
+   - Initiate login: `http://localhost:5173/api/auth/login`
+   - Sign-out: `http://localhost:5173/`
 3. Start Postgres and the API:
 
    ```sh
@@ -21,310 +20,147 @@ SolidJS mind maps with a Rust/Axum API and WorkOS AuthKit login.
    mise run server:dev
    ```
 
-   The server applies database migrations automatically and then inserts the
-   local Boba Tee profile when both the app URL and `DATABASE_URL` point to
-   loopback and the `mindgrab` database. Existing users are left unchanged.
-   This seeds only the user profile; sign-in still goes through WorkOS AuthKit.
-4. In a second terminal:
+   The server applies migrations automatically. Loopback development with the
+   `mindgrab` database seeds the Boba Tee profile if absent; sign-in still uses
+   AuthKit and does not receive a fabricated session.
+4. In another terminal:
 
    ```sh
    cp webapp/.env.example webapp/.env
-   (cd webapp && bun --bun install)
+   mise run webapp:install
    mise run webapp:dev
    ```
 
-   Open **http://localhost:5173**. Vite proxies `/api` to `VITE_BACKEND_URL`
-   from `webapp/.env` (locally `http://localhost:3000`). Restart Vite after
-   changing this value. Use this exact
-   hostname so the callback, cookies, and logout origin match. The dev server
-   refuses to switch ports if 5173 is occupied.
+   Open **http://localhost:5173**. Use this hostname for matching callback/cookie
+   origins. Vite forwards `/api`, including WebSocket upgrades, to the backend
+   configured in `webapp/.env` (locally port 3000). Restart after changing it.
+   Vite refuses to switch ports when 5173 is occupied.
 
-## Authentication
+For agent sign-in, use the [local sign-in skill](.agents/skills/mindgrab-local-signin/SKILL.md).
+Verify `/api/me` returns 200 in that same browser session.
 
-For agent browser sign-in, use the repository's
-[local sign-in skill](.agents/skills/mindgrab-local-signin/SKILL.md). Its staging
-password user is `boba.tee@mindgrab.test`, with a preverified test email. Complete
-the hosted password flow in the browser the agent uses, then verify that
-`/api/me` returns `200` in that browser session.
+## Editing and saving
 
-- `GET /api/auth/login` starts AuthKit with a browser-bound, one-use state and
-  PKCE. Login attempts expire after 10 minutes.
-- `GET /api/auth/callback` exchanges the code, verifies the access token, upserts
-  the local user by WorkOS user ID (`users.external_id`), and rotates the local
-  session credential.
-- `GET /api/me` returns `{ id, name, email, external_id }`, or `401` when signed
-  out. Tokens are never returned to JavaScript. A `503` means authentication is
-  temporarily unavailable; it does not clear an existing session.
-- `POST /api/auth/logout` requires the configured app's `Origin` header, deletes
-  the local session, and redirects the browser through WorkOS logout.
+Each project has a stable UUID and one Y.Doc. Names are editable and may repeat.
+Commands and shared text edit Yjs directly; Solid renders observed projections.
+Layout, selection, viewport and drag previews remain local UI state. Undo/redo
+tracks local actions in the current project session and clears on project/account
+change or reload. Remote changes do not enter the undo stack.
 
-Postgres stores WorkOS access/refresh tokens and only a SHA-256 hash of each
-random browser session credential. The browser receives an HttpOnly,
-SameSite=Lax cookie, also Secure on HTTPS. Sessions have a 30-day local maximum;
-WorkOS can end them sooner. Signed access tokens are checked on each `/api/me`
-request, including issuer, client, subject, session ID, and expiry. Provider-side
-revocation is observed when the token next refreshes, so configure a short access
-token lifetime in WorkOS. Refreshes are serialized per session with a database
-row lock; rotated refresh tokens are persisted before returning. Transient
-refresh failures receive one bounded retry and preserve the session. Expired
-records are cleaned up hourly.
+Editing saves automatically without network access or a Save click. **Saved
+locally** means the IndexedDB transaction committed. Save/Ctrl+S flushes local
+writes. **Saved to cloud** means a verified server baseline and durable receipts
+cover edits and the server content is valid. A connected socket alone does not
+confirm durability. Offline edits reconcile after reconnect or reload.
 
-Project editing and automatic saving use Yjs and IndexedDB. **Saved locally**
-means the browser committed the update. When the account session is confirmed,
-projects register by UUID and synchronize incremental Yjs updates with the Rust
-API. **Saved to cloud** means durable baseline/receipt coverage and valid server
-content, rather than a WebSocket connection or timestamp comparison. Offline
-edits remain local and reconcile after reconnect or reload. Cloud-only projects
-are discovered into the account's local catalog; names may be duplicated.
+Production builds cache the shell after an online visit, allowing stored projects
+to [cold-open offline](docs/offline-reopening.md). Cloud-only projects must first
+be opened online. Wait for local save before closing tabs. On storage failure,
+keep the tab open, export content and retry saving.
 
-Documents and offline tab relays are scoped by deployment/account/project.
-Anonymous projects stay local until you choose **Add anonymous projects to this
-account** after signing in. Claims preserve binary Yjs content and resume safely
-when interrupted; projects already claimed by one account are never offered to
-another. A 503 or network outage preserves the cached workspace. A terminal 401
-pauses cloud sync and asks you to sign in again without moving or deleting local
-work. Explicit logout disconnects account providers across tabs and returns to
-anonymous projects, retaining the account cache for later sign-in.
+**Export** includes unsynced/in-memory content as readable `.mindgrab.json`.
+**Import** validates the [version 2 format](docs/project-file-format.md) before
+creating fresh project/node UUIDs and an empty undo history. Repeated imports and
+duplicate names stay independent. JSON portability is separate from binary recovery.
 
-Auth navigation awaits document/catalog/view commits and stays in place if local
-storage fails. Account hints and logout coordination are scoped by deployment;
-HTTP/socket owner expectations reject requests left over from another account.
-This provides UI/account isolation, **not browser-disk encryption**: local caches
-remain readable by someone with access to this browser profile. See
-[ADR 0007](docs/architecture/0007-account-workspaces.md) for claim recovery and
-account boundaries. Production builds cache the application shell for cold offline
-reopening after an online first visit. See [offline reopening](docs/offline-reopening.md)
-for prerequisites, safe upgrades, browser verification, and development reset. The fenced
-legacy `/api/projects` endpoint returns `426 legacy_client_upgrade_required`;
-no snapshot reader or writer remains. See
-[ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
-recovery, lifetime fencing and the real-browser test command.
+## Accounts and authentication
 
-**Export** downloads the active document, including offline or unsaved edits,
-as a readable `.mindgrab.json` file. **Import** validates the version 2 portable
-format and creates a new project with fresh project/node UUIDs and an empty
-undo history. Same-name projects and repeated imports remain independent.
-File or storage errors preserve the active project, and Export stays usable
-when local persistence fails. See the [portable project format](docs/project-file-format.md)
-for the schema, limits, optional local viewport preferences, and test commands.
+Anonymous projects remain local until **Add anonymous projects to this account**
+is chosen after sign-in. Claims retain binary content and resume after interruption.
+Documents, catalogs and local channels are isolated by deployment/account/project.
 
-## Project catalog API (Yjs protocol v1)
+A transient outage preserves the cached workspace. A terminal 401 pauses sync
+and asks for sign-in without deleting work. Explicit logout disconnects account
+providers across tabs and opens anonymous projects; account caches remain for
+later sign-in. Auth navigation awaits local commits and stays in place on storage
+failure. Local caches are not encrypted. See [account boundaries](docs/architecture/accounts.md).
 
-Yjs projects are identified by a client-generated UUID rather than by name.
-The catalog lives in `crdt_project` and is served from `server/src/project.rs`.
-The retired name-keyed `/api/projects` endpoint always returns `426` with
-reload instructions, including for stale or signed-out clients. All catalog
-endpoints use the session cookie; the owner is
-always the signed-in user and is never read from the request body, query, or
-document content. Browser clients send `X-Mindgrab-Account: <userId>` as an
-expected-session fence, never as an ownership selector. A changed cookie returns
-`409 account_changed` before reading, registering or uploading content; clients
-pause and recheck `/api/me`. The optional header preserves compatibility with
-existing protocol clients. Responses are `Cache-Control: no-store`.
+- `GET /api/auth/login` starts browser-bound, one-use AuthKit state and PKCE.
+- `GET /api/auth/callback` verifies the token, upserts the WorkOS user and rotates
+  the local session credential.
+- `GET /api/me` returns basic user fields, 401 when signed out, or 503 on temporary
+  authentication failure. Tokens are never returned to browser JavaScript.
+- `POST /api/auth/logout` checks Origin, deletes the session and redirects through
+  WorkOS logout.
 
-- `POST /api/crdt/v1/projects` with `{ "projectId": "<uuid>", "schemaVersion": 1 }`
-  registers a project, including one created offline. It requires the app's
-  `Origin` header. `projectId` must be a canonical lowercase, non-nil RFC 4122
-  version 4 UUID. Unknown fields such as `ownerId` are rejected. Returns `201`
-  with a `Location` header on first registration and `200` with the current
-  record on a retry by the same owner. The first committed registration claims
-  the UUID permanently; any other user receives `409 project_id_conflict`.
-  Concurrent registrations produce exactly one project.
-- `GET /api/crdt/v1/projects?limit=50&cursor=<nextCursor>` lists the signed-in
-  user's projects, newest first (creation time, then UUID). `limit` is 1–100
-  (default 50). Pass the returned opaque `nextCursor` to fetch the next page;
-  it is `null` on the last page. Records never include document bodies.
-- `GET /api/crdt/v1/projects/<uuid>` returns one owned project. Another user's
-  project and a missing project both return `404 project_not_found`.
+Postgres stores provider tokens and a SHA-256 hash of the browser credential.
+The cookie is HttpOnly, SameSite=Lax and Secure on HTTPS. Access tokens are checked
+on each authenticated request; refreshes are serialized and persisted before
+returning. Local sessions have a 30-day maximum. Configure short provider access
+lifetimes for timely revocation detection. Login attempts expire after 10 minutes.
 
-A project record is:
+## API and architecture
 
-```json
-{ "projectId": "10000000-0000-4000-8000-000000000000", "protocolVersion": 1,
-  "schemaVersion": 1, "createdAt": "2026-09-29T18:00:00.000000Z", "name": null,
-  "nodeCount": null, "projectionSequence": null, "projectionVersion": null,
-  "projectionStatus": "uninitialized", "lastSequence": "0", "contentUpdatedAt": null }
-```
+The owner comes from the authenticated session. Browser requests send
+`X-Mindgrab-Account` and socket upgrades send expected `ownerId` to fence account
+changes; these never select ownership. Mutations/socket upgrades require the
+configured application Origin. Private responses are no-store.
 
-`projectId`, the owner, `createdAt`, and `protocolVersion` are immutable (a
-database trigger enforces it). `name`, `lastSequence` (a decimal string), and
-`contentUpdatedAt` describe accepted content. The update store advances sequence
-and time; a background Yrs projector supplies name and visible node count. Until
-content is accepted they are `null`/`"0"`,
-which a client should treat as a registered but uninitialized project. Names are
-not unique, and renaming never changes identity. Clients reconnect using
-`projectId`, `protocolVersion`, `schemaVersion`, and `lastSequence`.
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /api/crdt/v1/projects` | Register a canonical client-generated v4 UUID with `schemaVersion: 1`; retries by the same owner are idempotent. |
+| `GET /api/crdt/v1/projects?limit=50&cursor=…` | Paginated owner catalog; follow `nextCursor` to its end. |
+| `GET /api/crdt/v1/projects/<uuid>` | Identity, sequence and projection freshness. |
+| `PUT /api/crdt/v1/projects/<uuid>/updates/<updateUUID>` | Exact V1 bytes, `application/octet-stream`, `X-Mindgrab-Schema-Version: 1`; durable receipt after commit. |
+| `GET /api/crdt/v1/projects/<uuid>/{baseline,updates,status}` | Binary bootstrap/replay and current validation. |
+| `GET /api/crdt/v1/projects/<uuid>/state` | Canonical content and effective placements from a current read model. |
+| `/api/crdt/v1/sync/<uuid>` | Authenticated y-websocket live propagation. |
 
-Errors use `{ "error": { "code": "...", "message": "..." } }`: `400`
-(`invalid_request`, `invalid_project_id`, or `invalid_cursor`), `401
-unauthenticated`, `403 invalid_origin`, `404 project_not_found`, `409
-project_id_conflict`, `426 unsupported_schema` for any `schemaVersion` other
-than 1, and `503 unavailable` for retryable storage or authentication failures.
+Errors use `{ "error": { "code": "…", "message": "…" } }`. Another owner's
+UUID reads as 404; unsupported schemas return 426; account changes return
+`409 account_changed`; temporary storage/auth failures return 503. Uninitialized
+and pending/quarantined projects are retained and cannot be presented as saved.
 
-**Development cutover:** existing snapshot data is intentionally discarded, with
-no conversion/backfill. Browser startup resets only the known legacy localStorage
-project keys, after checking for other open tabs. Yjs generation 1 databases,
-preferences, users and authentication are preserved. The database reset is an
-explicit operator command, never an automatic startup migration:
+Current implementation contracts:
 
-```sh
-mise run server:reset-legacy-projects
-```
+- [Document schema, commands and deterministic projection](docs/architecture/document.md)
+- [IndexedDB lifecycle and commit guarantees](docs/architecture/local-storage.md)
+- [Binary storage, receipts and causal-gap handling](docs/architecture/durability.md)
+- [WebSocket protocol and multi-process propagation](docs/architecture/websocket-sync.md)
+- [Browser sync and durable cloud-save coverage](docs/architecture/cloud-sync.md)
+- [Read-model projection and repair](docs/architecture/read-models.md)
+- [Checkpoint compaction and binary backup/restore](docs/architecture/checkpoints-backups.md)
 
-Stop obsolete server builds first. This drops only `pnode` and `project` in one
-transaction and is safe to repeat. Do not reset the Docker volume to perform this
-cutover. Read [the cutover and operations runbook](docs/yjs-cutover.md) before rollout
-or recovery and [the release notes](docs/release-notes/yjs-cutover.md) for the one-time
-browser reset.
+## Deployment and operations
 
-## Durable Yjs update API
+Use same-origin HTTPS static hosting and `/api` proxying to compatible Rust API
+processes backed by one Postgres primary. [Nginx configuration](deploy/nginx.conf)
+forwards WebSocket Upgrade/Connection, Cookie and Origin and allows heartbeats.
+Serve worker scripts with no-cache, keep API paths out of SPA fallback/cache, and
+publish HTML/assets/workers together. Set `DATABASE_URL`, WorkOS credentials,
+`APP_URL` and `WORKOS_REDIRECT_URI`; register the matching production AuthKit URLs.
+`VITE_BACKEND_URL` is a build-time backend base URL; leave it empty for same-origin
+production hosting. An external backend needs credentialed CORS.
 
-Registered projects accept Yjs V1 bytes at
-`PUT /api/crdt/v1/projects/<projectUUID>/updates/<updateUUID>`, with
-`Content-Type: application/octet-stream` and `X-Mindgrab-Schema-Version: 1`.
-Receipts identify the exact committed bytes by UUID, SHA-256 and sequence;
-identical retries are idempotent. Owner-scoped `/updates`, `/status`, and
-`/baseline` endpoints support raw replay and reconstruction after restart.
-See [ADR 0003](docs/architecture/0003-durable-yjs-update-store.md) for request and
-response shapes, pending/quarantine behavior, limits, and the shared ingestion
-and reconstruction APIs for WebSocket sync and read models. Migration `0007`
-adds binary storage without resetting legacy data. Authenticated WebSocket
-transport is described below; browser cloud-sync integration is described in [ADR 0006](docs/architecture/0006-browser-yjs-sync.md).
+[Operations](docs/operations.md) covers save states, schema compatibility,
+maintenance and recovery. Rebuild disposable summaries with
+`mise run server:rebuild-read-models`. Use binary backups for identity-preserving
+recovery; preserve canonical bytes and use compatible builds when rolling back.
 
-## Authenticated Yjs WebSocket sync
+**Development reset notice:** obsolete snapshot data is discarded without
+conversion. Browser startup removes only known project keys after tab coordination;
+current Yjs databases, auth and preferences are retained. Operators explicitly
+remove only obsolete database tables using `mise run server:reset-legacy-projects`.
+Stop obsolete server builds first. The retired `/api/projects` endpoint rejects
+writes with 426. See the [reset procedure](docs/operations.md#deployment-and-development-reset).
 
-Registered project UUIDs connect at `/api/crdt/v1/sync/<projectUUID>` using the
-session cookie and configured app Origin. Browser providers also send the expected
-account as `?ownerId=<userId>`; a mismatch rejects the upgrade. This supports the pinned
-`y-websocket` provider's state-vector/diff protocol; accepted updates propagate
-only after Postgres commit. Separate API processes share the committed log and
-poll every 250 ms, so HTTP submissions and writes on another instance reach
-connected devices without sticky sessions. Auth is revalidated while connected;
-temporary failures preserve the session and close retryably.
-
-Socket sync is not a durable save receipt: clients still use the companion HTTP
-update/receipt API. Awareness is omitted. Vite forwards WebSocket upgrades locally;
-production proxies must forward Upgrade/Connection, Cookie and Origin and allow
-the 20-second heartbeat. See [ADR 0004](docs/architecture/0004-authenticated-yjs-websocket-sync.md)
-for client setup, multi-process deployment, limits, close codes, and real-socket
-fault/restart tests. Browser integration is described in [ADR 0006](docs/architecture/0006-browser-yjs-sync.md).
-
-## Yjs inspection and read-model repair
-
-`GET /api/crdt/v1/projects/<uuid>/state` returns owner-authorized canonical
-content and effective node placements, with sequence/version freshness metadata.
-It catches up synchronously; causal gaps return the previous complete view with
-`current: false`. Catalog records also include `nodeCount`, `projectionSequence`,
-`projectionVersion`, and `projectionStatus`; catalog summaries catch up in the
-background and are current only when projection and log sequences match.
-The editor continues to render its local Y.Doc.
-
-Run `mise run server:rebuild-read-models` to recreate disposable summaries and
-node rows from verified binary checkpoints/updates. It requires only the
-database configuration and does not start the API or require WorkOS credentials.
-See [ADR 0005](docs/architecture/0005-yjs-read-models.md) for the response shape,
-causal-gap/failure policy, worker limits, concurrency guarantees and repair runbook.
-
-## Safe checkpoints and binary backup/restore
-
-A bounded background worker consolidates complete CRDT updates into verified
-full-state V1 checkpoints and prunes covered binary log rows atomically. Pending
-causal gaps and uncertain encodings retain their original rows. Immutable receipt
-metadata survives pruning, and old replay cursors require a fresh baseline.
-
-Admin commands `compact-project`, `backup-project`, and `restore-project` use
-`DATABASE_URL` without starting the API. Binary archives preserve project UUID,
-CRDT clocks/deletes, explicit owner mapping, checksums, receipts and required
-tail; they are separate from user JSON import. See
-[ADR 0007](docs/architecture/0007-safe-checkpoints-and-backups.md) for coverage
-criteria, GC/undo behavior, triggers/metrics, command syntax, limits, measured
-replay costs and the coordinated database recovery runbook. Migration `0009`
-backfills receipts and adds maintenance metadata without resetting projects.
-
-## Health check
-
-Open **/checkhealth** in the webapp for a status page showing whether the API
-and database are reachable, the browser-to-API round trip, and the database
-query time. It refreshes every 15 seconds while the tab is visible.
-
-`GET /api/health` returns `200` with
-`{ "status": "ok", "database": { "status": "up", "latency_ms": 0.6 } }`, or `503`
-with `"status": "degraded"` and `"database": { "status": "down", "latency_ms": null }`
-when the database does not answer within 2 seconds. A `Server-Timing: db;dur=…`
-header reports the time spent on the database check. The response never
-includes connection details or error messages.
-
-## Deployment
-
-`VITE_BACKEND_URL` sets the backend base URL at build time for account and
-health requests. Leave it empty for the same-origin reverse proxy setup below.
-An external backend origin must allow credentialed CORS requests from the webapp
-and expose `Server-Timing` for health latency calculations.
-
-Use HTTPS and serve the frontend and `/api` on the same origin through a reverse
-proxy. The supported topology is one Postgres primary shared by compatible Rust API
-processes, with same-origin static assets and WebSocket proxying; see the
-[example Nginx configuration](deploy/nginx.conf) and
-[operations runbook](docs/yjs-cutover.md). Client-side routes such as
-`/checkhealth` must fall back to `index.html`. Set `DATABASE_URL`, the WorkOS
-credentials, `APP_URL` (the root URL), and
-`WORKOS_REDIRECT_URI` (same origin, `/api/auth/callback`). Register corresponding
-production login, callback, and sign-out URLs in WorkOS. If using a custom token
-issuer, set `WORKOS_ISSUER` to its exact issuer URL. By default the expected
-issuer is `https://api.workos.com/user_management/<WORKOS_CLIENT_ID>`. HTTP is accepted only for local
-loopback development. Protect the database and its backups: they hold refresh
-tokens. The bundled Postgres configuration uses passwordless local development
-authentication and is not a production database configuration.
-
-WorkOS references: [hosted AuthKit](https://workos.com/docs/authkit/hosted-ui),
-[authentication API](https://workos.com/docs/reference/authkit/authentication),
-[session tokens](https://workos.com/docs/reference/authkit/session-tokens), and
-[refresh behavior](https://workos.com/docs/authkit/session-resilience).
+Open **/checkhealth** for API/database reachability and latency. `GET /api/health`
+returns 200 when healthy, 503 when degraded, and exposes database latency through
+`Server-Timing`. Health results contain no connection details or credentials.
 
 ## Checks
 
 ```sh
-docker compose up -d postgres
-mise run server:check
+mise run db
+mise run check
 ```
 
-`server:check` runs `server:fmt`, `server:clippy`, and `server:test`. Tests use
-`DATABASE_URL`, defaulting to the Compose database. Server tasks run with the
-Rust version pinned in `server/mise.toml`. `mise run check` runs every server
-and webapp check; `mise tasks` lists them all.
+The complete check runs Rust formatting/lint/tests, webapp static checks/build,
+unit/browser/offline tests, Yjs/Yrs interoperability, real Rust/Postgres cloud
+browser tests and the [production release gate](docs/release-regression.md).
+Install Chromium once with `(cd webapp && bun --bun x playwright install chromium)`.
+`mise tasks` lists focused commands.
 
-The Rust integration tests create isolated databases using SQLx and a local mock
-WorkOS server. The database role needs permission to create test databases. No
-real WorkOS credentials, users, or emails are used by tests. The RSA key under
-`server/src/auth/fixtures` is a public test fixture, never an application secret.
-
-```sh
-mise run webapp:check
-mise run webapp:build
-mise run webapp:test
-mise run webapp:test:browser
-mise run webapp:test:cloud
-mise run webapp:test:offline
-mise run test:release
-```
-
-`webapp:test:browser` drives the editor in headless Chromium through Playwright
-(`bunx playwright install chromium` once). Its harness page links the app's
-document to a second in-process replica to simulate edits from another device.
-
-## Yjs migration contract
-
-The isolated [Yjs/Yrs proof of concept](tools/yjs-contract/README.md) defines the
-[document and synchronization contract](docs/architecture/0001-yjs-document-contract.md).
-Run `mise run crdt:test` for binary interoperability fixtures and seeded tests, and
-`mise run crdt:check` for static checks. The application synchronizes incremental Yjs updates and verified durable
-receipts. Local editing/persistence uses Yjs and IndexedDB.
-The durable backend update store adds application-level causal-gap workarounds
-without patching Yrs; its API/database regression suite runs in `server:test`.
-Browser persistence in IndexedDB — y-indexeddb document storage, the local
-project catalog, durability notifications, and failure handling — is specified
-in [ADR 0002](docs/architecture/0002-local-project-repository.md), with its
-storage lifecycle APIs tested against real Chromium IndexedDB by
-`mise run webapp:test`.
-
-Release regression setup, fault scenarios, fixtures and acceptance budgets: [local-first release gate](docs/release-regression.md).
+SQLx tests create isolated databases and mock WorkOS; the database role must be
+able to create test databases. No real credentials, users or emails are used.
+The RSA key under `server/src/auth/fixtures` is a public test fixture.

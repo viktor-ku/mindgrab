@@ -1,7 +1,7 @@
 import { beforeAll, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import * as Y from "yjs";
+import { Y } from "./fixtures";
 import {
   materialize,
   present,
@@ -10,7 +10,7 @@ import {
   projectForest,
   type Content,
   type ForestNode,
-} from "./contract";
+} from "./fixtures";
 import {
   base,
   capture,
@@ -159,7 +159,7 @@ for (let seed = 1; seed <= 32; seed++) {
       updates.push(
         ...capture(peer, () => {
           // A single shared text provides real causal dependencies, without the
-          // independent same-client skip scenarios excluded from this POC.
+          // independent same-client gaps exercised by the storage API suite.
           for (let step = 0; step < 12; step++)
             peer.transact(() => {
               const value = text(peer, ID(2));

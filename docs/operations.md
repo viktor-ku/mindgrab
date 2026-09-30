@@ -1,4 +1,4 @@
-# Yjs cutover and operations
+# Operations
 
 Yjs is the only project state path. Commands and text binding edit the Y.Doc;
 Solid renders a read-only projection. Undo uses a session-scoped Y.UndoManager.
@@ -6,55 +6,34 @@ IndexedDB commits incremental updates automatically. The Save button/Ctrl+S
 flushes local durability; the viewport debounce writes only a local preference.
 Layout, navigation, selection and drag previews remain local UI state.
 
-## Release procedure
+## Deployment and development reset
 
-The preceding development builds kept the fenced snapshot endpoint alongside
-`crdt/v1`; MIN-42 added the production release gate. Promote this cutover only
-after that gate passes. This release removes the snapshot implementation, and
-the final default configuration has one Yjs path with no snapshot feature flag
-or fallback. Run `mise run check` (including `test:release`) on the exact
-default configuration before publishing it. New reset fixtures use isolated
-browser profiles and SQLx databases; checks never reset the operator's data.
+Run `mise run check`, including the production release gate, before publishing
+compatible backend, frontend and worker assets together. Retain previous hashed
+assets during rollout. Tests use isolated browser profiles and databases.
 
-1. Retain a consistent Postgres backup and binary exports of important Yjs
-   projects. Coordinate the deployment so obsolete server processes stop before
-   serving the new backend. Do not keep an old snapshot writer behind a proxy.
-2. Deploy the compatible backend, frontend assets and service worker together.
-   Keep previous hashed assets during rollout. All backends must share one
-   Postgres primary and the same schema/protocol configuration.
-3. Run `mise run server:reset-legacy-projects` against the intended development
-   database. This explicit command loads `DATABASE_URL`, applies outstanding
-   additive migrations and drops only `pnode` then `project`, without CASCADE,
-   inside a transaction/advisory lock. Repeating it is safe. Unexpected table
-   dependencies abort the entire transaction. It never deletes `users`, auth
-   records, `crdt_*` canonical storage, receipts or read models. No backfill runs.
-4. Old clients receive `426 legacy_client_upgrade_required` for GET/PUT
-   `/api/projects`, even before sign-in and after tables are removed. The response
-   is not cached and contains `action: reload`, protocol/schema version 1 and
-   storage generation 1. Unknown Yjs schemas already return `426 unsupported_schema`;
-   the new browser pauses cloud saving and retains local work until upgrade.
-5. Browser startup inventories only `proj/*`, `project-updated/*`,
-   `mindgrab/latest-project`, and their exact `mindgrab/user/<numeric-id>/`
-   variants. Web Locks serialize reset and a worker counts **all same-origin
-   window tabs**, including old tabs without cooperative code. Other tabs block
-   reset; close them and retry. This conservative origin boundary may include
-   another page hosted on the same site. Failure to verify tabs/storage retains
-   data and blocks startup. The worker uses a separate `/legacy-reset/` scope,
-   never controls the editor, and unregisters after the check.
+`mise run server:reset-legacy-projects` explicitly removes the obsolete `pnode`
+and `project` development tables after stopping obsolete backend builds. It
+uses a transaction/advisory lock, omits CASCADE, is repeatable, and retains users,
+authentication and all `crdt_*` data. Unexpected dependencies abort the reset.
+Keep the original SQL migrations unchanged: SQLx checks their recorded versions
+and checksums when opening existing databases.
 
-Only obsolete development snapshots are discarded. The reset marker records
-generation 1; it never authorizes a database deletion or bypasses an inventory
-check. Recreated obsolete keys are safely reset again after closing stale tabs.
-The reset never lists/deletes IndexedDB or clears localStorage. Current Yjs
-documents, other generations, account hints, auth keys and unrelated preferences
-stay intact. The database command is separate from browser startup.
+Browser startup resets only `proj/*`, `project-updated/*`,
+`mindgrab/latest-project`, and their `mindgrab/user/<numeric-id>/` variants.
+A Web Lock serializes attempts; a separate worker inventories all same-origin
+windows, including uncontrolled tabs. Other tabs or coordination/storage failure
+block startup until **Retry opening**. Reconnect and close other tabs first.
+The worker uses `/legacy-reset/` scope and unregisters after the check.
+It has no cache/fetch handlers and never controls the editor.
 
-Offline legacy tabs keep their installed build until they reconnect and all old
-tabs close. They cannot overwrite UUID Yjs projects: the permanent endpoint fence
-rejects snapshot writes, and the old localStorage keys are separate from Yjs IDB.
-If coordination is unavailable offline, reconnect and retry. Do not clear site
-data or force a waiting worker to activate. Shell-only reset instructions are in
-[offline reopening](offline-reopening.md#development-reset-without-deleting-projects).
+This reset discards obsolete development snapshots without conversion. It never
+lists/deletes IndexedDB, clears localStorage, removes auth/preferences, or deletes
+a valid Yjs database. The generation marker cannot bypass inventory checks.
+`/api/projects` returns no-store `426 legacy_client_upgrade_required` and cannot
+write data. Offline cached tabs upgrade after reconnecting and closing all tabs.
+Use [shell-only reset](offline-reopening.md#development-reset-without-deleting-projects)
+for cache problems; do not clear site data or force waiting worker activation.
 
 ## Supported deployment
 
@@ -92,7 +71,7 @@ restore CRDT clocks, causal gaps, receipts or identity.
 Automatic checkpoint compaction uses complete validated state, preserves immutable
 receipts and unresolved causal dependencies, and atomically prunes only proven
 covered rows. Read models are disposable. Do not manually truncate `crdt_*` logs
-or receipts. Use [checkpoint/backup operations](architecture/0007-safe-checkpoints-and-backups.md)
+or receipts. Use [checkpoint/backup operations](architecture/checkpoints-backups.md)
 for limits, checksums, owner mappings, safe backup/restore commands and coordinated
 database recovery. `mise run server:rebuild-read-models` rebuilds summaries from
 canonical binary storage without WorkOS credentials.
@@ -114,7 +93,7 @@ downgrade to a build that mounts a writable legacy snapshot editor.
 
 Storage generation, IDB catalog version, document schema, portable JSON version,
 HTTP/socket protocol and shell protocol have separate meanings. Generation 1
-and document/protocol v1 remain unchanged at this cutover. Future incompatible
+and document/protocol v1 are the supported versions. Future incompatible
 changes require an explicit migration and multi-tab plan; version numbers must
 not be used as instructions to clear databases. Cached-shell mismatch blocks
 repository startup; unsupported document schemas retain bytes and block commands;

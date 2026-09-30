@@ -23,7 +23,7 @@ export interface ProjectFileNode {
   children: ProjectFileNode[];
 }
 
-// Local viewport state is a preference, never a writable project snapshot.
+// Viewport state is a local preference.
 export interface ViewportPreference {
   left: number;
   top: number;

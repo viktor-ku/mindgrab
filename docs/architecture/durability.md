@@ -1,17 +1,14 @@
-# ADR 0003: Durable Yjs V1 update storage
+# Durable Yjs V1 update storage
 
-Status: implemented by MIN-35; checkpoint/receipt maintenance is extended by
-[ADR 0007](0007-safe-checkpoints-and-backups.md) (MIN-39). Builds on [ADR 0001](0001-yjs-document-contract.md).
 Yrs remains exactly `0.28.0` with `small-client` and UTF-16 offsets; no upstream
 patch or alternate CRDT service is used.
 
 ## Storage and commit boundary
 
-Migration `0007_crdt_update_store.sql` adds immutable `crdt_update` rows containing
+Immutable `crdt_update` rows contain
 project UUID, sequence, submission UUID, original `BYTEA`, SHA-256, validation at
 acceptance and commit time. `crdt_checkpoint` holds a binary baseline, checksum
 and covered sequence. Ownership remains in `crdt_project`, outside the document.
-No legacy data is reset or converted.
 
 Every ingestion transaction locks the authenticated owner's project row with
 `SELECT ... FOR UPDATE`. That lock serializes all processes using the same
@@ -20,7 +17,7 @@ sequence allocation, byte insertion and status update. `synchronous_commit=on`
 is set locally and the response follows successful COMMIT. Database/WAL durability
 still requires the normal durable Postgres storage configuration (`fsync=on`).
 
-HTTP and future WebSocket handlers must use
+HTTP and WebSocket handlers use
 `project::updates::ingest(pool, owner_id, project_id, update_id, bytes)`.
 The owner is resolved by the authenticated transport, never accepted from content.
 Only broadcast the **original accepted bytes after success**, and only expose
@@ -73,7 +70,7 @@ configured application Origin.
 | `GET /baseline` | `schemaVersion: 1`, decimal-string `lastSequence`, `validation`, `encoding: "yjs-v1"`, standard-base64 merged `data` and `stateVector` |
 
 Prefix every path with `/api/crdt/v1/projects/<projectUUID>`. The submission
-receipt follows ADR 0001: `protocolVersion`, `projectId`, `updateId`, `sequence`,
+receipt contains `protocolVersion`, `projectId`, `updateId`, `sequence`,
 `sha256`, `durable: true`, `validation`. A baseline for a registered, uninitialized
 project has sequence `"0"`, empty V1 update `[0,0]`, empty vector `[0]`, and
 `pending_dependencies`. Loading it must not seed a new document.
@@ -86,8 +83,7 @@ For gaps, keep the merged binary baseline itself, including pending state;
 exported semantic JSON is not a recovery substitute.
 
 `project::updates::synchronization_baseline(pool, owner_id, project_id)` exposes
-the same coherent binary result to MIN-36 and MIN-38. Project/node read models
-and catalog names remain MIN-38 work; this task updates sequence/time/status.
+the same coherent binary result to socket sync and read-model projection.
 
 New error codes are `400 invalid_update`, `409 update_id_conflict`,
 `409 project_quarantined`, `413 resource_limit`, and `422 invalid_schema`.
@@ -99,7 +95,7 @@ uncertain outcome.
 
 Updates are limited to 1 MiB; a replay page is limited to 100 entries and 2 MiB
 of decoded bytes. A baseline is limited to 10 MiB of merged V1 data. Content
-limits match ADR 0001: 10,000 nodes including tombstones, 65,536 UTF-16 units per
+limits match the document contract: 10,000 nodes including tombstones, 65,536 UTF-16 units per
 node, 200 UTF-8 name bytes, and 128-character canonical fractional ranks.
 Unknown fields, wrong shared types, rich text, XML and subdocuments are rejected.
 An allocation-free V1 preflight bounds counts to actual remaining input and
@@ -108,7 +104,7 @@ Yrs decoding. At most two candidate workers run across all projects.
 
 Reconstruction bounds checkpoint plus tail inputs to 10 MiB and the tail to
 10,000 rows. Reaching that budget returns 413; accepted updates are never dropped.
-[ADR 0007](0007-safe-checkpoints-and-backups.md) specifies earlier maintenance
+[Checkpoint maintenance](checkpoints-backups.md) specifies earlier maintenance
 triggers, sufficient coverage checks, atomic publication/pruning, retained
 receipt identities, canonical binary backups and recovery commands. Unsafe
 states keep their source rows. Raw replay with a cursor older than the published
@@ -134,6 +130,4 @@ delivery. Six #670 delivery permutations and the #673 independent-gap topology
 pass through the real submission/replay/baseline routes. A separately launched
 Rust process reconstructs committed storage between arrivals and exits without
 runtime cleanup; JS and Rust canonical content match after dependencies arrive.
-The standalone trusted POC worker's earlier exclusions remain its historical
-scope; production storage uses the tested workaround above. Run this storage
-suite as well as the original contract suite on dependency upgrades.
+Run the storage and interoperability suites together on dependency upgrades.

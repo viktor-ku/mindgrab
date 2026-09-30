@@ -587,29 +587,8 @@ async fn stale_snapshot_clients_must_upgrade_without_writing(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn catalog_migration_applies_to_a_clean_schema(pool: PgPool) {
+async fn current_catalog_schema_enforces_identity_and_content_constraints(pool: PgPool) {
     let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("CREATE SCHEMA min34_migration_test")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("SET search_path TO min34_migration_test")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    for migration in [
-        include_str!("../../migrations/0001_create_users.sql"),
-        include_str!("../../migrations/0002_auth_sessions.sql"),
-        include_str!("../../migrations/0003_projects.sql"),
-        include_str!("../../migrations/0004_pnodes.sql"),
-        include_str!("../../migrations/0005_pnode_colors.sql"),
-        include_str!("../../migrations/0006_crdt_project_catalog.sql"),
-    ] {
-        sqlx::raw_sql(migration)
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-    }
     let owner: i64 = sqlx::query_scalar(
         "INSERT INTO users (name, email, external_id) VALUES ('Clean', 'clean@example.com', 'clean') RETURNING id",
     )
@@ -645,10 +624,6 @@ async fn catalog_migration_applies_to_a_clean_schema(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(project_unique_indexes, 0);
-    sqlx::query("DROP SCHEMA min34_migration_test CASCADE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
 }
 
 #[sqlx::test]

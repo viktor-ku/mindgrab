@@ -1,15 +1,11 @@
-# ADR 0006: Browser synchronization and durable cloud saving
-
-Status: implemented for protocol/schema v1 (MIN-37).
+# Browser synchronization and durable cloud saving
 
 ## Attachment and account lifetime
 
 `ProjectSync` attaches to an IndexedDB-hydrated `ProjectHandle`. It registers the
 client-generated UUID through the authenticated catalog API, merges a coherent
 server baseline into the existing document, and awaits local persistence before
-connecting the pinned y-websocket 3.1.0 provider. It never creates a root while
-opening an existing UUID, copies a semantic snapshot over dirty content, or
-compares client timestamps. Remote application uses `ORIGIN.remote`; provider
+connecting the pinned y-websocket 3.1.0 provider. It merges binary updates into existing UUID documents after hydration. Remote application uses `ORIGIN.remote`; provider
 transactions use the provider instance. Neither is tracked by local undo.
 
 The app starts network work only after `/api/me` confirms the account. A cached
@@ -49,8 +45,7 @@ cloud**. Pending causal dependencies and quarantine never count as usable saved
 content. A socket `sync` event only wakes reconciliation.
 
 On reload the persisted Y.Doc and a new coherent server baseline determine missing
-content. No in-memory queue, timestamp, latest-project pointer or durable pending
-queue is needed for correctness. If a response was lost before reload, its bytes
+content. The persisted document and server baseline determine receipt coverage. If a response was lost before reload, its bytes
 are already in the baseline or are resubmitted under a new UUID; Yjs application
 is idempotent. Within a running controller uncertain retries preserve UUIDs.
 
@@ -61,8 +56,8 @@ nodes remain causal gaps until the batch completes. All chunks have independent
 stable receipts, but the local generation is acknowledged only after the whole
 batch commits and current validation is valid. A single oversized struct or
 server storage limit pauses with a recoverable message; local content remains.
-The backend's 10 MiB retained-input and 10,000-row limits still apply until MIN-39
-adds compaction. This transport chunking does not replace that storage policy.
+The backend's 10 MiB retained-input and 10,000-row limits are managed by
+[checkpoint compaction](checkpoints-backups.md).
 
 ## Local tabs and save status
 
@@ -80,11 +75,9 @@ retry, expired authentication and blocked recovery states preserve content and
 show the pending cloud status; Retry resumes reconciliation.
 
 Anonymous claiming, explicit cross-tab logout and offline auth boundaries are
-implemented in [ADR 0007](0007-account-workspaces.md). Only a confirmed session
+implemented in [account workspaces](accounts.md). Only a confirmed session
 starts cloud work; expired auth requires revalidation before creating fresh
-controllers. MIN-33 owns cold application-shell caching.
-MIN-43 removes the legacy API implementation. `/api/projects` permanently returns
-426 upgrade instructions; see [cutover operations](../yjs-cutover.md).
+controllers. [Offline reopening](../offline-reopening.md) describes shell caching.
 
 ## Repeatable verification
 
@@ -111,12 +104,11 @@ a document exceeding 1 MiB and fresh-device reconstruction. The production UI
 also verifies authenticated UUID autosave, cloud status, rename, reload and the
 cloud-discovered Load list. Intercepted page assets allow reloading the harness
 while offline; explicit partition signals disconnect sockets and prevent HTTP
-submission. This tests document recovery, not MIN-33's application-shell cache.
+submission. The offline suite separately verifies production shell caching.
 Unit tests cover generation boundaries, stable uncertain retries, receipt hash/
 identity verification, pagination, delayed account/project results, auth pause,
 causal-gap status and reversed/duplicate V1 chunk delivery.
 
 Backend restart/multi-process durability remains covered by the existing real
-socket and subprocess tests in ADR 0004. The complete fault/release gate belongs
-to MIN-42. These focused tests supplement the pinned Yjs/Yrs interoperability
-gate rather than replacing it.
+[socket and subprocess tests](websocket-sync.md). The complete
+[release gate](../release-regression.md) also checks process crashes and recovery.

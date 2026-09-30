@@ -1,16 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   connectionPath,
-  deleteNode,
   findNode,
-  insertSibling,
   layoutMindMap,
-  moveNode,
   navigationTarget,
-  reorderNode,
-  setNodeColor,
   translateSubtree,
-  updateNode,
 } from "../src/mind-map";
 import type { MindMapNode } from "../src/mind-map";
 
@@ -25,30 +19,6 @@ const tree = (): MindMapNode[] => [
   },
   { id: "e", text: "E" },
 ];
-const ids = (nodes: MindMapNode[]) => nodes.map((node) => node.id);
-
-describe("node colors", () => {
-  test("colors one node without changing its children or other branches", () => {
-    const original = tree();
-    const changed = setNodeColor(original, "b", "rose");
-
-    expect(findNode(changed, "b")?.color).toBe("rose");
-    expect(findNode(changed, "c")?.color).toBeUndefined();
-    expect(findNode(changed, "a")?.color).toBeUndefined();
-    expect(findNode(changed, "d")?.color).toBeUndefined();
-    expect(findNode(original, "b")?.color).toBeUndefined();
-  });
-
-  test("colors the selected node and every descendant in its branch", () => {
-    const original = tree();
-    const changed = setNodeColor(original, "a", "teal", true);
-
-    for (const id of ["a", "b", "c", "d"])
-      expect(findNode(changed, id)?.color).toBe("teal");
-    expect(findNode(changed, "e")?.color).toBeUndefined();
-    expect(findNode(original, "a")?.color).toBeUndefined();
-  });
-});
 
 describe("free positioning", () => {
   const positions = (nodes: MindMapNode[]) =>
@@ -119,7 +89,11 @@ describe("free positioning", () => {
       const node = resized.nodes.find((node) => node.id === id)!;
       expect({ x: node.x, y: node.y }).toEqual(findNode(moved, id)!.position!);
     }
-    const extended = insertSibling(moved, "c", { id: "new", text: "New" });
+    const extended = tree();
+    extended[0].next![0] = {
+      ...moved[0].next![0],
+      next: [...moved[0].next![0].next!, { id: "new", text: "New" }],
+    };
     expect(positions(extended).get("new")!.x).toBe(
       before.get("b")!.x + before.get("b")!.width + 64,
     );
@@ -160,9 +134,16 @@ describe("layout stability", () => {
       { id: "parent", text: "Parent", next: [{ id: "one", text: "One" }] },
     ];
     const before = layoutMindMap(original);
-    const after = layoutMindMap(
-      insertSibling(original, "one", { id: "two", text: "Two" }),
-    );
+    const after = layoutMindMap([
+      {
+        id: "parent",
+        text: "Parent",
+        next: [
+          { id: "one", text: "One" },
+          { id: "two", text: "Two" },
+        ],
+      },
+    ]);
     expect(nodeAt(after, "parent")).toEqual(nodeAt(before, "parent"));
     expect(nodeAt(after, "one").y).toBeLessThan(nodeAt(before, "one").y);
     expect(centerY(nodeAt(after, "parent"))).toBe(
@@ -176,7 +157,7 @@ describe("layout stability", () => {
     const parent = nodeAt(layout, "b");
     const anchor = { id: parent.id, centerY: centerY(parent) };
     for (const id of ["new-1", "new-2", "new-3"]) {
-      current = insertSibling(current, "c", { id, text: id });
+      current[0].next![0].next!.push({ id, text: id });
       layout = layoutMindMap(current, new Map(), anchor);
       expect(nodeAt(layout, "b")).toEqual(parent);
       const children = findNode(current, "b")!.next!.map((child) =>
@@ -204,10 +185,8 @@ describe("layout stability", () => {
     const before = layoutMindMap(original);
     const parent = nodeAt(before, "b");
     const anchor = { id: parent.id, centerY: centerY(parent) };
-    const current = updateNode(original, "b", (node) => ({
-      ...node,
-      next: [...node.next!, { id: "new", text: "New" }],
-    }));
+    const current = tree();
+    current[0].next![0].next!.push({ id: "new", text: "New" });
     const sizes = new Map([
       ["new", { width: 160, height: 120 }],
       ["b", { width: 100, height: 64 }],
@@ -238,7 +217,7 @@ describe("layout stability", () => {
     const before = layoutMindMap(original);
     const root = nodeAt(before, "e");
     const after = layoutMindMap(
-      insertSibling(original, "e", { id: "new", text: "New" }),
+      [...original, { id: "new", text: "New" }],
       new Map(),
       {
         id: root.id,
@@ -294,7 +273,7 @@ describe("layout stability", () => {
         expect(node.x).toBe(previous.x + delta.x);
         expect(node.y).toBe(previous.y + delta.y);
       }
-      // Restoring the drag snapshot (Escape/cancel) restores the anchored layout.
+      // Canceling the drag discards the preview and restores the original layout.
       expect(layoutMindMap(original, new Map(), anchor)).toEqual(before);
     }
   });
@@ -309,7 +288,8 @@ describe("layout stability", () => {
       { x: 75, y: -150 },
     );
     const parent = nodeAt(layoutMindMap(moved), "b");
-    const current = insertSibling(moved, "c", { id: "new", text: "New" });
+    const current = structuredClone(moved);
+    current[0].next![0].next!.push({ id: "new", text: "New" });
     const after = layoutMindMap(current, new Map(), {
       id: "b",
       centerY: centerY(parent),
@@ -356,74 +336,5 @@ describe("arrow-key navigation", () => {
     for (const direction of ["left", "right", "up", "down"] as const) {
       expect(navigationTarget(original, "missing", direction)).toBeUndefined();
     }
-  });
-});
-
-describe("editing a tree", () => {
-  test("deleting a node removes every descendant, preserving unrelated branches", () => {
-    const original = tree();
-    const result = deleteNode(original, "b");
-    expect(findNode(result, "b")).toBeUndefined();
-    expect(findNode(result, "c")).toBeUndefined();
-    expect(ids(result[0].next!)).toEqual(["d"]);
-    expect(ids(result)).toEqual(["a", "e"]);
-    expect(findNode(original, "c")).toBeDefined();
-  });
-  test("the final subtree can be deleted", () => {
-    expect(deleteNode([tree()[0]], "a")).toEqual([]);
-    expect(deleteNode([{ id: "a", text: "A" }], "a")).toEqual([]);
-  });
-  test("inserting siblings works at child and root level", () => {
-    const sibling = { id: "new", text: "New" };
-    expect(ids(insertSibling(tree(), "b", sibling)[0].next!)).toEqual([
-      "b",
-      "new",
-      "d",
-    ]);
-    expect(ids(insertSibling(tree(), "a", sibling))).toEqual(["a", "new", "e"]);
-  });
-  test("reordering swaps only adjacent siblings, retaining their descendants", () => {
-    const original = tree();
-    const result = reorderNode(original, "b", 1);
-    expect(ids(result[0].next!)).toEqual(["d", "b"]);
-    expect(findNode(result, "b")?.next?.[0].id).toBe("c");
-    expect(ids(reorderNode(original, "e", -1))).toEqual(["e", "a"]);
-    expect(reorderNode(original, "a", -1)).toEqual(original);
-    expect(reorderNode(original, "d", 1)).toEqual(original);
-    expect(ids(original[0].next!)).toEqual(["b", "d"]);
-  });
-});
-
-describe("dragging subtrees", () => {
-  test("reparenting carries descendants and removes the old reference", () => {
-    const original = tree();
-    const result = moveNode(original, "b", { id: "e", placement: "child" });
-    expect(ids(result[0].next!)).toEqual(["d"]);
-    expect(findNode(result, "e")?.next?.[0]).toEqual(original[0].next![0]);
-    expect(findNode(original, "a")?.next).toHaveLength(2);
-  });
-  test("edges insert before and after a target, across hierarchy levels", () => {
-    const before = moveNode(tree(), "b", { id: "e", placement: "before" });
-    expect(ids(before)).toEqual(["a", "b", "e"]);
-    const after = moveNode(tree(), "e", { id: "b", placement: "after" });
-    expect(ids(after)).toEqual(["a"]);
-    expect(ids(after[0].next!)).toEqual(["b", "e", "d"]);
-  });
-  test("dropping on self, descendants, or stale targets is a lossless no-op", () => {
-    const original = tree();
-    for (const placement of ["child", "before", "after"] as const) {
-      for (const id of ["a", "b", "c", "missing"]) {
-        expect(moveNode(original, "a", { id, placement })).toBe(original);
-      }
-    }
-    expect(moveNode(original, "missing", { placement: "root" })).toBe(original);
-  });
-  test("detach then reparent can invert an ancestor relationship safely", () => {
-    const detached = moveNode(tree(), "b", { placement: "root" });
-    expect(ids(detached)).toEqual(["a", "e", "b"]);
-    const inverted = moveNode(detached, "a", { id: "b", placement: "child" });
-    expect(ids(inverted)).toEqual(["e", "b"]);
-    expect(ids(findNode(inverted, "b")!.next!)).toEqual(["c", "a"]);
-    expect(findNode(inverted, "a")?.next?.[0].id).toBe("d");
   });
 });

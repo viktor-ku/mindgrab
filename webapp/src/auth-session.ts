@@ -49,12 +49,11 @@ export class AuthSession {
 
   constructor(deployment: string) {
     this.key = authStorageKey(deployment);
-    this.#record = this.#read() ??
-      this.#legacyHint() ?? {
-        revision: crypto.randomUUID(),
-        signedOut: false,
-        navigating: false,
-      };
+    this.#record = this.#read() ?? {
+      revision: crypto.randomUUID(),
+      signedOut: false,
+      navigating: false,
+    };
     this.#state = {
       user: this.#record.user,
       status: this.#record.signedOut ? "anonymous" : "checking",
@@ -112,24 +111,6 @@ export class AuthSession {
     try {
       const value = localStorage.getItem(this.key);
       return value ? recordSchema.parse(JSON.parse(value)) : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  #legacyHint(): SessionRecord | undefined {
-    try {
-      const id = Number(localStorage.getItem("mindgrab/cached-user-id"));
-      if (!Number.isSafeInteger(id) || id <= 0) return;
-      const record = {
-        revision: crypto.randomUUID(),
-        user: { id, name: "Cached account", email: "", external_id: "" },
-        signedOut: false,
-        navigating: false,
-      };
-      // One-time migration of the old hint; it grants no cloud access.
-      localStorage.setItem(this.key, JSON.stringify(record));
-      localStorage.removeItem("mindgrab/cached-user-id");
-      return record;
     } catch {
       return undefined;
     }

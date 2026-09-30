@@ -1,4 +1,4 @@
-import * as Y from "yjs";
+import { Y } from "./fixtures";
 import {
   addNode,
   createDocument,
@@ -11,7 +11,7 @@ import {
   placeNode,
   projectForest,
   type NodeValue,
-} from "./contract";
+} from "./fixtures";
 export const PROJECT = "10000000-0000-4000-8000-000000000000";
 export const ID = (n: number) =>
   `20000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;

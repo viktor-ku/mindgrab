@@ -1,6 +1,4 @@
-# ADR 0004: Authenticated Yjs WebSocket synchronization
-
-Status: accepted for protocol/schema v1 (MIN-36).
+# Authenticated Yjs WebSocket synchronization
 
 ## Endpoint and client contract
 
@@ -54,9 +52,9 @@ update. Out-of-order original bytes remain durable and are forwarded unchanged,
 avoiding Yrs event/diff omissions (#670/#673). Quarantined projects close sockets
 without forwarding the invalid resolving update. If compaction removes a slow
 connection's next row, it gets a coherent full baseline rather than skipping a
-gap. MIN-39 must preserve the checkpoint/tail locking contract.
+gap. Checkpoint maintenance uses the same project lock.
 
-Socket sync is **not a durable save receipt**. MIN-37 must submit stable update
+Socket sync is **not a durable save receipt**. Browser clients submit stable update
 UUIDs through the companion HTTP API and reconcile pending submissions after
 reconnect. Socket messages get fresh storage UUIDs: duplicates may consume
 distinct sequences while remaining semantically idempotent in Yjs. Neither
@@ -88,10 +86,9 @@ also has a ten-second deadline, after which the socket and permit drop.
 Heartbeats ping every 20 seconds; no inbound activity/pong for 60 seconds closes
 the socket. Disconnected rooms retain no cache or observers.
 
-Polling trades up to 250 ms discovery latency and four idle queries per second
-per connection for reliable multi-process propagation. Production capacity and
-edit-performance budgets remain MIN-42; increase limits only with measured
-Postgres/memory capacity.
+Polling adds up to 250 ms discovery latency and four idle queries per second
+per connection. Increase limits only with measured Postgres/memory capacity and
+passing release performance budgets.
 
 ## Proxy configuration
 
@@ -130,4 +127,4 @@ disabled for offline/reconnect convergence and fresh-client reconstruction.
 
 References: [y-websocket](https://docs.yjs.dev/ecosystem/connection-provider/y-websocket),
 [y-protocols](https://github.com/yjs/y-protocols/blob/master/PROTOCOL.md),
-[ADR 0003](0003-durable-yjs-update-store.md).
+[Durable storage](durability.md).
