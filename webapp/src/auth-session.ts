@@ -133,7 +133,13 @@ export class AuthSession {
     const stored = this.#read();
     if (stored && stored.revision !== this.#record.revision)
       this.#receive(stored);
-    void this.check();
+    if (this.#request) {
+      // The in-flight response may describe the cookie before this focus/online
+      // event. Coalesce a fresh check after it instead of dropping the event.
+      void this.#request.promise.then(() => {
+        if (!this.#disposed && !this.#record.navigating) void this.check();
+      });
+    } else void this.check();
   };
   start() {
     if (this.#started || this.#disposed) return;

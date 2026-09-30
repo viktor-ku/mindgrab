@@ -258,6 +258,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   let stopDurability: (() => void) | undefined;
   let stopCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
+  let authNavigationPending = false;
   let disposed = false;
   let activation = 0;
   let claimAbort: AbortController | undefined;
@@ -272,14 +273,25 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   const [recoveryPending, setRecoveryPending] = createSignal(false);
 
   function startCloud() {
-    if (auth.state.status !== "authenticated" || cloud || disposed) return;
+    if (
+      auth.state.status !== "authenticated" ||
+      cloud ||
+      disposed ||
+      authNavigationPending
+    )
+      return;
     const owner = repository;
     cloud = new CloudWorkspace(
       owner,
       (status) => {
         if (repository !== owner || disposed) return;
         setCloudStatus(status);
-        if (status?.status === "auth") auth.expire();
+        if (status?.status === "auth") {
+          auth.expire();
+          // A cookie may now belong to another account. Only /me can decide
+          // whether to switch workspaces or keep this account expired.
+          void auth.check();
+        }
       },
       () => {
         void owner
@@ -515,7 +527,10 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         "Could not finish adding anonymous projects. Your local work is retained; retry to continue.",
       );
       await refreshClaims(owner);
-      if (error instanceof SyncError && error.kind === "auth") auth.expire();
+      if (error instanceof SyncError && error.kind === "auth") {
+        auth.expire();
+        void auth.check();
+      }
     } finally {
       await source.close();
       if (claimAbort === abort) {
@@ -883,12 +898,15 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage("Wait for local project storage before leaving.");
       return false;
     }
+    authNavigationPending = true;
     cloud?.destroy();
     cloud = undefined;
     owner.setRelaysPaused(true);
     let leaving = false;
     try {
       await retryLocalSaving();
+      if (repository !== owner || activeHandle !== handle || disposed)
+        return false;
       await handle.refreshMetadata();
       await owner.setLatestProject(handle.id);
       await owner.setPreference(`project/${handle.id}/view`, {
@@ -911,6 +929,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       return false;
     } finally {
       if (!leaving) {
+        authNavigationPending = false;
         owner.setRelaysPaused(false);
         startCloud();
       }

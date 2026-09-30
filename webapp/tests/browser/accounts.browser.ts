@@ -567,3 +567,29 @@ test("an interrupted local claim copy stays hidden and resumes from the anonymou
     (await call("catalog", "account-1")).filter((entry) => entry.id === id),
   ).toHaveLength(1);
 });
+
+test("a focus event during an old session check queues a fresh account check", async () => {
+  await login();
+  await cloudSaved();
+  const previous = await call("id");
+  backend.meStarted = false;
+  backend.catalogStarted = false;
+  backend.meGate = deferred();
+  backend.catalogGate = deferred();
+  await refreshAccount();
+  while (!backend.meStarted || !backend.catalogStarted) await Bun.sleep(10);
+  // The old /me and catalog responses both describe A. Hold discovery so its
+  // owner fence cannot mask a dropped auth refresh when the cookie becomes B.
+  backend.user = B;
+  await refreshAccount();
+  backend.meGate.resolve();
+  backend.meGate = undefined;
+  await page.getByText(B.name, { exact: true }).waitFor();
+  await ready();
+  expect(await call("id")).not.toBe(previous);
+  backend.catalogGate.resolve();
+  backend.catalogGate = undefined;
+  expect(
+    (await call("catalog", "account-2")).some((entry) => entry.id === previous),
+  ).toBe(false);
+});
