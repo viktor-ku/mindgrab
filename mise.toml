@@ -56,6 +56,11 @@ description = "Run webapp interaction tests in headless Chromium"
 dir = "webapp"
 run = "bun --bun test ./tests/browser/editor.browser.ts ./tests/browser/project-repository.browser.ts ./tests/browser/accounts.browser.ts"
 
+[tasks."webapp:test:offline"]
+description = "Verify production shell caching, cold offline reopen, and safe upgrades"
+dir = "webapp"
+run = "bun --bun run test:offline"
+
 [tasks."webapp:build"]
 description = "Build the webapp"
 depends = ["webapp:install"]
@@ -69,7 +74,7 @@ run = "bun --bun run check"
 
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:build", "crdt:test", "crdt:check"]
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "crdt:test", "crdt:check"]
 
 [tasks."crdt:install"]
 description = "Install locked CRDT proof-of-concept dependencies"

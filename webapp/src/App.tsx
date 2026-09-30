@@ -1660,6 +1660,13 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             </ul>
           </div>
         </Show>
+        <Show when={view().status() === "unsupported"}>
+          <p role="alert" class="px-2 text-xs text-stone-600">
+            This project needs a newer application version. Its local data is
+            retained. Reconnect, wait for Saved locally, then close all Mindgrab
+            tabs and reopen to update. Do not clear browser storage.
+          </p>
+        </Show>
         <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
           {storageMessage()}
         </p>

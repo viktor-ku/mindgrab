@@ -11,13 +11,14 @@ import {
 } from "./project-document";
 import type { NewNode, ProjectContent, ProjectState } from "./project-document";
 
+import { CATALOG_VERSION, STORAGE_GENERATION } from "./offline-contract";
+
 // Lifecycle and guarantees: docs/architecture/0002-local-project-repository.md.
-export const STORAGE_GENERATION = 1;
+export { STORAGE_GENERATION } from "./offline-contract";
 export const ANONYMOUS_NAMESPACE = "anonymous";
 export const accountNamespace = (userId: number | string) =>
   `account-${userId}`;
 
-const CATALOG_VERSION = 1;
 const UPDATES = "updates";
 const PROJECTS = "projects";
 const PREFERENCES = "preferences";
@@ -61,7 +62,8 @@ const MESSAGES: Record<StorageFailure, string> = {
   quota: "Browser storage is full.",
   blocked: "Browser storage did not open in time.",
   open: "Browser storage could not be opened.",
-  versionchange: "Browser storage was upgraded or reset by another tab.",
+  versionchange:
+    "Browser storage needs a newer application version. Your local data is retained. Reconnect, close all Mindgrab tabs, and reopen to update; do not clear browser storage.",
   closed: "The browser closed the storage connection.",
   aborted: "The browser did not commit the change.",
 };

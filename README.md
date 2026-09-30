@@ -92,7 +92,9 @@ HTTP/socket owner expectations reject requests left over from another account.
 This provides UI/account isolation, **not browser-disk encryption**: local caches
 remain readable by someone with access to this browser profile. See
 [ADR 0007](docs/architecture/0007-account-workspaces.md) for claim recovery and
-account boundaries. Offline application-shell caching is MIN-33. The fenced
+account boundaries. Production builds cache the application shell for cold offline
+reopening after an online first visit. See [offline reopening](docs/offline-reopening.md)
+for prerequisites, safe upgrades, browser verification, and development reset. The fenced
 legacy `project`/`pnode` snapshot API remains for removal at MIN-43, but the
 browser never uploads name-keyed snapshots. See
 [ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
@@ -288,6 +290,7 @@ mise run webapp:build
 mise run webapp:test
 mise run webapp:test:browser
 mise run webapp:test:cloud
+mise run webapp:test:offline
 ```
 
 `webapp:test:browser` drives the editor in headless Chromium through Playwright
