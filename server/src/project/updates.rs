@@ -24,8 +24,9 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
+use super::project_user;
 use super::{ApiError, parse_new_project_id, parse_project_id, require_same_origin};
-use crate::auth::{AppState, authenticated_user};
+use crate::auth::AppState;
 
 pub(crate) const MAX_UPDATE_BYTES: usize = 1_048_576;
 const MAX_DOCUMENT_BYTES: usize = 10_485_760;
@@ -219,7 +220,7 @@ async fn submit(
     request: Request,
 ) -> Result<Response, ApiError> {
     require_same_origin(&state, &headers)?;
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let Path((project, update)) = path.map_err(|_| ApiError::InvalidProjectId)?;
     let id = parse_project_id(&project)?;
     let update_id = parse_new_project_id(&update)?;
@@ -271,10 +272,11 @@ fn sequence(value: Option<&str>) -> Result<i64, ApiError> {
 async fn replay(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
     query: Result<Query<ReplayQuery>, QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
     let Query(query) = query.map_err(|_| ApiError::InvalidRequest)?;
     let after = sequence(query.after.as_deref())?;
@@ -309,9 +311,10 @@ async fn replay(
 async fn status(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
     let project: ProjectState = sqlx::query_as("SELECT schema_version, protocol_version, last_sequence, validation FROM crdt_project WHERE id = $1 AND owner_id = $2")
         .bind(id).bind(owner.id).fetch_optional(&state.pool).await?.ok_or(ApiError::NotFound)?;
@@ -323,9 +326,10 @@ async fn status(
 async fn baseline(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
     let baseline = synchronization_baseline(&state.pool, owner.id, id).await?;
     Ok(Json(

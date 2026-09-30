@@ -33,10 +33,16 @@ export type Receipt = z.infer<typeof receipt>;
 
 export class SyncError extends Error {
   readonly kind: "retry" | "auth" | "blocked";
-  constructor(message: string, kind: "retry" | "auth" | "blocked" = "retry") {
+  readonly code?: string;
+  constructor(
+    message: string,
+    kind: "retry" | "auth" | "blocked" = "retry",
+    code?: string,
+  ) {
     super(message);
     this.name = "SyncError";
     this.kind = kind;
+    this.code = code;
   }
 }
 
@@ -58,24 +64,38 @@ export async function digest(bytes: Uint8Array) {
 export class CrdtApi {
   readonly endpoint: typeof backendEndpoint;
   readonly fetcher: typeof fetch;
+  readonly ownerId?: number;
   constructor(
     endpoint = backendEndpoint,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    ownerId?: number,
   ) {
     this.endpoint = endpoint;
     this.fetcher = fetcher;
+    this.ownerId = ownerId;
   }
 
   async #request(path: string, signal: AbortSignal, init?: RequestInit) {
+    signal.throwIfAborted();
+    const headers = new Headers(init?.headers);
+    if (this.ownerId) headers.set("X-Mindgrab-Account", String(this.ownerId));
     const response = await this.fetcher(this.endpoint(`/api/crdt/v1/${path}`), {
       ...init,
+      headers,
       credentials: "include",
       cache: "no-store",
       signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
     });
+    signal.throwIfAborted();
     if (!response.ok) {
-      if (response.status === 401)
-        throw new SyncError("Sign in again to resume cloud saving.", "auth");
+      const error = await response.json().catch(() => undefined);
+      const code = error?.error?.code;
+      if (response.status === 401 || code === "account_changed")
+        throw new SyncError(
+          "Sign in again to resume cloud saving.",
+          "auth",
+          code,
+        );
       if ([400, 403, 404, 409, 413, 422, 426].includes(response.status))
         throw new SyncError(
           response.status === 413
@@ -84,6 +104,7 @@ export class CrdtApi {
               ? "Reload with a compatible app to resume cloud saving."
               : "Cloud saving needs attention. Your local work is retained.",
           "blocked",
+          code,
         );
       throw new SyncError("Cloud saving is unavailable. Retrying…");
     }

@@ -293,7 +293,12 @@ test("pending dependencies never mean saved; auth pauses without deleting local 
   expired.auth = true;
   paused.sync.retry();
   await paused.sync.syncNow();
-  expect(paused.sync.status.status).toBe("saved");
+  expect(paused.sync.status.status).toBe("auth");
+  // Confirmed reauthentication creates a fresh workspace/controller.
+  paused.sync.destroy();
+  const reauthenticated = attach(doc, expired);
+  await reauthenticated.sync.syncNow();
+  expect(reauthenticated.sync.status.status).toBe("saved");
 });
 
 test("HTTP receipts verify project, batch UUID and exact SHA-256; catalogs paginate", async () => {
@@ -319,9 +324,9 @@ test("HTTP receipts verify project, batch UUID and exact SHA-256; catalogs pagin
     api.submit(ID, updateId, bytes, new AbortController().signal),
   ).rejects.toThrow("receipt did not match");
   expect(seen[0].credentials).toBe("include");
-  expect(seen[0].headers).toEqual({
-    "Content-Type": "application/octet-stream",
-    "X-Mindgrab-Schema-Version": "1",
+  expect(Object.fromEntries(new Headers(seen[0].headers))).toEqual({
+    "content-type": "application/octet-stream",
+    "x-mindgrab-schema-version": "1",
   });
   let pages = 0;
   const catalog = new CrdtApi(
@@ -380,7 +385,11 @@ test("auth fencing during a delayed receipt cannot later show saved", async () =
   server.receiptGate = undefined;
   sync.retry();
   await sync.syncNow();
-  expect(sync.status.status).toBe("saved");
+  expect(sync.status.status).toBe("auth");
+  sync.destroy();
+  const reauthenticated = attach(sync.handle.doc, server);
+  await reauthenticated.sync.syncNow();
+  expect(reauthenticated.sync.status.status).toBe("saved");
 });
 
 test("a connected provider's synced event cannot clear an outstanding durable receipt", async () => {
@@ -400,4 +409,32 @@ test("a connected provider's synced event cannot clear an outstanding durable re
   await running;
   expect(sync.status.status).toBe("saving");
   expect(provider.destroyed).toBe(true);
+});
+
+test("account expectations fence cookie changes and aborted clients cannot send late requests", async () => {
+  let sends = 0;
+  const api = new CrdtApi(
+    (path) => `http://localhost${path}`,
+    (async (_url, init) => {
+      sends++;
+      expect(new Headers(init?.headers).get("X-Mindgrab-Account")).toBe("7");
+      return Response.json(
+        { error: { code: "account_changed" } },
+        { status: 409 },
+      );
+    }) as typeof fetch,
+    7,
+  );
+  try {
+    await api.register(ID, new AbortController().signal);
+    throw new Error("Expected owner fence");
+  } catch (error) {
+    expect(error).toBeInstanceOf(SyncError);
+    expect((error as SyncError).kind).toBe("auth");
+    expect((error as SyncError).code).toBe("account_changed");
+  }
+  const abort = new AbortController();
+  abort.abort();
+  await expect(api.register(ID, abort.signal)).rejects.toThrow();
+  expect(sends).toBe(1);
 });

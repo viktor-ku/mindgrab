@@ -51,7 +51,10 @@ import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
 import { readProjectFile, writeProjectFile } from "./project-import-export";
 import { AccountControls } from "./AccountControls";
-import type { User } from "./AccountControls";
+import { AuthSession } from "./auth-session";
+import type { SessionState } from "./auth-session";
+import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
+import { SyncError } from "./crdt-api";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -240,18 +243,10 @@ interface ContextMenuState {
 }
 
 export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
-  const cachedUserKey = "mindgrab/cached-user-id";
-  let activeUserId: number | undefined;
-  try {
-    const cachedUserId = Number(window.localStorage.getItem(cachedUserKey));
-    if (Number.isSafeInteger(cachedUserId) && cachedUserId > 0) {
-      activeUserId = cachedUserId;
-    }
-  } catch {
-    // Continue with browser storage when account-scoped storage is unavailable.
-  }
-
   const deployment = new URL(backendEndpoint("/")).origin;
+  const auth = new AuthSession(deployment);
+  const [account, setAccount] = createSignal(auth.state);
+  let activeUserId = auth.state.user?.id;
   let repository = new ProjectRepository({
     deployment,
     namespace: activeUserId
@@ -263,22 +258,50 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   let stopDurability: (() => void) | undefined;
   let stopCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
-  let authenticated = false;
+  let authNavigationPending = false;
   let disposed = false;
   let activation = 0;
+  let claimAbort: AbortController | undefined;
+  const parked = new Set<{
+    repository: ProjectRepository;
+    handle: ProjectHandle;
+  }>();
   const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
+  const [claimCount, setClaimCount] = createSignal(0);
+  const [claiming, setClaiming] = createSignal(false);
+  const [claimMessage, setClaimMessage] = createSignal("");
+  const [recoveryPending, setRecoveryPending] = createSignal(false);
 
   function startCloud() {
-    if (!authenticated || cloud) return;
+    if (
+      auth.state.status !== "authenticated" ||
+      cloud ||
+      disposed ||
+      authNavigationPending
+    )
+      return;
     const owner = repository;
-    cloud = new CloudWorkspace(owner, setCloudStatus, () => {
-      void owner
-        .list()
-        .then((entries) => {
-          if (repository === owner && !disposed) setSavedProjects(entries);
-        })
-        .catch(() => {});
-    });
+    cloud = new CloudWorkspace(
+      owner,
+      (status) => {
+        if (repository !== owner || disposed) return;
+        setCloudStatus(status);
+        if (status?.status === "auth") {
+          auth.expire();
+          // A cookie may now belong to another account. Only /me can decide
+          // whether to switch workspaces or keep this account expired.
+          void auth.check();
+        }
+      },
+      () => {
+        void owner
+          .list()
+          .then((entries) => {
+            if (repository === owner && !disposed) setSavedProjects(entries);
+          })
+          .catch(() => {});
+      },
+    );
     if (activeHandle && handleRepository === owner)
       cloud.activate(activeHandle);
   }
@@ -297,9 +320,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
     cloud?.detach();
     const previous = activeHandle;
-    if (previous && previous !== handle) {
-      await previous.flush();
-      await previous.close();
+    try {
+      if (previous && previous !== handle) await previous.flush();
+    } catch (error) {
+      await handle.close();
+      if (owner === repository && previous) cloud?.activate(previous);
+      throw error;
     }
     if (disposed || request !== activation || owner !== repository) {
       await handle.close();
@@ -314,6 +340,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     cloud?.activate(handle);
     setSaveStatus(handle.durability().status === "saved" ? "done" : "saving");
     stopDurability = handle.onDurability((durability) => {
+      if (activeHandle !== handle || repository !== owner || disposed) return;
       setSaveStatus(
         durability.status === "saved"
           ? "done"
@@ -325,6 +352,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         setStorageMessage(durability.error.message);
       else if (durability.status === "saved") setStorageMessage("");
     });
+    if (previous && previous !== handle) await previous.close();
     try {
       const preference = await owner.preference(`project/${handle.id}/view`);
       if (request !== activation || disposed || owner !== repository) return;
@@ -356,28 +384,85 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     );
   }
 
-  async function accountChanged(user: User | undefined) {
-    if (disposed) return;
-    const nextUserId = user?.id;
-    authenticated = Boolean(user);
+  function watchCatalog(owner: ProjectRepository) {
+    const refresh = () => {
+      void owner
+        .list()
+        .then((entries) => {
+          if (repository === owner && !disposed) setSavedProjects(entries);
+        })
+        .catch(() => {});
+    };
+    stopCatalog = owner.onCatalogChange(refresh);
+    refresh();
+  }
+
+  async function retireWorkspace(
+    owner: ProjectRepository,
+    handle?: ProjectHandle,
+  ) {
+    owner.detach();
+    if (handle) {
+      try {
+        await handle.flush();
+      } catch {
+        parked.add({ repository: owner, handle });
+        if (!disposed) setRecoveryPending(true);
+        return;
+      }
+      await handle.close();
+    }
+    await owner.close();
+  }
+
+  async function refreshClaims(owner = repository) {
+    const userId = activeUserId;
+    if (!userId || auth.state.status !== "authenticated") return;
+    const anonymous = new ProjectRepository({
+      deployment,
+      namespace: ANONYMOUS_NAMESPACE,
+    });
     try {
-      if (nextUserId)
-        window.localStorage.setItem(cachedUserKey, String(nextUserId));
-      else window.localStorage.removeItem(cachedUserKey);
+      const entries = await claimCandidates(anonymous, userId);
+      if (owner === repository && !disposed) setClaimCount(entries.length);
     } catch {
-      // Authentication remains usable when the cache hint cannot be written.
+      // An unavailable anonymous catalog must not hide cached account content.
+    } finally {
+      await anonymous.close();
+    }
+  }
+
+  async function accountChanged(state: SessionState) {
+    if (disposed) return;
+    setAccount(state);
+    const nextUserId = state.user?.id;
+    if (state.status !== "authenticated" || nextUserId !== activeUserId) {
+      cloud?.destroy();
+      cloud = undefined;
+      claimAbort?.abort();
+      claimAbort = undefined;
+      setClaiming(false);
+      setClaimCount(0);
+      setCloudStatus(
+        state.status === "expired"
+          ? { status: "auth", message: state.message ?? "Sign in again." }
+          : undefined,
+      );
     }
     if (nextUserId === activeUserId) {
       startCloud();
-      cloud?.retry();
+      void refreshClaims();
       return;
     }
-    cloud?.destroy();
-    cloud = undefined;
-    setCloudStatus(undefined);
     activation++;
-    activeUserId = nextUserId;
+    window.clearTimeout(viewSaveTimer);
+    stopCatalog?.();
+    stopDurability?.();
+    finishWriting();
+    finishProjectName();
     const previousRepository = repository;
+    const previousHandle = activeHandle;
+    activeUserId = nextUserId;
     const nextRepository = new ProjectRepository({
       deployment,
       namespace: nextUserId
@@ -385,23 +470,74 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         : ANONYMOUS_NAMESPACE,
     });
     repository = nextRepository;
-    stopCatalog?.();
-    stopCatalog = nextRepository.onCatalogChange(() => {
-      void nextRepository
-        .list()
-        .then((entries) => {
-          if (repository === nextRepository && !disposed)
-            setSavedProjects(entries);
-        })
-        .catch(() => {});
-    });
+    handleRepository = nextRepository;
+    activeHandle = undefined;
+    resetProjectUi();
+    setDoc(ephemeralDocument());
+    setStorageReady(false);
+    setSavedProjects([]);
+    setStorageMessage("");
+    setClaimMessage("");
+    watchCatalog(nextRepository);
+    void retireWorkspace(previousRepository, previousHandle);
     try {
       await openLatestOrCreate(nextRepository);
     } catch {
-      setStorageMessage("Could not open this account’s local projects.");
+      if (repository === nextRepository && !disposed)
+        setStorageMessage(
+          "Could not open this account’s local projects. Retry local saving.",
+        );
     }
-    await previousRepository.close();
-    if (repository === nextRepository) startCloud();
+    if (repository === nextRepository && !disposed) {
+      startCloud();
+      void refreshClaims(nextRepository);
+    }
+  }
+
+  async function addAnonymousProjects() {
+    if (claiming() || auth.state.status !== "authenticated" || !activeUserId)
+      return;
+    const owner = repository;
+    const userId = activeUserId;
+    const abort = new AbortController();
+    claimAbort = abort;
+    const source = new ProjectRepository({
+      deployment,
+      namespace: ANONYMOUS_NAMESPACE,
+    });
+    setClaiming(true);
+    setClaimMessage("");
+    try {
+      const ids = await claimAnonymousProjects(
+        source,
+        owner,
+        userId,
+        abort.signal,
+      );
+      if (owner !== repository || disposed || abort.signal.aborted) return;
+      setClaimMessage(
+        `Added ${ids.length} anonymous ${ids.length === 1 ? "project" : "projects"} to this account. Cloud saving will continue automatically.`,
+      );
+      await refreshClaims(owner);
+      cloud?.retry();
+      if (ids[0]) await openProject(ids[0]);
+    } catch (error) {
+      if (owner !== repository || disposed || abort.signal.aborted) return;
+      setClaimMessage(
+        "Could not finish adding anonymous projects. Your local work is retained; retry to continue.",
+      );
+      await refreshClaims(owner);
+      if (error instanceof SyncError && error.kind === "auth") {
+        auth.expire();
+        void auth.check();
+      }
+    } finally {
+      await source.close();
+      if (claimAbort === abort) {
+        claimAbort = undefined;
+        setClaiming(false);
+      }
+    }
   }
 
   // The document is the only writable project content. Everything else here
@@ -475,8 +611,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       undo.destroy();
       releaseHistoryLimit();
       current.off("beforeTransaction", beforeTransaction);
-      if (handle) void handle.close();
-      else current.destroy();
+      // Handle lifetime belongs to the workspace; failed writes stay recoverable.
+      if (!handle) current.destroy();
     });
     return { doc: current, view, undo };
   });
@@ -577,6 +713,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   let viewSaveTimer: number | undefined;
   createEffect(() => {
     const handle = activeHandle;
+    const owner = handleRepository;
     const currentDoc = doc();
     const value: Project["view"] & { anchor?: LayoutAnchor } = {
       left: left(),
@@ -587,7 +724,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     if (!handle || handle.doc !== currentDoc) return;
     window.clearTimeout(viewSaveTimer);
     viewSaveTimer = window.setTimeout(() => {
-      void handleRepository
+      if (repository !== owner || activeHandle !== handle) return;
+      void owner
         .setPreference(`project/${handle.id}/view`, value)
         .catch(() => {});
     }, 200);
@@ -658,6 +796,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
           : "Project is still loading.",
       );
     } catch (error) {
+      if (target !== repository || disposed) return;
       setStorageMessage(
         error instanceof Error ? error.message : "Could not open this project.",
       );
@@ -678,6 +817,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       if (target !== repository || disposed) return;
       setStorageMessage("");
     } catch (error) {
+      if (target !== repository || disposed) return;
       setStorageMessage(
         error instanceof Error ? error.message : "Could not create a project.",
       );
@@ -710,13 +850,17 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage("Project storage is still opening.");
       return;
     }
+    const owner = repository;
+    const handle = activeHandle;
     setShowLoad(false);
     setSaveStatus("saving");
     try {
-      await activeHandle.flush();
+      await handle.flush();
+      if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("done");
       setStorageMessage("Saved locally.");
     } catch (error) {
+      if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("error");
       setStorageMessage(
         error instanceof Error ? error.message : "Could not save this project.",
@@ -724,30 +868,87 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  async function saveBeforeAuth() {
+  async function retryLocalSaving() {
+    for (const recovery of [...parked]) {
+      await recovery.handle.flush();
+      await recovery.handle.close();
+      await recovery.repository.close();
+      parked.delete(recovery);
+    }
+    setRecoveryPending(parked.size > 0);
+    if (activeHandle) await activeHandle.flush();
+    else {
+      const owner = repository;
+      const current = doc();
+      const handle = await owner.open(current.guid);
+      Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(current), ORIGIN.import);
+      await handle.flush();
+      await handle.refreshMetadata();
+      await activate(handle, owner);
+    }
+  }
+
+  async function saveBeforeAuth(action: "login" | "logout") {
     finishWriting();
     finishProjectName();
     clearSaveStatus();
+    const owner = repository;
+    const handle = activeHandle;
+    if (!handle || claiming()) {
+      setStorageMessage("Wait for local project storage before leaving.");
+      return false;
+    }
+    authNavigationPending = true;
+    cloud?.destroy();
+    cloud = undefined;
+    owner.setRelaysPaused(true);
+    let leaving = false;
     try {
-      await activeHandle?.flush();
+      await retryLocalSaving();
+      if (repository !== owner || activeHandle !== handle || disposed)
+        return false;
+      await handle.refreshMetadata();
+      await owner.setLatestProject(handle.id);
+      await owner.setPreference(`project/${handle.id}/view`, {
+        left: left(),
+        top: top(),
+        zoom: zoom(),
+        anchor: layoutAnchor(),
+      });
+      await handle.flush();
+      if (repository !== owner || activeHandle !== handle || disposed)
+        return false;
+      auth.prepareNavigation(action);
+      leaving = true;
       return true;
     } catch {
+      if (repository !== owner || disposed) return false;
       setStorageMessage(
         "Could not save your project before leaving. Free up browser storage and try again.",
       );
       return false;
+    } finally {
+      if (!leaving) {
+        authNavigationPending = false;
+        owner.setRelaysPaused(false);
+        startCloud();
+      }
     }
   }
 
   async function openLoad() {
     clearSaveStatus();
     finishWriting();
+    const owner = repository;
     try {
       cloud?.retry();
-      setSavedProjects(await repository.list());
+      const entries = await owner.list();
+      if (repository !== owner || disposed) return;
+      setSavedProjects(entries);
       setStorageMessage("");
       setShowLoad(true);
     } catch {
+      if (repository !== owner || disposed) return;
       setStorageMessage(
         "Could not list projects. Browser storage is unavailable.",
       );
@@ -778,12 +979,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   async function importProjectFromFile() {
     finishWriting();
     setFileBusy(true);
+    const owner = repository;
     try {
       await activeHandle?.flush();
       const file = await readProjectFile();
-      if (!file) return;
+      if (!file || owner !== repository || disposed) return;
       const imported = parseProject(await file.text());
-      const existing = await repository.list();
+      const existing = await owner.list();
+      if (owner !== repository || disposed) return;
       const baseName = imported.name;
       let name = baseName;
       let suffix = 2;
@@ -795,7 +998,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       importedDoc.destroy();
       const roots = projectMindMap(content);
       const first = roots[0];
-      const handle = await repository.create({
+      const handle = await owner.create({
         name,
         root: first && {
           id: first.id,
@@ -826,9 +1029,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         if (id) addBranch(id, root.next ?? []);
       }
       await handle.flush();
-      await activate(handle);
+      await activate(handle, owner);
+      if (owner !== repository || disposed) return;
       setStorageMessage(`Imported “${name}”.`);
     } catch (error) {
+      if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
           error instanceof Error && error.message.includes("invalid")
@@ -1068,23 +1273,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   onMount(() => {
     const initialRepository = repository;
-    stopCatalog = initialRepository.onCatalogChange(() => {
-      void initialRepository
-        .list()
-        .then((entries) => {
-          if (repository === initialRepository && !disposed)
-            setSavedProjects(entries);
-        })
-        .catch(() => {});
-    });
-    void initialRepository
-      .list()
-      .then((entries) => {
-        if (repository === initialRepository && !disposed)
-          setSavedProjects(entries);
-      })
-      .catch(() => {});
+    watchCatalog(initialRepository);
+    const stopAuth = auth.subscribe((state) => void accountChanged(state));
+    auth.start();
     void openLatestOrCreate(initialRepository).catch((error) => {
+      if (repository !== initialRepository || disposed) return;
       setStorageMessage(
         error instanceof Error
           ? error.message
@@ -1094,10 +1287,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     onCleanup(() => {
       disposed = true;
       activation++;
+      claimAbort?.abort();
+      stopAuth();
+      auth.destroy();
       cloud?.destroy();
       stopCatalog?.();
       stopDurability?.();
       void repository.close();
+      for (const recovery of parked) void recovery.repository.close();
     });
 
     const keydown = (e: KeyboardEvent) => {
@@ -1432,7 +1629,10 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                 <button
                   type="button"
                   class="map-control"
-                  onClick={() => cloud?.retry()}
+                  onClick={() => {
+                    if (account().status === "expired") void auth.check();
+                    else cloud?.retry();
+                  }}
                 >
                   Retry
                 </button>
@@ -1470,9 +1670,39 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
           {storageMessage()}
         </p>
+        <Show when={recoveryPending()}>
+          <p role="status" class="px-2 text-xs text-stone-600">
+            Edits from the previous account could not be saved. They remain in
+            memory; retry before leaving.
+          </p>
+        </Show>
+        <Show
+          when={
+            recoveryPending() || !storageReady() || saveStatus() === "error"
+          }
+        >
+          <button
+            type="button"
+            class="map-control text-xs"
+            onClick={() =>
+              void retryLocalSaving().catch(() =>
+                setStorageMessage(
+                  "Browser storage is still unavailable. Free up space and retry.",
+                ),
+              )
+            }
+          >
+            Retry local saving
+          </button>
+        </Show>
         <AccountControls
+          state={account()}
           beforeNavigate={saveBeforeAuth}
-          onUser={accountChanged}
+          onRetry={() => void auth.check()}
+          claimCount={claimCount()}
+          claiming={claiming()}
+          claimMessage={claimMessage()}
+          onClaim={() => void addAnonymousProjects()}
         />
       </div>
       <Show when={selectedId() && !writing()}>

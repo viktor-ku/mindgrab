@@ -113,6 +113,7 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
             HeaderName::from_static("x-mindgrab-schema-version"),
+            HeaderName::from_static("x-mindgrab-account"),
         ])
         .expose_headers([HeaderName::from_static("server-timing")]))
 }

@@ -30,7 +30,7 @@ use sqlx::PgPool;
 use uuid::{Uuid, Variant, Version};
 
 use crate::{
-    auth::{AppState, authenticated_user, private_response},
+    auth::{AppState, User, authenticated_user, private_response},
     workos::AuthError,
 };
 
@@ -71,6 +71,7 @@ pub(crate) enum ApiError {
     InvalidCursor,
     InvalidOrigin,
     Unauthenticated,
+    AccountChanged,
     NotFound,
     ProjectIdConflict,
     UnsupportedSchema,
@@ -109,6 +110,11 @@ impl IntoResponse for ApiError {
                 StatusCode::UNAUTHORIZED,
                 "unauthenticated",
                 "Sign in to continue.",
+            ),
+            Self::AccountChanged => (
+                StatusCode::CONFLICT,
+                "account_changed",
+                "The active account changed. Check your session before syncing.",
             ),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
@@ -273,6 +279,36 @@ fn require_same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiE
     }
 }
 
+// An expectation is a fence, never an ownership selector. The session remains
+// the authority even when cookies rotate while a previous workspace is active.
+async fn project_user(
+    state: &AppState,
+    jar: &CookieJar,
+    headers: &HeaderMap,
+) -> Result<User, ApiError> {
+    let user = authenticated_user(state, jar).await?;
+    if let Some(expected) = headers.get("x-mindgrab-account") {
+        require_account(
+            &user,
+            expected.to_str().map_err(|_| ApiError::InvalidRequest)?,
+        )?;
+    }
+    Ok(user)
+}
+
+fn require_account(user: &User, expected: &str) -> Result<(), ApiError> {
+    let id = expected
+        .parse::<i64>()
+        .map_err(|_| ApiError::InvalidRequest)?;
+    if id <= 0 || id.to_string() != expected {
+        return Err(ApiError::InvalidRequest);
+    }
+    if id != user.id {
+        return Err(ApiError::AccountChanged);
+    }
+    Ok(())
+}
+
 async fn owned_project(
     pool: &PgPool,
     id: Uuid,
@@ -296,7 +332,7 @@ async fn create_project(
     body: Result<Json<CreateProject>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     require_same_origin(&state, &headers)?;
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let Json(request) = body.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_new_project_id(&request.project_id)?;
     if request.schema_version != i64::from(SCHEMA_VERSION) {
@@ -339,9 +375,10 @@ async fn create_project(
 async fn get_project(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<CatalogProject>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let Path(project_id) = path.map_err(|_| ApiError::InvalidProjectId)?;
     let id = parse_project_id(&project_id)?;
     owned_project(&state.pool, id, owner.id)
@@ -353,9 +390,10 @@ async fn get_project(
 async fn list_projects(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<ProjectPage>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let Query(query) = query.map_err(|_| ApiError::InvalidRequest)?;
     let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     if !(1..=MAX_PAGE_SIZE).contains(&limit) {

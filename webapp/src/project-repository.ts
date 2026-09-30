@@ -201,6 +201,11 @@ export interface CatalogEntry {
   createdAt: string;
   // Whether the backend has acknowledged this project's UUID.
   registration: "pending" | "registered";
+  // Anonymous source markers bind a one-time claim to one account.
+  claim?: { ownerId: number; targetId: string; phase: "pending" | "complete" };
+  // A copied target cannot sync or appear in Load before registration succeeds.
+  claimPending?: boolean;
+  claimSource?: string;
 }
 
 class Catalog {
@@ -508,6 +513,8 @@ class ProjectSession {
               reply: true,
             });
         }
+        if (this.doc.store.pendingStructs || this.doc.store.pendingDs)
+          this.#requestFull().catch(() => {});
       } catch {
         // A malformed message from another tab must not break this document.
       }
@@ -542,7 +549,14 @@ class ProjectSession {
   }
 
   async flush() {
-    if (this.#failure) await this.#requestFull();
+    // Yjs update events omit unresolved structs/delete sets. Preserve those
+    // bytes explicitly before closing, claiming or acknowledging a baseline.
+    if (
+      this.#failure ||
+      this.doc.store.pendingStructs ||
+      this.doc.store.pendingDs
+    )
+      await this.#requestFull();
     await this.settled();
     if (this.#failure) throw this.#failure;
   }
@@ -553,8 +567,7 @@ class ProjectSession {
   }
 
   async #close(): Promise<Durability> {
-    this.#channel?.close();
-    this.#channel = undefined;
+    this.detachRelay();
     await this.flush().catch(() => {});
     await this.metadata;
     clearTimeout(this.#trimTimer);
@@ -564,6 +577,15 @@ class ProjectSession {
     await this.#persistence?.destroy().catch(() => {});
     this.doc.destroy();
     return result;
+  }
+
+  detachRelay() {
+    this.#channel?.close();
+    this.#channel = undefined;
+  }
+
+  resumeRelay() {
+    if (!this.#closing && !this.#channel) this.#openChannel();
   }
 }
 
@@ -669,14 +691,18 @@ interface SessionRecord {
 // Project documents are the source of truth; the catalog is a rebuildable index.
 export class ProjectRepository {
   readonly names: ReturnType<typeof storageNames>;
+  readonly scope: RepositoryScope;
   readonly #timeoutMs: number;
   readonly #catalog: Catalog;
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #listeners = new Set<() => void>();
   readonly #channel?: BroadcastChannel;
   #closed = false;
+  #detached = false;
+  #relaysPaused = false;
 
   constructor(options: RepositoryOptions) {
+    this.scope = options;
     this.names = storageNames(options);
     this.#timeoutMs = options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS;
     this.#catalog = new Catalog(this.names.catalog, this.#timeoutMs);
@@ -716,7 +742,7 @@ export class ProjectRepository {
   }
 
   // Also registers stored documents whose catalog write was interrupted.
-  async list(): Promise<CatalogEntry[]> {
+  async list({ includeClaims = false } = {}): Promise<CatalogEntry[]> {
     this.#assertOpen();
     const stored = await this.#storedProjects();
     const entries = new Map(
@@ -729,6 +755,7 @@ export class ProjectRepository {
       }
     return [...entries.values()]
       .filter((entry) => !stored || stored.has(entry.id))
+      .filter((entry) => includeClaims || (!entry.claim && !entry.claimPending))
       .sort(byName);
   }
 
@@ -736,7 +763,8 @@ export class ProjectRepository {
     this.#assertOpen();
     const id = await this.#catalog.preference(LATEST_PROJECT);
     if (typeof id !== "string" || !isNodeId(id)) return;
-    if (await this.#catalog.get(id)) return id;
+    const entry = await this.#catalog.get(id);
+    if (entry) return !entry.claim && !entry.claimPending ? id : undefined;
     return (await this.#recover(id))?.id;
   }
 
@@ -766,6 +794,66 @@ export class ProjectRepository {
     if (written) this.#announce();
   }
 
+  // Catalog transactions serialize these markers across tabs. The UUID is
+  // chosen before copying, so an interrupted/retried claim reuses its target.
+  async beginClaim(id: string, ownerId: number) {
+    this.#assertOpen();
+    const { entry, written } = await this.#catalog.update(id, (entry) =>
+      entry && !entry.claim
+        ? { ...entry, claim: { ownerId, targetId: id, phase: "pending" } }
+        : entry,
+    );
+    if (written) this.#announce();
+    return entry?.claim;
+  }
+
+  async rerouteClaim(id: string, ownerId: number, targetId: string) {
+    this.#assertOpen();
+    const { entry, written } = await this.#catalog.update(id, (entry) =>
+      entry?.claim?.ownerId === ownerId && entry.claim.targetId === targetId
+        ? { ...entry, claim: { ...entry.claim, targetId: crypto.randomUUID() } }
+        : entry,
+    );
+    if (written) this.#announce();
+    return entry?.claim;
+  }
+
+  async reserveClaim(id: string, name: string, source: string) {
+    this.#assertOpen();
+    const { entry, written } = await this.#catalog.update(
+      id,
+      (entry) =>
+        entry ?? {
+          id,
+          name,
+          createdAt: new Date().toISOString(),
+          registration: "pending",
+          claimPending: true,
+          claimSource: source,
+        },
+    );
+    if (written) this.#announce();
+    return entry?.claimSource === source;
+  }
+
+  async releaseClaim(id: string) {
+    this.#assertOpen();
+    const { written } = await this.#catalog.update(id, (entry) =>
+      entry?.claimPending ? { ...entry, claimPending: false } : entry,
+    );
+    if (written) this.#announce();
+  }
+
+  async completeClaim(id: string, ownerId: number, targetId: string) {
+    this.#assertOpen();
+    const { written } = await this.#catalog.update(id, (entry) =>
+      entry?.claim?.ownerId === ownerId && entry.claim.targetId === targetId
+        ? { ...entry, claim: { ...entry.claim, phase: "complete" } }
+        : entry,
+    );
+    if (written) this.#announce();
+  }
+
   // Fires for catalog changes made in this or another tab.
   onCatalogChange(listener: () => void) {
     this.#listeners.add(listener);
@@ -777,19 +865,41 @@ export class ProjectRepository {
   // Closes this tab's connections only; stored data and other tabs are untouched.
   async close() {
     if (this.#closed) return;
+    this.detach();
     this.#closed = true;
     const sessions = [...this.#sessions.values()];
     this.#sessions.clear();
     await Promise.allSettled(
       sessions.map(({ session }) => session.then((open) => open.close())),
     );
-    this.#channel?.close();
-    this.#listeners.clear();
     this.#catalog.close();
   }
 
+  // Fence channels/listeners immediately; a failed flush can keep the document
+  // in memory for recovery without exposing it in the next workspace.
+  detach() {
+    this.#detached = true;
+    this.#channel?.close();
+    this.#listeners.clear();
+    for (const { session } of this.#sessions.values())
+      void session.then((open) => open.detachRelay()).catch(() => {});
+  }
+
+  setRelaysPaused(paused: boolean) {
+    if (this.#detached || this.#closed) return;
+    this.#relaysPaused = paused;
+    for (const { session } of this.#sessions.values())
+      void session
+        .then((open) => {
+          if (this.#detached || this.#relaysPaused) open.detachRelay();
+          else open.resumeRelay();
+        })
+        .catch(() => {});
+  }
+
   #assertOpen() {
-    if (this.#closed) throw new Error("The project repository is closed.");
+    if (this.#closed || this.#detached)
+      throw new Error("The project repository is closed.");
   }
 
   async #acquire(id: string): Promise<ProjectHandle> {
@@ -818,6 +928,7 @@ export class ProjectRepository {
       current.refs--;
       throw error;
     });
+    if (this.#detached || this.#relaysPaused) session.detachRelay();
     return new Handle(
       session,
       () => this.#release(id, current, session),
@@ -913,6 +1024,7 @@ export class ProjectRepository {
   }
 
   #emit() {
+    if (this.#detached || this.#closed) return;
     for (const listener of this.#listeners) listener();
   }
 }
