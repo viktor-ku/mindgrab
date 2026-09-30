@@ -7,7 +7,6 @@ import type { NodeColor } from "./node-colors";
 
 import { DOCUMENT_VERSION } from "./offline-contract";
 
-// The executable contract is docs/architecture/document.md.
 export const SCHEMA_VERSION = DOCUMENT_VERSION;
 export const LIMITS = {
   nodes: 10_000,

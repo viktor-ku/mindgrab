@@ -54,12 +54,13 @@ cover edits and the server content is valid. A connected socket alone does not
 confirm durability. Offline edits reconcile after reconnect or reload.
 
 Production builds cache the shell after an online visit, allowing stored projects
-to [cold-open offline](docs/offline-reopening.md). Cloud-only projects must first
-be opened online. Wait for local save before closing tabs. On storage failure,
+to cold-open offline. Cloud-only projects must first be opened online.
+Wait for local save before closing tabs. On storage failure,
 keep the tab open, export content and retry saving.
 
 **Export** includes unsynced/in-memory content as readable `.mindgrab.json`.
-**Import** validates the [version 2 format](docs/project-file-format.md) before
+**Import** validates the version 2 format in
+[`project-import-export.ts`](webapp/src/project-import-export.ts) before
 creating fresh project/node UUIDs and an empty undo history. Repeated imports and
 duplicate names stay independent. JSON portability is separate from binary recovery.
 
@@ -73,7 +74,7 @@ A transient outage preserves the cached workspace. A terminal 401 pauses sync
 and asks for sign-in without deleting work. Explicit logout disconnects account
 providers across tabs and opens anonymous projects; account caches remain for
 later sign-in. Auth navigation awaits local commits and stays in place on storage
-failure. Local caches are not encrypted. See [account boundaries](docs/architecture/accounts.md).
+failure. Local caches are not encrypted.
 
 - `GET /api/auth/login` starts browser-bound, one-use AuthKit state and PKCE.
 - `GET /api/auth/callback` verifies the token, upserts the WorkOS user and rotates
@@ -111,38 +112,45 @@ UUID reads as 404; unsupported schemas return 426; account changes return
 `409 account_changed`; temporary storage/auth failures return 503. Uninitialized
 and pending/quarantined projects are retained and cannot be presented as saved.
 
-Current implementation contracts:
-
-- [Document schema, commands and deterministic projection](docs/architecture/document.md)
-- [IndexedDB lifecycle and commit guarantees](docs/architecture/local-storage.md)
-- [Binary storage, receipts and causal-gap handling](docs/architecture/durability.md)
-- [WebSocket protocol and multi-process propagation](docs/architecture/websocket-sync.md)
-- [Browser sync and durable cloud-save coverage](docs/architecture/cloud-sync.md)
-- [Read-model projection and repair](docs/architecture/read-models.md)
-- [Checkpoint compaction and binary backup/restore](docs/architecture/checkpoints-backups.md)
-
 ## Deployment and operations
 
 Use same-origin HTTPS static hosting and `/api` proxying to compatible Rust API
-processes backed by one Postgres primary. [Nginx configuration](deploy/nginx.conf)
-forwards WebSocket Upgrade/Connection, Cookie and Origin and allows heartbeats.
+processes backed by one Postgres primary. Configure the proxy to forward WebSocket
+Upgrade/Connection, Cookie and Origin headers and allow heartbeats.
 Serve worker scripts with no-cache, keep API paths out of SPA fallback/cache, and
 publish HTML/assets/workers together. Set `DATABASE_URL`, WorkOS credentials,
 `APP_URL` and `WORKOS_REDIRECT_URI`; register the matching production AuthKit URLs.
 `VITE_BACKEND_URL` is a build-time backend base URL; leave it empty for same-origin
 production hosting. An external backend needs credentialed CORS.
 
-[Operations](docs/operations.md) covers save states, schema compatibility,
-maintenance and recovery. Rebuild disposable summaries with
-`mise run server:rebuild-read-models`. Use binary backups for identity-preserving
-recovery; preserve canonical bytes and use compatible builds when rolling back.
+Rebuild disposable summaries with `mise run server:rebuild-read-models`.
+For manual compaction and identity-preserving binary backup/recovery, set
+`DATABASE_URL` to the intended database and run:
+
+```sh
+mise -C server exec -- cargo run -- compact-project <uuid> <owner-external-id>
+mise -C server exec -- cargo run -- backup-project <uuid> <owner-external-id> project.mgb
+mise -C server exec -- cargo run -- restore-project <uuid> <source-owner-external-id> <destination-owner-external-id> project.mgb
+```
+
+Owner arguments are existing `users.external_id` values. Backup requires a new
+file path; restore requires the archive's UUID to be absent in the destination.
+Verify a restore in an isolated database before switching production, with writers
+stopped. Keep consistent Postgres backups/WAL as well: project archives exclude
+users and authentication. Preserve canonical bytes and receipts during recovery
+or rollback, and use a compatible build; do not truncate `crdt_*` tables.
 
 **Development reset notice:** obsolete snapshot data is discarded without
 conversion. Browser startup removes only known project keys after tab coordination;
 current Yjs databases, auth and preferences are retained. Operators explicitly
 remove only obsolete database tables using `mise run server:reset-legacy-projects`.
 Stop obsolete server builds first. The retired `/api/projects` endpoint rejects
-writes with 426. See the [reset procedure](docs/operations.md#deployment-and-development-reset).
+writes with 426. Keep existing SQL migrations unchanged; SQLx checks their checksums.
+
+Use a separate port for production previews so a cached worker does not control
+Vite development. To reset shell caching, close other tabs, unregister only this
+origin's `/sw.js` worker and delete only `mindgrab-shell/` caches, then reload online.
+Clearing site data also deletes local projects and unsynced edits.
 
 Open **/checkhealth** for API/database reachability and latency. `GET /api/health`
 returns 200 when healthy, 503 when degraded, and exposes database latency through
@@ -157,7 +165,7 @@ mise run check
 
 The complete check runs Rust formatting/lint/tests, webapp static checks/build,
 unit/browser/offline tests, Yjs/Yrs interoperability, real Rust/Postgres cloud
-browser tests and the [production release gate](docs/release-regression.md).
+browser tests and the production release gate (`mise run test:release`).
 Install Chromium once with `(cd webapp && bun --bun x playwright install chromium)`.
 `mise tasks` lists focused commands. The webapp tests include Yjs/Yrs round trips
 through the Rust worker in `server/examples/yjs_interop.rs`; `mise run crdt:test`
