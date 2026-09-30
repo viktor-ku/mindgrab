@@ -32,7 +32,8 @@ beforeAll(async () => {
 
 afterAll(() => browser?.close());
 
-// Served by interception, so pages still load after going offline.
+// This isolates IndexedDB behavior by keeping the harness available offline.
+// Production shell caching/cold reopening is covered by offline-shell.browser.ts.
 async function newContext() {
   const context = await browser.newContext();
   await context.route(`${ORIGIN}/**`, (route) => {

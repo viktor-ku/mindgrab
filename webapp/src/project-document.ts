@@ -5,8 +5,10 @@ import type { DropTarget, MindMapNode, NodePosition } from "./mind-map";
 import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
+import { DOCUMENT_VERSION } from "./offline-contract";
+
 // The executable contract is docs/architecture/0001-yjs-document-contract.md.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = DOCUMENT_VERSION;
 export const LIMITS = {
   nodes: 10_000,
   text: 65_536,
