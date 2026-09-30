@@ -159,7 +159,11 @@ The complete check runs Rust formatting/lint/tests, webapp static checks/build,
 unit/browser/offline tests, Yjs/Yrs interoperability, real Rust/Postgres cloud
 browser tests and the [production release gate](docs/release-regression.md).
 Install Chromium once with `(cd webapp && bun --bun x playwright install chromium)`.
-`mise tasks` lists focused commands.
+`mise tasks` lists focused commands. The webapp tests include Yjs/Yrs round trips
+through the Rust worker in `server/examples/yjs_interop.rs`; `mise run crdt:test`
+runs those tests alone. Shared golden inputs and server test helpers live in
+[`webapp/tests/fixtures`](webapp/tests/fixtures/yjs/README.md) and use the webapp's
+locked dependencies.
 
 SQLx tests create isolated databases and mock WorkOS; the database role must be
 able to create test databases. No real credentials, users or emails are used.

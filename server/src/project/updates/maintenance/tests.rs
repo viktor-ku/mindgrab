@@ -324,10 +324,10 @@ struct Replicas {
 impl Replicas {
     fn new() -> Self {
         let mut child = Command::new("bun")
-            .args(["--bun", "maintenance-fixtures.ts"])
+            .args(["--bun", "server-maintenance.ts"])
             .current_dir(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../tools/yjs-contract"
+                "/../webapp/tests/fixtures"
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

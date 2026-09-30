@@ -804,10 +804,7 @@ describe("replica convergence", () => {
 });
 
 describe("contract golden fixtures", () => {
-  const directory = new URL(
-    "../../tools/yjs-contract/fixtures/",
-    import.meta.url,
-  );
+  const directory = new URL("./fixtures/yjs/", import.meta.url);
   const fixtures = readdirSync(directory).filter((name) =>
     name.endsWith(".json"),
   );

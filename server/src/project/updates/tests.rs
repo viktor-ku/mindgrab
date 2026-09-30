@@ -17,7 +17,7 @@ use super::*;
 use crate::auth::tests::{fixture, session_for, sign_in};
 
 pub(crate) const INITIAL: &[u8] =
-    include_bytes!("../../../../tools/yjs-contract/fixtures/unicode.0.bin");
+    include_bytes!("../../../../webapp/tests/fixtures/yjs/unicode.0.bin");
 const PROJECTS: &str = "/api/crdt/v1/projects";
 
 pub(crate) fn new_id() -> Uuid {
@@ -119,16 +119,16 @@ pub(crate) fn binary(value: &Value) -> Vec<u8> {
 
 pub(crate) fn javascript(input: Value) -> Value {
     let mut child = Command::new("bun")
-        .args(["--bun", "storage-fixtures.ts"])
+        .args(["--bun", "server-storage.ts"])
         .current_dir(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../tools/yjs-contract"
+            "/../webapp/tests/fixtures"
         ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Install Bun and run mise run crdt:install");
+        .expect("Install Bun and run mise run webapp:install");
     child
         .stdin
         .take()
@@ -268,7 +268,7 @@ async fn receipts_are_durable_immutable_and_idempotent_after_restart(pool: PgPoo
         "valid"
     );
     let expected: Value = serde_json::from_str(include_str!(
-        "../../../../tools/yjs-contract/fixtures/unicode.json"
+        "../../../../webapp/tests/fixtures/yjs/unicode.json"
     ))
     .unwrap();
     assert_baseline(&restarted.state, &cookie, id, &expected["expected"]).await;
@@ -677,7 +677,7 @@ async fn every_golden_fixture_converges_through_shuffled_duplicate_api_delivery(
     let cookie = sign_in(&f).await;
     let directory = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../tools/yjs-contract/fixtures"
+        "/../webapp/tests/fixtures/yjs"
     ));
     for file in std::fs::read_dir(directory).unwrap() {
         let file = file.unwrap().path();

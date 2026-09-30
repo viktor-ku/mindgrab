@@ -20,7 +20,7 @@ run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab}
 
 [tasks."server:test"]
 description = "Run server tests against local Postgres"
-depends = ["crdt:install"]
+depends = ["webapp:install"]
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test"
 
 [tasks."server:fmt"]
@@ -52,6 +52,7 @@ run = "bun --bun run dev"
 
 [tasks."webapp:test"]
 description = "Run webapp tests"
+depends = ["webapp:install"]
 dir = "webapp"
 run = "bun --bun test --conditions browser"
 
@@ -73,41 +74,31 @@ run = "bun --bun run build"
 
 [tasks."webapp:check"]
 description = "Run webapp lint, formatting, and type checks"
+depends = ["webapp:install"]
 dir = "webapp"
 run = "bun --bun run check"
 
 [tasks."test:release"]
 description = "Verify the production local-first stack, faults, recovery, and release budgets"
-depends = ["webapp:install", "crdt:install"]
+depends = ["webapp:install"]
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test release_stack_recovers_and_converges -- --ignored --nocapture"
 
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "crdt:test", "crdt:check", "test:release"]
-
-[tasks."crdt:install"]
-description = "Install locked interoperability test tools"
-depends = ["webapp:install"]
-dir = "tools/yjs-contract"
-run = "bun --bun install --frozen-lockfile"
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "test:release"]
 
 [tasks."crdt:test"]
-description = "Run Yjs/Yrs interoperability tests"
-depends = ["crdt:install"]
-dir = "tools/yjs-contract"
-run = "bun --bun test"
+description = "Run Yjs/Yrs interoperability tests in the webapp test suite"
+depends = ["webapp:install"]
+dir = "webapp"
+run = "bun --bun test --conditions browser tests/project-interop.test.ts"
 
 [tasks."crdt:check"]
-description = "Check CRDT contract TypeScript and Rust"
-depends = ["crdt:install"]
-run = '''
-(cd tools/yjs-contract && bun --bun run check)
-mise -C server exec -- cargo fmt --manifest-path "{{config_root}}/tools/yjs-contract/rust/Cargo.toml" --check
-mise -C server exec -- cargo clippy --locked --manifest-path "{{config_root}}/tools/yjs-contract/rust/Cargo.toml" --all-targets -- -D warnings
-'''
+description = "Check interoperability fixtures and the server's Rust worker"
+depends = ["webapp:check", "server:fmt", "server:clippy"]
 
 [tasks."crdt:fixtures"]
 description = "Regenerate reviewed Yjs binary and JSON golden fixtures"
-depends = ["crdt:install"]
-dir = "tools/yjs-contract"
-run = "bun --bun run fixtures"
+depends = ["webapp:install"]
+dir = "webapp"
+run = "bun --bun tests/fixtures/generate-yjs.ts"

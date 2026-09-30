@@ -12,7 +12,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "lint:ts": "tsc -b && tsc -p tsconfig.release.json",
+    "lint:ts": "tsc -b && tsc -p tsconfig.release.json && tsc -p tsconfig.interop.json",
     "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts",
     "test:offline": "bun test ./tests/browser/offline-shell.browser.ts"
   },

@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["*.ts"]
+  "include": ["tests/project-interop.test.ts", "tests/fixtures/*.ts"]
 }

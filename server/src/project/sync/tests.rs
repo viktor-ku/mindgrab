@@ -453,10 +453,10 @@ async fn pinned_y_websocket_providers_converge_after_offline_text_and_tree_edits
     let input = json!({"serverUrl": format!("{}/api/crdt/v1/sync", server.address), "projectId": id, "cookie": cookie});
     let result = tokio::task::spawn_blocking(move || {
         let mut child = Command::new("bun")
-            .args(["--bun", "websocket-client.ts"])
+            .args(["--bun", "server-websocket.ts"])
             .current_dir(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../tools/yjs-contract"
+                "/../webapp/tests/fixtures"
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

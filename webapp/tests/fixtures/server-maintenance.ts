@@ -1,5 +1,5 @@
 // Persistent real Yjs replicas/UndoManager driven by the Rust maintenance suite.
-import { Y } from "./fixtures";
+import { Y } from "./project-document";
 import {
   addNode,
   createUndoManager,
@@ -8,8 +8,8 @@ import {
   ORIGIN,
   placeNode,
   present,
-} from "./fixtures";
-import { base, capture, fork, ID, node, text } from "./scenarios";
+} from "./project-document";
+import { base, capture, fork, ID, node, text } from "./yjs-scenarios";
 
 const active = base();
 const offline = fork(active, 22);

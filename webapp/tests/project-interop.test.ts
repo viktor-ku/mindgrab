@@ -1,7 +1,7 @@
 import { beforeAll, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Y } from "./fixtures";
+import { Y } from "./fixtures/project-document";
 import {
   materialize,
   present,
@@ -10,7 +10,7 @@ import {
   projectForest,
   type Content,
   type ForestNode,
-} from "./fixtures";
+} from "./fixtures/project-document";
 import {
   base,
   capture,
@@ -19,10 +19,10 @@ import {
   seededRandom,
   shuffle,
   text,
-} from "./scenarios";
+} from "./fixtures/yjs-scenarios";
 const root = join(import.meta.dir, "../..");
-const manifest = join(import.meta.dir, "rust/Cargo.toml");
-const binary = join(import.meta.dir, "rust/target/debug/mindgrab-yjs-contract");
+const manifest = join(root, "server/Cargo.toml");
+const binary = join(root, "server/target/debug/examples/yjs_interop");
 beforeAll(() => {
   const result = Bun.spawnSync(
     [
@@ -34,6 +34,8 @@ beforeAll(() => {
       "cargo",
       "build",
       "--locked",
+      "--example",
+      "yjs_interop",
       "--manifest-path",
       manifest,
     ],
@@ -84,16 +86,18 @@ function assertRoundTrip(result: Result, expected: Content) {
   expect(back.store.pendingDs).toBeNull();
   back.destroy();
 }
-for (const file of readdirSync(join(import.meta.dir, "fixtures")).filter(
+for (const file of readdirSync(join(import.meta.dir, "fixtures/yjs")).filter(
   (name) => name.endsWith(".json"),
 )) {
   const fixture = JSON.parse(
-    readFileSync(join(import.meta.dir, "fixtures", file), "utf8"),
+    readFileSync(join(import.meta.dir, "fixtures/yjs", file), "utf8"),
   ) as { updates: string[]; expected: Content; forest: ForestNode[] };
   test(`golden ${file}: JS → Rust → JS, both transaction modes`, () => {
     const updates = fixture.updates.map(
       (name) =>
-        new Uint8Array(readFileSync(join(import.meta.dir, "fixtures", name))),
+        new Uint8Array(
+          readFileSync(join(import.meta.dir, "fixtures/yjs", name)),
+        ),
     );
     const js = new Y.Doc();
     for (const update of updates) Y.applyUpdate(js, update);

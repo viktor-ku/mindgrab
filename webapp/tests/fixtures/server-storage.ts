@@ -1,13 +1,13 @@
 // Called by the SQLx storage API suite. Uses the same pinned browser library.
-import { Y } from "./fixtures";
+import { Y } from "./project-document";
 import {
   addNode,
   materialize,
   nodeMap,
   present,
   projectForest,
-} from "./fixtures";
-import { base, capture, ID, node, text } from "./scenarios";
+} from "./project-document";
+import { base, capture, ID, node, text } from "./yjs-scenarios";
 
 const input = await Bun.stdin.json();
 if (input.nul || input.empty) {

@@ -1,9 +1,9 @@
 // Invoked by Rust's SQLx suite against real Axum sockets. Disable BroadcastChannel
 // so these independent provider instances can only converge through the server.
-import { WebsocketProvider } from "../../webapp/tests/interop-dependencies";
-import { Y } from "./fixtures";
-import { addNode, materialize, placeNode } from "./fixtures";
-import { base, ID, node, text } from "./scenarios";
+import { WebsocketProvider } from "y-websocket";
+import { Y } from "./project-document";
+import { addNode, materialize, placeNode } from "./project-document";
+import { base, ID, node, text } from "./yjs-scenarios";
 
 const input: { serverUrl: string; projectId: string; cookie: string } =
   await Bun.stdin.json();

@@ -45,7 +45,7 @@ async fn shared_goldens_match_js_content_and_effective_trees_after_duplicate_rev
 ) {
     let f = fixture(pool).await;
     let cookie = sign_in(&f).await;
-    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tools/yjs-contract/fixtures");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../webapp/tests/fixtures/yjs");
     for entry in fs::read_dir(&fixtures).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_none_or(|extension| extension != "json") {

@@ -1,7 +1,7 @@
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { scenarios } from "./scenarios";
-const directory = join(import.meta.dir, "fixtures");
+import { scenarios } from "./yjs-scenarios";
+const directory = join(import.meta.dir, "yjs");
 await mkdir(directory, { recursive: true });
 // Only the explicitly generated files are replaced; README is maintained by hand.
 for (const name of await readdir(directory))

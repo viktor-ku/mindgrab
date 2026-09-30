@@ -1,7 +1,7 @@
 // Fixed client IDs and arbitrary shared values are test inputs only. Validation,
 // materialization, projection and semantic moves use the shipped document model.
-import { Y } from "../../webapp/tests/interop-dependencies";
-export { Y } from "../../webapp/tests/interop-dependencies";
+import * as Y from "yjs";
+export { Y };
 import {
   deleteSubtree,
   effectiveParents,
@@ -10,19 +10,19 @@ import {
   openProjectDocument,
   ORIGIN,
   SCHEMA_VERSION,
-} from "../../webapp/src/project-document";
-import type { NodeContent } from "../../webapp/src/project-document";
+} from "../../src/project-document";
+import type { NodeContent } from "../../src/project-document";
 
 export {
   ORIGIN,
   materializeProject as materialize,
   projectForest,
-} from "../../webapp/src/project-document";
+} from "../../src/project-document";
 export type {
   ProjectContent as Content,
   ForestNode,
   NodeContent as NodeValue,
-} from "../../webapp/src/project-document";
+} from "../../src/project-document";
 
 export function present<T>(value: T | undefined): T {
   if (value === undefined) throw new Error("Missing fixture entry");

@@ -23,7 +23,7 @@ struct Edit {
     delete: u32,
     insert: String,
 }
-#[path = "../../../../server/src/project/projection.rs"]
+#[path = "../src/project/projection.rs"]
 mod projection;
 use projection::{Content, Position};
 #[derive(Serialize)]
