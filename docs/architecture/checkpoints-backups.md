@@ -1,6 +1,5 @@
-# ADR 0007: Safe checkpoints and canonical binary recovery
+# Safe checkpoints and canonical binary recovery
 
-Status: implemented by MIN-39. Requires ADRs 0001, 0003, 0004 and 0005.
 Pinned implementations: Yrs **0.28.0**, `small-client`, UTF-16 offsets; Yjs
 **13.6.33**. Changing either pin requires rerunning the release gates below.
 
@@ -79,8 +78,7 @@ they do not recreate that document or clear the undo stack. Tests keep actual
 JS documents and an UndoManager alive across repeated compactions, binary
 restore, offline text edits, moves, deletes, undo and redo.
 
-Migration `0009` backfills `crdt_receipt` from existing updates. An INSERT trigger
-atomically records every subsequent receipt with UUID, sequence, SHA-256,
+An INSERT trigger atomically records every receipt with UUID, sequence, SHA-256,
 original byte length, acceptance validation and commit time. Receipt updates are
 forbidden. Pruning deletes binary update rows only; retries compare digest and
 length and return the original receipt. Receipts deliberately grow with accepted
@@ -238,7 +236,7 @@ JS and Rust documents. Delete-only pending updates have the same gates.
 The deterministic realistic fixture uses **131 nodes**, Unicode text (128 nodes
 with 32 repetitions of `Idea 🌍 `), and **1,200 incremental edits** mixing text
 insertion, text deletion and placement changes. The benchmark prints
-`MIN39_BENCH`: 1,201 source rows and raw/checkpoint bytes, compaction cost and
+`COMPACTION_BENCH`: 1,201 source rows and raw/checkpoint bytes, compaction cost and
 mean baseline reconstruction time over ten reads before/after. Canonical JS
 content and rebuilt Rust content must agree; storage reduction is asserted,
 wall-clock speed is reported without a flaky timing assertion. Receipt metadata

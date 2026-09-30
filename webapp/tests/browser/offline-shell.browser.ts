@@ -29,6 +29,7 @@ let version = 0;
 let incompatible = false;
 let missingAsset = false;
 let workerUnavailable = false;
+let resetWorkerUnavailable = false;
 let user = 1;
 const requests: string[] = [];
 const errors: string[] = [];
@@ -99,6 +100,12 @@ beforeAll(async () => {
         );
       if (path === "/auth/callback")
         return new Response("Auth callback", { headers });
+      if (path === "/legacy-tab")
+        return new Response("<title>Old development tab</title>", {
+          headers: { ...headers, "Content-Type": "text/html" },
+        });
+      if (path === "/legacy-reset-worker.js" && resetWorkerUnavailable)
+        return new Response("Reset coordination unavailable", { status: 503 });
       if (path === "/sw.js") {
         if (workerUnavailable)
           return new Response("Worker temporarily unavailable", {
@@ -146,6 +153,7 @@ beforeEach(async () => {
   incompatible = false;
   missingAsset = false;
   workerUnavailable = false;
+  resetWorkerUnavailable = false;
   user = 1;
   requests.length = 0;
   errors.length = 0;
@@ -281,13 +289,14 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   expect(requests).toContain("POST /api/auth/logout");
   const cache = await cacheKeys();
   expect(cache.names).toHaveLength(1);
-  expect(cache.urls).toHaveLength(5);
+  expect(cache.urls).toHaveLength(6);
   expect(cache.urls).toContain("/icons.svg");
   expect(
     cache.urls.every(
       (path) =>
         path === "/index.html" ||
         path === "/icons.svg" ||
+        path === "/legacy-reset-worker.js" ||
         path === "/favicon.svg" ||
         path.startsWith("/assets/"),
     ),
@@ -591,4 +600,134 @@ test("a failed first registration recovers on reconnect without reopening", asyn
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Work before shell installation",
   );
+});
+
+async function seedLegacy(target: Page) {
+  await target.evaluate(() => {
+    for (const key of [
+      "proj/Ideas",
+      "project-updated/Ideas",
+      "mindgrab/latest-project",
+      "mindgrab/user/1/proj/Ideas",
+      "mindgrab/user/1/project-updated/Ideas",
+      "mindgrab/user/1/mindgrab/latest-project",
+    ])
+      localStorage.setItem(key, "obsolete");
+    localStorage.setItem("mindgrab/legacy-project-reset", "999");
+    localStorage.setItem("unrelated", "keep");
+    localStorage.setItem("mindgrab/user/1/theme", "keep");
+    localStorage.setItem("mindgrab/auth/fixture", "keep-auth");
+  });
+}
+async function legacyState(target: Page) {
+  return target.evaluate(() => ({
+    obsolete: localStorage.getItem("proj/Ideas"),
+    generation: localStorage.getItem("mindgrab/legacy-project-reset"),
+    unrelated: localStorage.getItem("unrelated"),
+    preference: localStorage.getItem("mindgrab/user/1/theme"),
+    auth: localStorage.getItem("mindgrab/auth/fixture"),
+    keys: Object.keys(localStorage).sort(),
+  }));
+}
+
+test("fresh cutover clears only known legacy keys and ignores a forged reset marker", async () => {
+  await page.goto(`${origin}/legacy-tab`);
+  await seedLegacy(page);
+  await load();
+  const reset = await legacyState(page);
+  expect(reset.obsolete).toBeNull();
+  expect(reset.generation).toBe("1");
+  expect(
+    reset.keys.filter(
+      (key) => key.includes("Ideas") || key.endsWith("latest-project"),
+    ),
+  ).toEqual([]);
+  expect(reset.unrelated).toBe("keep");
+  expect(reset.preference).toBe("keep");
+  expect(reset.auth).toBe("keep-auth");
+  expect(
+    await page.getByRole("region", { name: "Account" }).innerText(),
+  ).toContain("Account 1");
+});
+
+test("reset preserves valid Yjs documents and all existing databases on every repeat", async () => {
+  await load();
+  await installed();
+  await edit("Retain Yjs edits across cutover");
+  const nodes = await page
+    .locator("[data-node-id]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-node-id")),
+    );
+  const databases = await page.evaluate(async () =>
+    (await indexedDB.databases()).map((db) => db.name).sort(),
+  );
+  for (let repeat = 0; repeat < 2; repeat++) {
+    await seedLegacy(page);
+    await page.reload();
+    await page.waitForSelector('[data-storage-ready="true"]');
+    expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+      "Retain Yjs edits across cutover",
+    );
+    expect(
+      await page
+        .locator("[data-node-id]")
+        .evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("data-node-id")),
+        ),
+    ).toEqual(nodes);
+    expect(
+      await page.evaluate(async () =>
+        (await indexedDB.databases()).map((db) => db.name).sort(),
+      ),
+    ).toEqual(databases);
+    expect((await legacyState(page)).obsolete).toBeNull();
+  }
+});
+
+test("uncontrolled old tabs fence reset, including offline reopening, until closed", async () => {
+  await load();
+  await installed();
+  await edit("Current Yjs work");
+  const stale = await context.newPage();
+  await stale.goto(`${origin}/legacy-tab`);
+  await seedLegacy(stale);
+  await context.setOffline(true);
+  await page.reload();
+  await page
+    .getByRole("heading", { name: "Application update needed" })
+    .waitFor();
+  expect((await legacyState(page)).obsolete).toBe("obsolete");
+  await context.setOffline(false);
+  await page.reload();
+  await page
+    .getByRole("heading", { name: "Application update needed" })
+    .waitFor();
+  expect(await page.getByRole("alert").innerText()).toContain(
+    "Close all other tabs",
+  );
+  expect((await legacyState(stale)).obsolete).toBe("obsolete");
+  await stale.close();
+  await page.getByRole("button", { name: "Retry opening" }).click();
+  await page.waitForSelector('[data-storage-ready="true"]');
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Current Yjs work",
+  );
+  expect((await legacyState(page)).obsolete).toBeNull();
+});
+
+test("failed reset coordination keeps legacy state and recovers on retry", async () => {
+  await page.goto(`${origin}/legacy-tab`);
+  await seedLegacy(page);
+  resetWorkerUnavailable = true;
+  await page.goto(origin);
+  await page
+    .getByRole("heading", { name: "Application update needed" })
+    .waitFor();
+  expect((await legacyState(page)).obsolete).toBe("obsolete");
+  expect(await page.locator("[data-node-id]").count()).toBe(0);
+  resetWorkerUnavailable = false;
+  await page.getByRole("button", { name: "Retry opening" }).click();
+  await page.waitForSelector('[data-storage-ready="true"]');
+  expect((await legacyState(page)).obsolete).toBeNull();
 });

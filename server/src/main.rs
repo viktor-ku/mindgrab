@@ -22,6 +22,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing_subscriber::fmt::init();
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["reset-legacy-projects"] {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("DATABASE_URL")?)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        project::cutover::reset_legacy_projects(&pool).await?;
+        println!("Obsolete snapshot tables removed; Yjs projects, users and sessions retained");
+        return Ok(());
+    }
     if args == ["rebuild-read-models"] {
         let database_url = std::env::var("DATABASE_URL")?;
         let pool = PgPoolOptions::new()
@@ -36,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if !args.is_empty() {
-        let usage = "Usage: server [rebuild-read-models | compact-project <uuid> <owner-external-id> | backup-project <uuid> <owner-external-id> <file> | restore-project <uuid> <source-owner-external-id> <destination-owner-external-id> <file>]";
+        let usage = "Usage: server [reset-legacy-projects | rebuild-read-models | compact-project <uuid> <owner-external-id> | backup-project <uuid> <owner-external-id> <file> | restore-project <uuid> <source-owner-external-id> <destination-owner-external-id> <file>]";
         let expected = match args[0].as_str() {
             "compact-project" => 3,
             "backup-project" => 4,

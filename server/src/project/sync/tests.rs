@@ -508,7 +508,7 @@ async fn slow_reader_times_out_without_blocking_another_room_or_losing_content(p
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    // Model MIN-39's valid full-state checkpoint without spending this test on
+    // Model a valid full-state checkpoint without spending this test on
     // 256 separate ingestion/reconstruction operations.
     sqlx::query("INSERT INTO crdt_checkpoint (project_id, covered_sequence, data, sha256) VALUES ($1, 1, $2, $3)").bind(id).bind(&checkpoint).bind(digest).execute(&f.state.pool).await.unwrap();
     let server = server(f.state.clone()).await;

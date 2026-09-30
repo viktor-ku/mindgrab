@@ -53,7 +53,6 @@ pub(crate) async fn private_response(request: Request, next: Next) -> Response {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::BadRequest => (StatusCode::BAD_REQUEST, "Invalid project."),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "Sign in to continue."),
             Self::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -144,7 +143,6 @@ async fn callback(
             .into_response(),
         Err(error) => {
             let code = match error {
-                AuthError::BadRequest => "sign_in_failed",
                 AuthError::Unauthorized => "sign_in_failed",
                 AuthError::Unavailable => "unavailable",
             };

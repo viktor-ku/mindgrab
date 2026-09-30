@@ -41,7 +41,7 @@ import {
   ANONYMOUS_NAMESPACE,
 } from "./project-repository";
 import type { CatalogEntry, ProjectHandle } from "./project-repository";
-import type { Project } from "./project-schema";
+import type { ViewportPreference } from "./project-import-export";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
@@ -363,7 +363,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       const preference = await owner.preference(`project/${handle.id}/view`);
       if (request !== activation || disposed || owner !== repository) return;
       if (preference && typeof preference === "object") {
-        const view = preference as Project["view"] & { anchor?: LayoutAnchor };
+        const view = preference as ViewportPreference;
         setLayoutAnchor(view.anchor);
         setLeft(view.left);
         setTop(view.top);
@@ -765,7 +765,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     const handle = activeHandle;
     const owner = handleRepository;
     const currentDoc = doc();
-    const value: Project["view"] & { anchor?: LayoutAnchor } = {
+    const value: ViewportPreference = {
       left: left(),
       top: top(),
       zoom: zoom(),

@@ -7,8 +7,8 @@ consistent view; export does not flush storage, contact the server, or change
 undo history. Export remains available if local persistence fails to open.
 
 **Import** accepts `.mindgrab.json` or `.json` files in the following format.
-Version 2 is the only supported portable format. Legacy version 1 development
-snapshots and Yjs binary updates are not portable project files.
+Version 2 is the supported portable format. Binary backup archives use the
+separate operational recovery format.
 
 ```json
 {

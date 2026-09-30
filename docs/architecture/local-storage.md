@@ -1,8 +1,4 @@
-# ADR 0002: Local project repository in IndexedDB
-
-Status: accepted for the MIN-31 storage layer; UI integration (MIN-32) and
-network sync (MIN-37) are separate tasks. Scope: browser storage APIs only.
-The existing localStorage snapshot path stays untouched until the cutover.
+# Local project repository in IndexedDB
 
 ## Storage layout
 
@@ -18,8 +14,7 @@ mindgrab/<deployment>/<namespace>/g<generation>/project/<uuid>  # one Yjs docume
 Document databases keep the exact `y-indexeddb@9.0.12` layout (the `updates`
 auto-increment store plus `custom`), so its hydration code and any external
 tools keep working. The catalog adds two stores at version 1: `projects`
-(keyed by project UUID) and `preferences`. Old localStorage snapshot records
-are not ported; MIN-43 performs the authorized dev reset.
+(keyed by project UUID) and `preferences`.
 
 ## Verified adapter behavior
 
@@ -108,8 +103,8 @@ and database-upgrade reconnection plus blocked-open timeout. The browser must
 be installed once with `bunx playwright install chromium`.
 
 
-MIN-41 adds durable anonymous source claim markers and hidden account target
-reservations; see [ADR 0007](0007-account-workspaces.md). Default `list()` and
+Anonymous source claim markers and hidden account target reservations support
+[account claims](accounts.md). Default `list()` and
 `latestProject()` exclude claimed sources and incomplete targets. Recovery may
 use `list({ includeClaims: true })`. `detach()` immediately fences catalog and
 document channels while a failed local write remains in memory for retry;

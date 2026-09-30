@@ -23,4 +23,4 @@ encoding identity.
 
 The test suite additionally exercises Rust-authored Unicode edits, state-vector
 and delete-only diffs, pending dependency recovery, and 32 deterministic seeds.
-These are scoped POC fixtures, not #670/#673 reproduction coverage.
+The server storage suite additionally exercises Yrs #670/#673 causal gaps.

@@ -75,9 +75,9 @@ unsupported content. Never clear data to fix an upgrade.
 
 Version bumps require a reviewed migration plan. In-place incompatible IndexedDB
 upgrades must wait for old clients to close; a new storage generation must retain
-and explicitly migrate/import old generations. This change introduces no schema
-migration. Waiting activation alone does not authorize future destructive
-migrations, and no worker message permits forced activation.
+and explicitly migrate/import old generations. Waiting activation alone does
+not authorize destructive migrations, and no worker message permits forced
+activation. The narrow development reset is documented in [operations](operations.md).
 
 ## Repeatable automated verification
 

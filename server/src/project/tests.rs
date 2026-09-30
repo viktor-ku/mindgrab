@@ -546,56 +546,49 @@ async fn listing_is_paginated_owner_scoped_and_stable(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn legacy_snapshot_writes_are_fenced_from_the_catalog(pool: PgPool) {
+async fn stale_snapshot_clients_must_upgrade_without_writing(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
-    let legacy = send(
-        &f.state,
-        "PUT",
-        "/api/projects",
-        &session,
-        None,
-        Some(json!({"name": "Ideas", "state": {"version": 1, "nodes": [], "view": {"left": 0, "top": 0, "zoom": 1}}})),
-    )
-    .await;
-    assert_eq!(legacy.status, StatusCode::OK);
-    assert_eq!(list_all(&f.state, &session, 50).await, Vec::<Value>::new());
-
     let id = new_id();
     create(&f.state, &session, register(id)).await;
-    project_summary(&f.state.pool, id, "Ideas", 1).await;
-    let snapshots = get(&f.state, "/api/projects", &session).await;
-    assert_eq!(snapshots.body.as_array().unwrap().len(), 1);
+    for cookies in [&session[..], ""] {
+        for method in ["GET", "PUT"] {
+            let reply = send(
+                &f.state,
+                method,
+                "/api/projects",
+                cookies,
+                None,
+                Some(json!({"name": "Ideas", "state": {"version": 1, "nodes": []}})),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::UPGRADE_REQUIRED);
+            assert_eq!(error_code(&reply), "legacy_client_upgrade_required");
+            assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+            assert_eq!(reply.body["storageGeneration"], 1);
+        }
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
     assert_eq!(
         ids(&list_all(&f.state, &session, 50).await),
         vec![id.to_string()]
     );
+    super::cutover::reset_legacy_projects(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        get(&f.state, "/api/projects", &session).await.status,
+        StatusCode::UPGRADE_REQUIRED
+    );
 }
 
 #[sqlx::test]
-async fn catalog_migration_applies_to_a_clean_schema(pool: PgPool) {
+async fn current_catalog_schema_enforces_identity_and_content_constraints(pool: PgPool) {
     let mut connection = pool.acquire().await.unwrap();
-    sqlx::query("CREATE SCHEMA min34_migration_test")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::query("SET search_path TO min34_migration_test")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    for migration in [
-        include_str!("../../migrations/0001_create_users.sql"),
-        include_str!("../../migrations/0002_auth_sessions.sql"),
-        include_str!("../../migrations/0003_projects.sql"),
-        include_str!("../../migrations/0004_pnodes.sql"),
-        include_str!("../../migrations/0005_pnode_colors.sql"),
-        include_str!("../../migrations/0006_crdt_project_catalog.sql"),
-    ] {
-        sqlx::raw_sql(migration)
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-    }
     let owner: i64 = sqlx::query_scalar(
         "INSERT INTO users (name, email, external_id) VALUES ('Clean', 'clean@example.com', 'clean') RETURNING id",
     )
@@ -631,10 +624,6 @@ async fn catalog_migration_applies_to_a_clean_schema(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(project_unique_indexes, 0);
-    sqlx::query("DROP SCHEMA min34_migration_test CASCADE")
-        .execute(&mut *connection)
-        .await
-        .unwrap();
 }
 
 #[sqlx::test]

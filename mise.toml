@@ -10,6 +10,10 @@ run = "docker compose up -d postgres"
 description = "Run the API server"
 run = "mise -C server exec -- cargo run"
 
+[tasks."server:reset-legacy-projects"]
+description = "Discard ONLY obsolete snapshot tables; retain Yjs projects and authentication"
+run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- reset-legacy-projects"
+
 [tasks."server:rebuild-read-models"]
 description = "Rebuild Yjs inspection indexes from canonical binary storage"
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- rebuild-read-models"
@@ -82,12 +86,13 @@ description = "Run all server and webapp checks"
 depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "crdt:test", "crdt:check", "test:release"]
 
 [tasks."crdt:install"]
-description = "Install locked CRDT proof-of-concept dependencies"
+description = "Install locked interoperability test tools"
+depends = ["webapp:install"]
 dir = "tools/yjs-contract"
 run = "bun --bun install --frozen-lockfile"
 
 [tasks."crdt:test"]
-description = "Run Yjs/Yrs interoperability and document contract tests"
+description = "Run Yjs/Yrs interoperability tests"
 depends = ["crdt:install"]
 dir = "tools/yjs-contract"
 run = "bun --bun test"

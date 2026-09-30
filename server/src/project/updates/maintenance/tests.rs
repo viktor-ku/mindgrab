@@ -38,7 +38,7 @@ async fn rows(pool: &PgPool, id: Uuid) -> i64 {
 
 /// Entirely separate database, containing an explicitly mapped user and no caches.
 async fn isolated(pool: &PgPool, external: &str) -> (PgPool, String, i64) {
-    let name = format!("min39_{}", new_id().simple());
+    let name = format!("backup_restore_{}", new_id().simple());
     sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
         .execute(pool)
         .await
@@ -503,7 +503,7 @@ async fn realistic_fixture_records_replay_storage_cost_and_count_trigger(pool: P
     let replay_after = after.elapsed().as_micros() / 10;
     content(&f.state.pool, owner, id, &data["expected"]).await;
     println!(
-        "MIN39_BENCH {}",
+        "COMPACTION_BENCH {}",
         json!({"rowsBefore": count, "bytesBefore": metrics.log_bytes, "bytesAfter": metrics.checkpoint_bytes, "readBeforeMicros": replay_before, "readAfterMicros": replay_after, "compaction": metrics})
     );
     // Separate project reaches count trigger through idempotent Yjs deliveries.

@@ -7,13 +7,6 @@
     "fixtures": "bun generate-fixtures.ts",
     "check": "tsc --noEmit && biome lint . && biome format ."
   },
-  "dependencies": {
-    "fractional-indexing": "4.0.0",
-    "y-indexeddb": "9.0.12",
-    "y-protocols": "1.0.7",
-    "y-websocket": "3.1.0",
-    "yjs": "13.6.33"
-  },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@types/bun": "1.4.2",

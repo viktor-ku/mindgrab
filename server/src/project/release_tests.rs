@@ -127,7 +127,7 @@ async fn control(State(rig): State<Arc<Rig>>, Json(input): Json<Value>) -> Json<
     }
     if action == "commit-failure" {
         if input["enabled"] == true {
-            sqlx::raw_sql("CREATE FUNCTION release_fail_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'MIN42 injected COMMIT failure'; END; $$; CREATE CONSTRAINT TRIGGER release_fail_commit AFTER INSERT ON crdt_update DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION release_fail_commit();")
+            sqlx::raw_sql("CREATE FUNCTION release_fail_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Release injected COMMIT failure'; END; $$; CREATE CONSTRAINT TRIGGER release_fail_commit AFTER INSERT ON crdt_update DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION release_fail_commit();")
                 .execute(&rig.pool).await.unwrap();
         } else {
             sqlx::raw_sql("DROP TRIGGER release_fail_commit ON crdt_update; DROP FUNCTION release_fail_commit();")
@@ -180,7 +180,7 @@ async fn control(State(rig): State<Arc<Rig>>, Json(input): Json<Value>) -> Json<
             )
         }
         "restore" => {
-            let name = format!("min42_restore_{}", new_id().simple());
+            let name = format!("release_restore_{}", new_id().simple());
             sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
                 .execute(&rig.pool)
                 .await
@@ -196,7 +196,7 @@ async fn control(State(rig): State<Arc<Rig>>, Json(input): Json<Value>) -> Json<
             let f = fixture(target.clone()).await;
             let cookie = session_for(&f, "user_restored").await;
             let archive = backup::export(&rig.pool, id, "user_test").await.unwrap();
-            let path = std::env::temp_dir().join(format!("min42-{}.mgb", new_id()));
+            let path = std::env::temp_dir().join(format!("release-{}.mgb", new_id()));
             archive.write(&path).unwrap();
             let archive = backup::Archive::read(&path).unwrap();
             std::fs::remove_file(path).unwrap();

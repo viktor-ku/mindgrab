@@ -2,13 +2,15 @@
 import { RouterProvider } from "@tanstack/solid-router";
 import { Show } from "solid-js";
 import { offlineMessage, startOfflineShell } from "./offline-shell";
+import { resetLegacyBrowserProjects } from "./legacy-reset";
 import { render } from "solid-js/web";
 import { router } from "./router.tsx";
 import "./index.css";
 
 const root = document.getElementById("root");
 
-const upgradeMessage = await startOfflineShell();
+const upgradeMessage =
+  (await startOfflineShell()) ?? (await resetLegacyBrowserProjects());
 
 render(
   () => (

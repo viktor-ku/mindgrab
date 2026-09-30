@@ -23,7 +23,7 @@ type ArcState = std::sync::Arc<crate::auth::AppState>;
 async fn archive_file_checks_integrity_truncation_and_exclusive_creation(pool: PgPool) {
     let (state, id, _, external) = source(pool).await;
     let archive = export(&state.pool, id, &external).await.unwrap();
-    let path = std::env::temp_dir().join(format!("min39-{}.mgb", new_id()));
+    let path = std::env::temp_dir().join(format!("backup-{}.mgb", new_id()));
     archive.write(&path).unwrap();
     #[cfg(unix)]
     {

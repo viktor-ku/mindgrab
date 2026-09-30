@@ -1,17 +1,14 @@
-# ADR 0005: Rebuildable Yjs read models
-
-Status: accepted. Implements MIN-38 and supplies the projection boundary for
-MIN-39 and the release suite in MIN-42.
+# Rebuildable Yjs read models
 
 ## Source and canonical projection
 
 The verified `crdt_checkpoint` plus exact committed `crdt_update` tail is the
 sole content source. `updates::load` checks hashes and sequence coverage under
 the project lock. Reconstruction merges original V1 bytes before applying them
-to a fresh UTF-16 Yrs document, retaining the MIN-35 workarounds for #670/#673.
+to a fresh UTF-16 Yrs document, using the bounded reconstruction workarounds for Yrs #670/#673.
 Both insertion holes and pending dependencies prevent partial publication;
 vectors alone never establish completeness, including for delete-only updates.
-This task does not write checkpoints or prune updates.
+Read-model projection does not write checkpoints or prune updates.
 
 `server/src/project/projection.rs` defines the browser's canonical `Content`
 DTO, including tombstones and stored placements. The interoperability worker
@@ -25,7 +22,7 @@ the same forest as the browser.
 
 ## Atomic storage and catch-up
 
-Migration `0008` adds disposable catalog summaries and `crdt_node_read`.
+Disposable catalog summaries and `crdt_node_read` track projected content.
 Normalized rows hold canonical text/color/deletion/stored placement/position,
 effective parent/order, and source sequence. Deleted nodes remain in canonical
 content but have no effective placement. Summaries record name, visible node
@@ -45,9 +42,8 @@ Each API process runs one worker polling every second in UUID pages of at most
 wraps after the final page, and retries failures on the next sweep. Reconstruction
 uses the update store's shared two-worker semaphore and existing 10 MiB/10,000
 tail-row bounds. Logs identify project UUIDs without content or credentials.
-This implementation reconstructs full documents while holding project locks;
-incremental projection and a separate durable queue are future performance
-improvements. Multiple processes may duplicate work but publication is safe.
+Projection reconstructs full documents while holding project locks. Multiple
+processes may duplicate work but publication is safe.
 
 Updates commit independently before projection. Projection errors roll back the
 whole derived publication, leaving acknowledged binary updates untouched for

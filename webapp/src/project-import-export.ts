@@ -23,6 +23,14 @@ export interface ProjectFileNode {
   children: ProjectFileNode[];
 }
 
+// Viewport state is a local preference.
+export interface ViewportPreference {
+  left: number;
+  top: number;
+  zoom: number;
+  anchor?: { id: string; centerY: number };
+}
+
 export interface ProjectFile {
   format: typeof PROJECT_FILE_FORMAT;
   version: typeof PROJECT_FILE_VERSION;
