@@ -79,9 +79,10 @@ network failure does not invalidate a completed local save. Offline, transient
 retry, expired authentication and blocked recovery states preserve content and
 show the pending cloud status; Retry resumes reconciliation.
 
-MIN-41 owns anonymous claiming, explicit cross-tab logout and the full offline
-auth UX. MIN-33 owns cold application-shell caching. This change uses their
-existing namespace/lifecycle boundaries without introducing anonymous uploads.
+Anonymous claiming, explicit cross-tab logout and offline auth boundaries are
+implemented in [ADR 0007](0007-account-workspaces.md). Only a confirmed session
+starts cloud work; expired auth requires revalidation before creating fresh
+controllers. MIN-33 owns cold application-shell caching.
 The fenced legacy API remains until MIN-43, but no browser cloud writer uses it.
 
 ## Repeatable verification

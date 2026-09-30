@@ -808,3 +808,26 @@ async fn browser_cloud_sync_recovers_offline_tabs_receipts_deletes_and_large_bat
         .unwrap();
     assert_eq!(baseline.validation, "valid");
 }
+
+#[sqlx::test]
+async fn socket_account_expectation_rejects_a_changed_cookie_before_upgrade(pool: PgPool) {
+    let f = fixture(pool).await;
+    sign_in(&f).await;
+    let b = session_for(&f, "user_socket_other").await;
+    let owner_a: i64 = sqlx::query_scalar("SELECT id FROM users WHERE external_id = 'user_test'")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let server = server(f.state.clone()).await;
+    let id = register(&f.state, &b).await;
+    let mut req = request(&server, &b, id, Some("http://localhost:5173"));
+    *req.uri_mut() = format!("{}/api/crdt/v1/sync/{id}?ownerId={owner_a}", server.address)
+        .parse()
+        .unwrap();
+    match connect_async(req).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), axum::http::StatusCode::CONFLICT)
+        }
+        _ => panic!("A stale account socket must not upgrade"),
+    }
+}

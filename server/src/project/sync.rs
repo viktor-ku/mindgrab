@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 use axum::{
     Router,
     extract::{
-        Path, State, WebSocketUpgrade,
+        Path, Query, State, WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket},
     },
     http::HeaderMap,
@@ -15,6 +15,7 @@ use axum::{
     routing::get,
 };
 use axum_extra::extract::cookie::CookieJar;
+use serde::Deserialize;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::{Instant, timeout},
@@ -26,7 +27,9 @@ use yrs::{
     updates::{decoder::Decode, encoder::Encode},
 };
 
-use super::{ApiError, parse_project_id, require_same_origin, updates};
+use super::{
+    ApiError, parse_project_id, project_user, require_account, require_same_origin, updates,
+};
 use crate::{
     auth::{AppState, authenticated_user},
     workos::AuthError,
@@ -43,11 +46,18 @@ pub(super) fn router() -> Router<Arc<AppState>> {
     Router::new().route("/api/crdt/v1/sync/{project_id}", get(upgrade))
 }
 
+#[derive(Deserialize)]
+struct SyncScope {
+    #[serde(rename = "ownerId")]
+    owner_id: Option<String>,
+}
+
 async fn upgrade(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     headers: HeaderMap,
     Path(project): Path<String>,
+    Query(scope): Query<SyncScope>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     let permit = CONNECTIONS
@@ -55,7 +65,10 @@ async fn upgrade(
         .try_acquire_owned()
         .map_err(|_| ApiError::Unavailable)?;
     require_same_origin(&state, &headers)?;
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
+    if let Some(expected) = scope.owner_id {
+        require_account(&owner, &expected)?;
+    }
     let id = parse_project_id(&project)?;
     // Validate ownership, schema and quarantine before returning 101. Bootstrap
     // again inside the socket: a commit between upgrade and bootstrap is safe.

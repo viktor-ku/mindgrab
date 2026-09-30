@@ -34,8 +34,11 @@ durable only on that transaction's `complete` event; `abort` (including
 document. A full-state write (`Y.encodeStateAsUpdate`) covers every earlier
 failed or missing update and then prunes superseded rows; at most one full
 write queues behind the running one. `flush()` resolves only after every
-pending transaction commits and throws the last `StorageError` otherwise;
-callers must not report "saved locally" before `flush()` or a
+pending transaction commits and throws the last `StorageError` otherwise. When
+the document has unresolved structs or delete sets, `flush()` first persists its
+full binary state: Yjs update events can omit these pending portions. Relayed
+causal gaps also trigger a full-state write. Callers must not report "saved locally"
+before `flush()` or a
 `{ status: "saved" }` durability notification. Accumulated updates are
 trimmed to one snapshot after `PREFERRED_TRIM_SIZE`, matching the adapter.
 
@@ -103,3 +106,11 @@ and post-recovery reconstruction equivalence (content and state vector),
 interrupted catalog registration recovery, repeated open/close leak checks,
 and database-upgrade reconnection plus blocked-open timeout. The browser must
 be installed once with `bunx playwright install chromium`.
+
+
+MIN-41 adds durable anonymous source claim markers and hidden account target
+reservations; see [ADR 0007](0007-account-workspaces.md). Default `list()` and
+`latestProject()` exclude claimed sources and incomplete targets. Recovery may
+use `list({ includeClaims: true })`. `detach()` immediately fences catalog and
+document channels while a failed local write remains in memory for retry;
+`setRelaysPaused()` temporarily fences incoming updates before auth navigation.

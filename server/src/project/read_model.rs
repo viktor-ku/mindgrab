@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use axum::{
     Json, Router,
     extract::{Path, State, rejection::PathRejection},
+    http::HeaderMap,
     routing::get,
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -11,12 +12,13 @@ use serde::Serialize;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+use super::project_user;
 use super::{
     ApiError, decimal_string, parse_project_id,
     projection::{self, Content, EffectivePlacement, Metadata, Node, Placement, Position},
     updates,
 };
-use crate::auth::{AppState, authenticated_user};
+use crate::auth::AppState;
 
 // PostgreSQL TEXT cannot hold NUL; canonical names/text can. Decode BYTEA
 // strictly instead of silently escaping or replacing user content.
@@ -265,9 +267,10 @@ pub(crate) async fn current_state(
 async fn get_state(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
+    headers: HeaderMap,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<CurrentState>, ApiError> {
-    let owner = authenticated_user(&state, &jar).await?;
+    let owner = project_user(&state, &jar, &headers).await?;
     let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
     Ok(Json(current_state(&state.pool, owner.id, id).await?))
 }

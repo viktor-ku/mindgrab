@@ -636,3 +636,68 @@ async fn catalog_migration_applies_to_a_clean_schema(pool: PgPool) {
         .await
         .unwrap();
 }
+
+#[sqlx::test]
+async fn account_expectations_reject_changed_cookies_before_reads_registration_or_updates(
+    pool: PgPool,
+) {
+    let f = fixture(pool).await;
+    sign_in(&f).await;
+    let b = session_for(&f, "user_other").await;
+    let owner_a: i64 = sqlx::query_scalar("SELECT id FROM users WHERE external_id = 'user_test'")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    let owner_b = user_id(&f.state.pool, "user_other").await;
+    let id = new_id();
+    for (method, path, body) in [
+        ("POST", PROJECTS.to_owned(), register(id).to_string()),
+        ("GET", PROJECTS.to_owned(), String::new()),
+        ("GET", format!("{PROJECTS}/{id}"), String::new()),
+        ("GET", format!("{PROJECTS}/{id}/baseline"), String::new()),
+        ("GET", format!("{PROJECTS}/{id}/status"), String::new()),
+        ("GET", format!("{PROJECTS}/{id}/state"), String::new()),
+        ("GET", format!("{PROJECTS}/{id}/updates"), String::new()),
+        (
+            "PUT",
+            format!("{PROJECTS}/{id}/updates/{}", new_id()),
+            String::new(),
+        ),
+    ] {
+        let response = router(f.state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::COOKIE, &b)
+                    .header(header::ORIGIN, ORIGIN)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-mindgrab-account", owner_a.to_string())
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "account_changed");
+    }
+    assert!(catalog_rows(&f.state.pool, id).await.is_empty());
+    let response = router(f.state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(PROJECTS)
+                .header(header::COOKIE, b)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-mindgrab-account", owner_b.to_string())
+                .body(Body::from(register(id).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(catalog_rows(&f.state.pool, id).await, vec![owner_b]);
+}

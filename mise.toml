@@ -54,7 +54,7 @@ run = "bun --bun test --conditions browser"
 [tasks."webapp:test:browser"]
 description = "Run webapp interaction tests in headless Chromium"
 dir = "webapp"
-run = "bun --bun test ./tests/browser/editor.browser.ts ./tests/browser/project-repository.browser.ts"
+run = "bun --bun test ./tests/browser/editor.browser.ts ./tests/browser/project-repository.browser.ts ./tests/browser/accounts.browser.ts"
 
 [tasks."webapp:build"]
 description = "Build the webapp"

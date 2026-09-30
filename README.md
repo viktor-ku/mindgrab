@@ -78,8 +78,21 @@ edits remain local and reconcile after reconnect or reload. Cloud-only projects
 are discovered into the account's local catalog; names may be duplicated.
 
 Documents and offline tab relays are scoped by deployment/account/project.
-Anonymous projects stay local. Anonymous claiming and the complete account
-lifecycle are MIN-41; offline application-shell caching is MIN-33. The fenced
+Anonymous projects stay local until you choose **Add anonymous projects to this
+account** after signing in. Claims preserve binary Yjs content and resume safely
+when interrupted; projects already claimed by one account are never offered to
+another. A 503 or network outage preserves the cached workspace. A terminal 401
+pauses cloud sync and asks you to sign in again without moving or deleting local
+work. Explicit logout disconnects account providers across tabs and returns to
+anonymous projects, retaining the account cache for later sign-in.
+
+Auth navigation awaits document/catalog/view commits and stays in place if local
+storage fails. Account hints and logout coordination are scoped by deployment;
+HTTP/socket owner expectations reject requests left over from another account.
+This provides UI/account isolation, **not browser-disk encryption**: local caches
+remain readable by someone with access to this browser profile. See
+[ADR 0007](docs/architecture/0007-account-workspaces.md) for claim recovery and
+account boundaries. Offline application-shell caching is MIN-33. The fenced
 legacy `project`/`pnode` snapshot API remains for removal at MIN-43, but the
 browser never uploads name-keyed snapshots. See
 [ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
@@ -93,7 +106,11 @@ The name-keyed snapshot endpoints above (`server/src/project/legacy.rs`) are
 fenced: they only read and write `project`/`pnode`, never the catalog, and are
 removed at cutover. All catalog endpoints use the session cookie; the owner is
 always the signed-in user and is never read from the request body, query, or
-document content. Responses are `Cache-Control: no-store`.
+document content. Browser clients send `X-Mindgrab-Account: <userId>` as an
+expected-session fence, never as an ownership selector. A changed cookie returns
+`409 account_changed` before reading, registering or uploading content; clients
+pause and recheck `/api/me`. The optional header preserves compatibility with
+existing protocol clients. Responses are `Cache-Control: no-store`.
 
 - `POST /api/crdt/v1/projects` with `{ "projectId": "<uuid>", "schemaVersion": 1 }`
   registers a project, including one created offline. It requires the app's
@@ -158,7 +175,8 @@ transport is described below; browser cloud-sync integration is described in [AD
 ## Authenticated Yjs WebSocket sync
 
 Registered project UUIDs connect at `/api/crdt/v1/sync/<projectUUID>` using the
-session cookie and configured app Origin. This supports the pinned
+session cookie and configured app Origin. Browser providers also send the expected
+account as `?ownerId=<userId>`; a mismatch rejects the upgrade. This supports the pinned
 `y-websocket` provider's state-vector/diff protocol; accepted updates propagate
 only after Postgres commit. Separate API processes share the committed log and
 poll every 250 ms, so HTTP submissions and writes on another instance reach

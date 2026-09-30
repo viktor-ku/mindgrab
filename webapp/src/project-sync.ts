@@ -21,7 +21,11 @@ export interface SyncProvider {
   ): void;
 }
 
-export function websocketProvider(id: string, doc: Y.Doc): SyncProvider {
+export function websocketProvider(
+  id: string,
+  doc: Y.Doc,
+  ownerId?: number,
+): SyncProvider {
   const url = new URL(backendEndpoint("/api/crdt/v1/sync"));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const provider = new WebsocketProvider(url.href, id, doc, {
@@ -31,6 +35,7 @@ export function websocketProvider(id: string, doc: Y.Doc): SyncProvider {
     disableBc: true,
     maxBackoffTime: 30_000,
     shouldReconnect: () => false,
+    params: ownerId ? { ownerId: String(ownerId) } : {},
   });
   provider.awareness.setLocalState(null);
   return provider;
@@ -95,6 +100,7 @@ export class ProjectSync {
   #attempt = 0;
   #connectionAttempt = 0;
   #paused = false;
+  #authPaused = false;
   #status: CloudStatus = { status: "saving" };
 
   constructor(
@@ -104,7 +110,13 @@ export class ProjectSync {
   ) {
     this.handle = handle;
     this.repository = repository;
-    this.api = options.api ?? new CrdtApi();
+    this.api =
+      options.api ??
+      new CrdtApi(
+        undefined,
+        undefined,
+        Number(repository.scope.namespace.replace("account-", "")),
+      );
     this.#options = options;
     handle.doc.on("update", this.#onUpdate);
     globalThis.window?.addEventListener("online", this.#wake);
@@ -150,12 +162,14 @@ export class ProjectSync {
   };
   pauseForAuth(message: string) {
     this.#paused = true;
+    this.#authPaused = true;
     clearTimeout(this.#timer);
     this.#provider?.disconnect();
     this.#setStatus({ status: "auth", message });
   }
   retry() {
     if (this.destroyed) return;
+    if (this.#authPaused) return;
     this.#paused = false;
     this.#attempt = 0;
     this.#schedule(0);
@@ -189,6 +203,7 @@ export class ProjectSync {
             : new SyncError("Cloud saving is unavailable. Retrying…");
         if (failure.kind !== "retry") {
           this.#paused = true;
+          this.#authPaused = failure.kind === "auth";
           this.#provider?.disconnect();
           this.#setStatus({ status: failure.kind, message: failure.message });
         } else {
@@ -284,10 +299,9 @@ export class ProjectSync {
       }
     }
     if (!this.#provider) {
-      const provider = (this.#options.provider ?? websocketProvider)(
-        this.handle.id,
-        this.handle.doc,
-      );
+      const provider = this.#options.provider
+        ? this.#options.provider(this.handle.id, this.handle.doc)
+        : websocketProvider(this.handle.id, this.handle.doc, this.api.ownerId);
       this.#provider = provider;
       provider.on("sync", (synced) => {
         // Socket sync is a wakeup, never a durability acknowledgement.
@@ -297,10 +311,11 @@ export class ProjectSync {
         }
       });
       provider.on("connection-close", (event) => {
-        if (this.destroyed || !event) return;
+        if (this.destroyed || this.#paused || !event) return;
         this.#needsBaseline = true;
         if (event.code === 1008 || event.code === 1009) {
           this.#paused = true;
+          this.#authPaused = event.reason === "Sign in again";
           this.#setStatus(
             event.reason === "Sign in again"
               ? {
@@ -398,12 +413,17 @@ export class CloudWorkspace {
   #running = false;
   #timer?: ReturnType<typeof setTimeout>;
   #attempt = 0;
+  #authPaused = false;
 
   constructor(
     repository: ProjectRepository,
     onStatus: (status: CloudStatus | undefined) => void,
     onCatalog: () => void,
-    api = new CrdtApi(),
+    api = new CrdtApi(
+      undefined,
+      undefined,
+      Number(repository.scope.namespace.replace("account-", "")),
+    ),
   ) {
     this.repository = repository;
     this.api = api;
@@ -414,12 +434,16 @@ export class CloudWorkspace {
     this.#schedule(0);
   }
   activate(handle: ProjectHandle) {
-    if (this.#abort.signal.aborted) return;
+    if (this.#abort.signal.aborted || this.#authPaused) return;
     this.#active?.destroy();
     this.#onStatus({ status: "saving" });
     this.#active = new ProjectSync(handle, this.repository, {
       api: this.api,
-      onStatus: this.#onStatus,
+      onStatus: (status) => {
+        if (this.#abort.signal.aborted) return;
+        if (status.status === "auth") this.#pauseForAuth(status.message);
+        else this.#onStatus(status);
+      },
     });
   }
   detach() {
@@ -432,11 +456,12 @@ export class CloudWorkspace {
     this.#wake();
   }
   #wake = () => {
+    if (this.#authPaused) return;
     this.#attempt = 0;
     this.#schedule(0);
   };
   #schedule(ms: number) {
-    if (this.#abort.signal.aborted) return;
+    if (this.#abort.signal.aborted || this.#authPaused) return;
     clearTimeout(this.#timer);
     this.#timer = setTimeout(() => void this.#refresh(), ms);
   }
@@ -465,8 +490,6 @@ export class CloudWorkspace {
           await sync.syncNow();
           signal.throwIfAborted();
           if (sync.status.status === "auth") {
-            this.#active?.pauseForAuth(sync.status.message);
-            this.#onStatus(sync.status);
             throw new SyncError(sync.status.message, "auth");
           }
         } finally {
@@ -479,14 +502,21 @@ export class CloudWorkspace {
     } catch (error) {
       if (signal.aborted) return;
       if (error instanceof SyncError && error.kind === "auth") {
-        this.#active?.pauseForAuth(error.message);
-        this.#onStatus({ status: "auth", message: error.message });
+        this.#pauseForAuth(error.message);
       }
       delay = Math.min(30_000, 1000 * 2 ** Math.min(this.#attempt++, 5));
     } finally {
       this.#running = false;
       this.#schedule(delay);
     }
+  }
+  #pauseForAuth(message: string) {
+    if (this.#authPaused || this.#abort.signal.aborted) return;
+    this.#authPaused = true;
+    clearTimeout(this.#timer);
+    this.#active?.pauseForAuth(message);
+    this.#background?.pauseForAuth(message);
+    this.#onStatus({ status: "auth", message });
   }
   destroy() {
     this.#abort.abort();

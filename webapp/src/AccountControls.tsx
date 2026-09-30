@@ -1,137 +1,141 @@
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createSignal, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
-
-export type User = {
-  id: number;
-  name: string;
-  email: string;
-  external_id: string;
-};
+import type { SessionState } from "./auth-session";
 
 export function AccountControls(props: {
-  beforeNavigate: () => boolean | Promise<boolean>;
-  onUser: (user: User | undefined) => void;
+  state: SessionState;
+  beforeNavigate: (action: "login" | "logout") => boolean | Promise<boolean>;
+  onRetry: () => void;
+  claimCount: number;
+  claiming: boolean;
+  claimMessage: string;
+  onClaim: () => void;
 }) {
-  const [user, setUser] = createSignal<User>();
-  const [loading, setLoading] = createSignal(true);
   const [message, setMessage] = createSignal("");
-  const [failed, setFailed] = createSignal(false);
-  let checking = false;
-  let disposed = false;
+  const [navigating, setNavigating] = createSignal(false);
+  onMount(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("auth_error")) return;
+    setMessage(
+      url.searchParams.get("auth_error") === "unavailable"
+        ? "Sign-in is temporarily unavailable. Please try again."
+        : "Sign-in did not complete. Please try again.",
+    );
+    url.searchParams.delete("auth_error");
+    window.history.replaceState(window.history.state, "", url);
+  });
 
-  async function checkSession() {
-    if (checking) return;
-    checking = true;
+  async function navigate(action: "login" | "logout") {
+    if (navigating()) return;
+    setNavigating(true);
+    setMessage("");
     try {
-      const response = await fetch(backendEndpoint("/api/me"), {
-        credentials: "include",
-        cache: "no-store",
-      });
-      if (response.status !== 401 && !response.ok) throw new Error();
-      const current =
-        response.status === 401 ? undefined : await response.json();
-      if (disposed) return;
-      setUser(current);
-      props.onUser(current);
-      if (failed()) setMessage("");
-      setFailed(false);
+      if (!(await props.beforeNavigate(action))) return;
+      if (action === "login")
+        window.location.assign(backendEndpoint("/api/auth/login"));
+      else {
+        // The logout transition removes the account controls before navigation.
+        const form = document.createElement("form");
+        form.method = "post";
+        form.action = backendEndpoint("/api/auth/logout");
+        form.hidden = true;
+        document.body.append(form);
+        form.submit();
+      }
     } catch {
-      if (disposed) return;
-      setFailed(true);
-      setMessage("Could not check your account. Please retry.");
+      setMessage(
+        "Could not save the account change in this browser. Free up browser storage and retry.",
+      );
     } finally {
-      checking = false;
-      if (!disposed) setLoading(false);
+      setNavigating(false);
     }
   }
 
-  onMount(() => {
-    const url = new URL(window.location.href);
-    if (url.searchParams.has("auth_error")) {
-      setMessage(
-        url.searchParams.get("auth_error") === "unavailable"
-          ? "Sign-in is temporarily unavailable. Please try again."
-          : "Sign-in did not complete. Please try again.",
-      );
-      url.searchParams.delete("auth_error");
-      window.history.replaceState(window.history.state, "", url);
-    }
-    void checkSession();
-    const refresh = () => void checkSession();
-    window.addEventListener("focus", refresh);
-    onCleanup(() => {
-      disposed = true;
-      window.removeEventListener("focus", refresh);
-    });
-  });
-
   return (
-    <div class="mt-1 border-t border-stone-200 pt-1 text-sm">
+    <section
+      class="mt-1 border-t border-stone-200 pt-1 text-sm"
+      aria-label="Account"
+    >
+      <Show when={props.state.user}>
+        {(user) => (
+          <div class="flex items-center gap-1">
+            <span class="min-w-0 flex-1 truncate px-2" title={user().email}>
+              {user().name || user().email || "Cached account"}
+            </span>
+            <button
+              type="button"
+              class="map-control"
+              disabled={navigating() || props.claiming}
+              onClick={() => void navigate("logout")}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
+      </Show>
+      <Show when={props.state.status === "checking"}>
+        <p role="status" class="px-2 py-2 text-xs text-stone-500">
+          Checking account…
+        </p>
+      </Show>
       <Show
-        when={!loading()}
-        fallback={
-          <p role="status" class="px-2 py-2 text-xs text-stone-500">
-            Checking account…
-          </p>
+        when={
+          props.state.status !== "authenticated" &&
+          props.state.status !== "checking"
         }
       >
-        <Show
-          when={user()}
-          fallback={
-            <a
-              class="map-control block"
-              href={backendEndpoint("/api/auth/login")}
-              onClick={(event) => {
-                event.preventDefault();
-                const href = event.currentTarget.href;
-                void Promise.resolve(props.beforeNavigate()).then((saved) => {
-                  if (saved) window.location.assign(href);
-                });
-              }}
-            >
-              Sign in
-            </a>
-          }
+        <a
+          class="map-control block"
+          href={backendEndpoint("/api/auth/login")}
+          onClick={(event) => {
+            event.preventDefault();
+            void navigate("login");
+          }}
         >
-          {(current) => (
-            <div class="flex items-center gap-1">
-              <span
-                class="min-w-0 flex-1 truncate px-2"
-                title={current().email}
-              >
-                {current().name || current().email}
-              </span>
-              <form
-                method="post"
-                action={backendEndpoint("/api/auth/logout")}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const form = event.currentTarget;
-                  void Promise.resolve(props.beforeNavigate()).then((saved) => {
-                    if (saved) form.submit();
-                  });
-                }}
-              >
-                <button type="submit" class="map-control">
-                  Sign out
-                </button>
-              </form>
-            </div>
-          )}
-        </Show>
+          {props.state.user ? "Sign in again" : "Sign in"}
+        </a>
+      </Show>
+      <Show
+        when={props.state.status === "authenticated" && props.claimCount > 0}
+      >
+        <div class="px-2 py-1 text-xs">
+          <p>
+            {props.claimCount} anonymous{" "}
+            {props.claimCount === 1 ? "project is" : "projects are"} saved
+            separately in this browser.
+          </p>
+          <button
+            type="button"
+            class="map-control mt-1"
+            disabled={props.claiming || navigating()}
+            onClick={props.onClaim}
+          >
+            {props.claiming
+              ? "Adding projects…"
+              : "Add anonymous projects to this account"}
+          </button>
+        </div>
       </Show>
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
-        {message()}
+        {message() || props.state.message}
       </p>
-      <Show when={failed()}>
+      <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
+        {props.claimMessage}
+      </p>
+      <Show
+        when={
+          props.state.status === "unavailable" ||
+          props.state.status === "expired"
+        }
+      >
         <button
           type="button"
           class="map-control text-xs"
-          onClick={() => void checkSession()}
+          onClick={props.onRetry}
         >
-          Retry
+          Check account again
         </button>
       </Show>
-    </div>
+    </section>
   );
 }
