@@ -75,8 +75,15 @@ unsupported content. Never clear data to fix an upgrade.
 
 Version bumps require a reviewed migration plan. In-place incompatible IndexedDB
 upgrades must wait for old clients to close; a new storage generation must retain
-and explicitly migrate/import old generations. This change introduces no schema
-migration. Waiting activation alone does not authorize future destructive
+and explicitly migrate/import old generations. The Yjs cutover retains
+generation 1 and resets only obsolete localStorage
+snapshot keys, never an IndexedDB database. A separate worker at
+`/legacy-reset-worker.js` with scope `/legacy-reset/` inventories all same-origin
+window clients, including uncontrolled legacy tabs, before reset. It has no
+fetch/cache handler and unregisters after the check. Web Locks serialize reset
+attempts. More than one tab, unavailable coordination, or storage errors block
+editor startup until retry. See [cutover operations](yjs-cutover.md). Waiting
+activation alone does not authorize future destructive
 migrations, and no worker message permits forced activation.
 
 ## Repeatable automated verification

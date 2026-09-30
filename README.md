@@ -95,8 +95,8 @@ remain readable by someone with access to this browser profile. See
 account boundaries. Production builds cache the application shell for cold offline
 reopening after an online first visit. See [offline reopening](docs/offline-reopening.md)
 for prerequisites, safe upgrades, browser verification, and development reset. The fenced
-legacy `project`/`pnode` snapshot API remains for removal at MIN-43, but the
-browser never uploads name-keyed snapshots. See
+legacy `/api/projects` endpoint returns `426 legacy_client_upgrade_required`;
+no snapshot reader or writer remains. See
 [ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
 recovery, lifetime fencing and the real-browser test command.
 
@@ -112,9 +112,9 @@ for the schema, limits, optional local viewport preferences, and test commands.
 
 Yjs projects are identified by a client-generated UUID rather than by name.
 The catalog lives in `crdt_project` and is served from `server/src/project.rs`.
-The name-keyed snapshot endpoints above (`server/src/project/legacy.rs`) are
-fenced: they only read and write `project`/`pnode`, never the catalog, and are
-removed at cutover. All catalog endpoints use the session cookie; the owner is
+The retired name-keyed `/api/projects` endpoint always returns `426` with
+reload instructions, including for stale or signed-out clients. All catalog
+endpoints use the session cookie; the owner is
 always the signed-in user and is never read from the request body, query, or
 document content. Browser clients send `X-Mindgrab-Account: <userId>` as an
 expected-session fence, never as an ownership selector. A changed cookie returns
@@ -161,12 +161,21 @@ unauthenticated`, `403 invalid_origin`, `404 project_not_found`, `409
 project_id_conflict`, `426 unsupported_schema` for any `schemaVersion` other
 than 1, and `503 unavailable` for retryable storage or authentication failures.
 
-**Development reset impact:** migration `0006_crdt_project_catalog.sql` only
-adds the new table, and it starts empty. Existing `project`/`pnode` development
-data is neither converted nor modified and remains available through the legacy
-endpoints. No database reset is required to apply the migration. To start from
-a clean database anyway, run `docker compose down -v && mise run db`, which
-deletes all local users, sessions, and projects.
+**Development cutover:** existing snapshot data is intentionally discarded, with
+no conversion/backfill. Browser startup resets only the known legacy localStorage
+project keys, after checking for other open tabs. Yjs generation 1 databases,
+preferences, users and authentication are preserved. The database reset is an
+explicit operator command, never an automatic startup migration:
+
+```sh
+mise run server:reset-legacy-projects
+```
+
+Stop obsolete server builds first. This drops only `pnode` and `project` in one
+transaction and is safe to repeat. Do not reset the Docker volume to perform this
+cutover. Read [the cutover and operations runbook](docs/yjs-cutover.md) before rollout
+or recovery and [the release notes](docs/release-notes/yjs-cutover.md) for the one-time
+browser reset.
 
 ## Durable Yjs update API
 
@@ -253,7 +262,12 @@ An external backend origin must allow credentialed CORS requests from the webapp
 and expose `Server-Timing` for health latency calculations.
 
 Use HTTPS and serve the frontend and `/api` on the same origin through a reverse
-proxy. Client-side routes such as `/checkhealth` must fall back to `index.html`. Set `DATABASE_URL`, the WorkOS credentials, `APP_URL` (the root URL), and
+proxy. The supported topology is one Postgres primary shared by compatible Rust API
+processes, with same-origin static assets and WebSocket proxying; see the
+[example Nginx configuration](deploy/nginx.conf) and
+[operations runbook](docs/yjs-cutover.md). Client-side routes such as
+`/checkhealth` must fall back to `index.html`. Set `DATABASE_URL`, the WorkOS
+credentials, `APP_URL` (the root URL), and
 `WORKOS_REDIRECT_URI` (same origin, `/api/auth/callback`). Register corresponding
 production login, callback, and sign-out URLs in WorkOS. If using a custom token
 issuer, set `WORKOS_ISSUER` to its exact issuer URL. By default the expected

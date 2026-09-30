@@ -3,7 +3,7 @@
 //! The owner always comes from the authenticated session. Catalog records hold
 //! identity and rebuildable summaries only, never document bodies.
 
-mod legacy;
+pub(crate) mod cutover;
 mod projection;
 pub(crate) mod read_model;
 #[cfg(test)]
@@ -61,7 +61,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(updates::router())
         .merge(read_model::router())
         .merge(sync::router())
-        .merge(legacy::router())
+        .route(
+            "/api/projects",
+            get(cutover::upgrade_required).put(cutover::upgrade_required),
+        )
         .layer(middleware::from_fn(private_response))
         .with_state(state)
 }
@@ -181,7 +184,6 @@ impl IntoResponse for ApiError {
 impl From<AuthError> for ApiError {
     fn from(error: AuthError) -> Self {
         match error {
-            AuthError::BadRequest => Self::InvalidRequest,
             AuthError::Unauthorized => Self::Unauthenticated,
             AuthError::Unavailable => Self::Unavailable,
         }

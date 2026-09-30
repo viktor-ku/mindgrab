@@ -83,7 +83,8 @@ Anonymous claiming, explicit cross-tab logout and offline auth boundaries are
 implemented in [ADR 0007](0007-account-workspaces.md). Only a confirmed session
 starts cloud work; expired auth requires revalidation before creating fresh
 controllers. MIN-33 owns cold application-shell caching.
-The fenced legacy API remains until MIN-43, but no browser cloud writer uses it.
+MIN-43 removes the legacy API implementation. `/api/projects` permanently returns
+426 upgrade instructions; see [cutover operations](../yjs-cutover.md).
 
 ## Repeatable verification
 

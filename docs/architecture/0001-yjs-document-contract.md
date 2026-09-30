@@ -1,5 +1,9 @@
 # ADR 0001: Mindgrab Yjs document contract
 
+Implementation status: the migration described here shipped through MIN-43.
+The legacy modules listed in the baseline below are removed;
+[cutover operations](../yjs-cutover.md) describes the active architecture.
+
 Status: accepted for the MIN-27 proof of concept; production integration follows.
 Scope: one user across their devices/tabs, automatic local persistence, offline
 reopening, and session-only undo/redo. No cross-user collaboration. Existing

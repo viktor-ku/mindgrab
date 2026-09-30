@@ -2,7 +2,9 @@
 
 Status: accepted for the MIN-31 storage layer; UI integration (MIN-32) and
 network sync (MIN-37) are separate tasks. Scope: browser storage APIs only.
-The existing localStorage snapshot path stays untouched until the cutover.
+MIN-43 completes cutover: obsolete localStorage snapshot keys are reset only
+after tab coordination, and unused snapshot modules are removed. Existing Yjs
+databases stay intact; see [cutover operations](../yjs-cutover.md).
 
 ## Storage layout
 
