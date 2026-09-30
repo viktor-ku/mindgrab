@@ -27,6 +27,65 @@ async function inspect(worker: ServiceWorker) {
   });
 }
 
+const UPDATE_INTERVAL_MS = 5 * 60_000;
+const register = () =>
+  navigator.serviceWorker.register("/sw.js", {
+    scope: "/",
+    updateViaCache: "none",
+  });
+
+// Keep discovery alive even if an offline startup/failed deployment prevents the
+// first registration. Browser reachability events are hints, so visible tabs also
+// retry periodically. Never activate or reload a running editor here.
+function monitorUpdates() {
+  const observed = new WeakSet<ServiceWorkerRegistration>();
+  let checking: Promise<void> | undefined;
+  const observe = (registration: ServiceWorkerRegistration) => {
+    if (observed.has(registration)) return;
+    observed.add(registration);
+    const report = () => {
+      if (registration.waiting)
+        setOfflineMessage(
+          "An update is ready. Wait for Saved locally, then close all Mindgrab tabs and reopen. Unsynced work stays in this browser.",
+        );
+      else if (registration.active)
+        setOfflineMessage("Ready to reopen offline in this browser.");
+    };
+    const watch = () => {
+      registration.installing?.addEventListener("statechange", report);
+      report();
+    };
+    registration.addEventListener("updatefound", watch);
+    watch();
+    void navigator.serviceWorker.ready.then(report);
+  };
+  const check = () => {
+    if (checking || !navigator.onLine) return;
+    checking = (async () => {
+      try {
+        const existing = await navigator.serviceWorker.getRegistration("/");
+        const registration = existing ?? (await register());
+        observe(registration);
+        if (existing) await registration.update();
+      } catch {
+        // Retain the installed shell and keep retrying; a failed check must not
+        // hide a ready update or interrupt local editing.
+      }
+    })().finally(() => {
+      checking = undefined;
+    });
+  };
+  window.addEventListener("online", check);
+  window.addEventListener("focus", check);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") check();
+  });
+  setInterval(() => {
+    if (document.visibilityState === "visible") check();
+  }, UPDATE_INTERVAL_MS);
+  return { observe, check };
+}
+
 // Called before the router mounts, so an incompatible cached shell cannot open
 // or mutate the repository. No handler here activates a worker or reloads tabs.
 export async function startOfflineShell(): Promise<string | undefined> {
@@ -35,13 +94,9 @@ export async function startOfflineShell(): Promise<string | undefined> {
     setOfflineMessage("Offline reopening is unavailable in this browser.");
     return;
   }
+  const updates = monitorUpdates();
   const recovery = (message: string) => {
-    // A blocked page must still be able to fetch a compatible worker. This does
-    // not activate it; all old clients must close before it can take over.
-    void navigator.serviceWorker
-      .getRegistration()
-      .then((registration) => registration?.update())
-      .catch(() => {});
+    updates.check();
     return message;
   };
   const controller = navigator.serviceWorker.controller;
@@ -58,28 +113,7 @@ export async function startOfflineShell(): Promise<string | undefined> {
     }
   }
   try {
-    const registration = await navigator.serviceWorker.register("/sw.js", {
-      scope: "/",
-      updateViaCache: "none",
-    });
-    const report = () => {
-      if (registration.waiting)
-        setOfflineMessage(
-          "An update is ready. Wait for Saved locally, then close all Mindgrab tabs and reopen. Unsynced work stays in this browser.",
-        );
-      else if (registration.active)
-        setOfflineMessage("Ready to reopen offline in this browser.");
-    };
-    const watch = () => {
-      registration.installing?.addEventListener("statechange", report);
-      report();
-    };
-    registration.addEventListener("updatefound", watch);
-    watch();
-    void navigator.serviceWorker.ready.then(report);
-    window.addEventListener("online", () => {
-      void registration.update().catch(() => {});
-    });
+    updates.observe(await register());
   } catch {
     setOfflineMessage(
       controller

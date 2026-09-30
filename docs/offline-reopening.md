@@ -48,6 +48,14 @@ adding responses to the cache.
 
 ## Upgrades and schema compatibility
 
+Cached clients check for a newer worker on opening, reconnect, focus, returning
+from a hidden tab, and every five minutes while visible and online. Checks use
+`updateViaCache: none` and continue after an offline startup or failed deployment.
+Concurrent checks within a tab are coalesced. Hidden/suspended browsers cannot
+promise an exact detection time; returning to the app triggers another check.
+A client that remains offline keeps its last complete installation until the
+release is reachable. Downloads must finish before the update-ready notice.
+
 No `skipWaiting`, `clients.claim`, controller-change reload, database migration,
 or database deletion runs in the worker. New releases stay waiting while any old
 controlled tab remains open; those tabs keep their own shell and code. Once all
@@ -95,6 +103,8 @@ interception, and uses isolated persistent Chromium profiles. It checks:
    contracts block editor startup and preserve databases; first-visit offline
    failure; logout/account isolation under the cached production shell; newer
    catalog versions report an upgrade without deleting stored projects.
+5. Automatic release discovery on reconnect/focus, periodic retries after a
+   deployment outage, and recovery from failed first registration without reload.
 
 The fixture deliberately leaves cloud saves pending; it is not a WorkOS or
 Postgres mock convergence proof. Existing account-browser tests exercise receipt

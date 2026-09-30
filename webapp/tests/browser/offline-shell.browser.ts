@@ -28,6 +28,7 @@ let origin: string;
 let version = 0;
 let incompatible = false;
 let missingAsset = false;
+let workerUnavailable = false;
 let user = 1;
 const requests: string[] = [];
 const errors: string[] = [];
@@ -99,6 +100,10 @@ beforeAll(async () => {
       if (path === "/auth/callback")
         return new Response("Auth callback", { headers });
       if (path === "/sw.js") {
+        if (workerUnavailable)
+          return new Response("Worker temporarily unavailable", {
+            status: 503,
+          });
         let script = await Bun.file(join(builds[version], "sw.js")).text();
         if (incompatible)
           script = script.replace('"storage":1', '"storage":99');
@@ -140,6 +145,7 @@ beforeEach(async () => {
   version = 0;
   incompatible = false;
   missingAsset = false;
+  workerUnavailable = false;
   user = 1;
   requests.length = 0;
   errors.length = 0;
@@ -313,11 +319,9 @@ test("a new production version waits for all tabs while unsynced edits remain du
   await second.waitForSelector('[data-storage-ready="true"]');
   await context.setOffline(true);
   await edit("Unsynced before upgrade");
-  await context.setOffline(false);
   version = 1;
-  await page.evaluate(async () =>
-    (await navigator.serviceWorker.getRegistration())?.update(),
-  );
+  await context.setOffline(false);
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await waitForWorker(page, async () =>
     Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
   );
@@ -504,4 +508,87 @@ test("a newer catalog version reports a recoverable upgrade and retains stored p
       ),
     ),
   ).toBe(true);
+});
+
+test("an already online tab discovers a later release when focused", async () => {
+  await load();
+  await installed();
+  await edit("Pending cloud work before deployment");
+  version = 1;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await waitForWorker(page, async () =>
+    Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+  );
+  expect(await page.getByLabel("Offline application").innerText()).toContain(
+    "An update is ready",
+  );
+  expect(await page.title()).toBe("mindgrab 0");
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Pending cloud work before deployment",
+  );
+});
+
+test("visible tabs retry failed release checks periodically without an online event or reload", async () => {
+  await page.clock.install();
+  await load();
+  await installed();
+  await edit("Retain through deployment outage");
+  version = 1;
+  workerUnavailable = true;
+  const before = requests.filter((request) => request === "GET /sw.js").length;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const deadline = Date.now() + 5000;
+  while (
+    requests.filter((request) => request === "GET /sw.js").length === before
+  ) {
+    if (Date.now() > deadline) throw new Error("No worker update request");
+    await Bun.sleep(20);
+  }
+  // Allow the failed check's rejection to settle before advancing the clock.
+  await page.clock.runFor(100);
+  expect(await page.title()).toBe("mindgrab 0");
+  workerUnavailable = false;
+  await page.clock.fastForward(5 * 60_000);
+  await waitForWorker(page, async () =>
+    Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+  );
+  expect(await page.getByLabel("Offline application").innerText()).toContain(
+    "An update is ready",
+  );
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Retain through deployment outage",
+  );
+});
+
+test("a failed first registration recovers on reconnect without reopening", async () => {
+  workerUnavailable = true;
+  await load();
+  await page
+    .getByLabel("Offline application")
+    .filter({ hasText: "Offline reopening is not ready" })
+    .waitFor();
+  expect(
+    await page.evaluate(async () =>
+      Boolean(await navigator.serviceWorker.getRegistration()),
+    ),
+  ).toBe(false);
+  await edit("Work before shell installation");
+  workerUnavailable = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await waitForWorker(
+    page,
+    async () =>
+      (await navigator.serviceWorker.getRegistration())?.active?.state ===
+      "activated",
+  );
+  expect(await page.getByLabel("Offline application").innerText()).toContain(
+    "Ready to reopen offline",
+  );
+  await page.close();
+  await context.setOffline(true);
+  page = await context.newPage();
+  await load();
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Work before shell installation",
+  );
 });
