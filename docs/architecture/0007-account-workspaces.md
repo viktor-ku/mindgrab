@@ -97,3 +97,5 @@ against an isolated Rust TCP API/Postgres fixture, including offline/reload and
 receipt recovery. It is independent of the shared development database and live
 WorkOS configuration. Browser fixtures use controlled auth and failure responses;
 manual verification uses an actual WorkOS browser session.
+
+MIN-42 also commits the account hint and logout tombstone in a separate strict IndexedDB transaction before acknowledging account confirmation/navigation. Startup hydrates this record before selecting a workspace; an IDB-allocated sequence supersedes stale localStorage copies after a crash. Project databases are unchanged. See the [release regression gate](../release-regression.md) for the crash reproduction and verification.

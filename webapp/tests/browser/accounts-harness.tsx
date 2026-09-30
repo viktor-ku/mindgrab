@@ -56,12 +56,15 @@ window.WebSocket = Socket as unknown as typeof WebSocket;
 let writesFail = false;
 let failedProject = "";
 let authWritesFail = false;
+let authDatabaseFail = false;
 for (const method of ["add", "put"] as const) {
   const original = IDBObjectStore.prototype[method];
   IDBObjectStore.prototype[method] = function (
     ...args: [unknown, IDBValidKey?]
   ) {
     const request = original.apply(this, args);
+    if (authDatabaseFail && this.name === "records")
+      request.addEventListener("success", () => this.transaction.abort());
     if (
       writesFail &&
       this.name === "updates" &&
@@ -112,6 +115,9 @@ const accountHarness = {
   },
   failAuthWrites(value: boolean) {
     authWritesFail = value;
+  },
+  failAuthDatabase(value: boolean) {
+    authDatabaseFail = value;
   },
   editRetired(id: string) {
     const doc = retired.find((doc) => doc.guid === id);
@@ -176,10 +182,10 @@ const accountHarness = {
     replica.destroy();
     return { before, after, pending };
   },
-  logoutElsewhere() {
+  async logoutElsewhere() {
     const auth = new AuthSession(location.origin);
     auth.start();
-    auth.prepareNavigation("logout");
+    await auth.prepareNavigation("logout");
     auth.destroy();
   },
 };

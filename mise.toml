@@ -72,9 +72,14 @@ description = "Run webapp lint, formatting, and type checks"
 dir = "webapp"
 run = "bun --bun run check"
 
+[tasks."test:release"]
+description = "Verify the production local-first stack, faults, recovery, and release budgets"
+depends = ["webapp:install", "crdt:install"]
+run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test release_stack_recovers_and_converges -- --ignored --nocapture"
+
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "crdt:test", "crdt:check"]
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "crdt:test", "crdt:check", "test:release"]
 
 [tasks."crdt:install"]
 description = "Install locked CRDT proof-of-concept dependencies"

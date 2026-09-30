@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readAuthRecord, writeAuthRecord } from "./auth-record";
 import { backendEndpoint } from "./backend";
 
 const userSchema = z.object({
@@ -10,6 +11,7 @@ const userSchema = z.object({
 export type User = z.infer<typeof userSchema>;
 const recordSchema = z.object({
   revision: z.string(),
+  sequence: z.number().int().nonnegative().safe().optional(),
   user: userSchema.optional(),
   signedOut: z.boolean(),
   navigating: z.boolean(),
@@ -43,6 +45,7 @@ export class AuthSession {
   #timer?: ReturnType<typeof setInterval>;
   #started = false;
   #disposed = false;
+  #hydration?: Promise<void>;
 
   constructor(deployment: string) {
     this.key = authStorageKey(deployment);
@@ -56,6 +59,47 @@ export class AuthSession {
       user: this.#record.user,
       status: this.#record.signedOut ? "anonymous" : "checking",
     };
+  }
+  hydrate(): Promise<void> {
+    if (this.#hydration) return this.#hydration;
+    this.#hydration = (async () => {
+      const stored = recordSchema.safeParse(await readAuthRecord(this.key));
+      if (this.#disposed) return;
+      const local = this.#read();
+      // Sequence is allocated under the IDB write lock, not a wall clock.
+      if (
+        stored.success &&
+        (!local || (stored.data.sequence ?? 0) > (local.sequence ?? 0))
+      ) {
+        this.#record = stored.data;
+        localStorage.setItem(this.key, JSON.stringify(stored.data));
+      } else if (stored.success && local?.revision === stored.data.revision) {
+        this.#record = stored.data;
+      } else if (local) {
+        this.#record = local;
+        const saved = await writeAuthRecord(
+          this.key,
+          local,
+          () => this.#read()?.revision === local.revision,
+        );
+        if (
+          saved &&
+          !this.#disposed &&
+          this.#read()?.revision === local.revision
+        ) {
+          this.#record = saved;
+          localStorage.setItem(this.key, JSON.stringify(saved));
+        }
+      }
+      this.#state = {
+        user: this.#record.user,
+        status: this.#record.signedOut ? "anonymous" : "checking",
+      };
+    })().catch((error) => {
+      this.#hydration = undefined;
+      throw error;
+    });
+    return this.#hydration;
   }
   get state() {
     return this.#state;
@@ -100,11 +144,32 @@ export class AuthSession {
     this.#request?.abort.abort();
     this.#request = undefined;
   }
-  #publish(record: SessionRecord) {
-    // Auth navigation must stop if its coordination record cannot be committed.
+  async #publish(record: SessionRecord) {
+    // Publish the fence immediately, but acknowledge navigation/account checking
+    // only after the durable hint commits. An old writer cannot restore a hint.
+    const previous = this.#record;
     localStorage.setItem(this.key, JSON.stringify(record));
     this.#record = record;
-    this.#channel?.postMessage(record);
+    let saved: SessionRecord | undefined;
+    try {
+      saved = await writeAuthRecord(
+        this.key,
+        record,
+        () => this.#read()?.revision === record.revision,
+      );
+    } catch (error) {
+      if (this.#read()?.revision === record.revision) {
+        this.#record = previous;
+        localStorage.setItem(this.key, JSON.stringify(previous));
+      }
+      throw error;
+    }
+    if (!saved || this.#disposed || this.#read()?.revision !== record.revision)
+      return false;
+    this.#record = saved;
+    localStorage.setItem(this.key, JSON.stringify(saved));
+    this.#channel?.postMessage(saved);
+    return true;
   }
   #receive = (value: unknown) => {
     const parsed = recordSchema.safeParse(value);
@@ -187,12 +252,13 @@ export class AuthSession {
           this.#record.navigating ||
           JSON.stringify(current) !== JSON.stringify(this.#record.user)
         ) {
-          this.#publish({
+          const published = await this.#publish({
             revision: crypto.randomUUID(),
             user: current,
             signedOut: false,
             navigating: false,
           });
+          if (!published || !alive()) return;
         }
         this.#emit({ user: current, status: "authenticated" });
       } catch {
@@ -225,13 +291,15 @@ export class AuthSession {
     });
   }
   // Call only after the editor has awaited local persistence.
-  prepareNavigation(action: "login" | "logout") {
-    this.#publish({
+  async prepareNavigation(action: "login" | "logout") {
+    await this.hydrate();
+    const published = await this.#publish({
       revision: crypto.randomUUID(),
       ...(action === "login" && { user: this.#record.user }),
       signedOut: action === "logout",
       navigating: action === "login",
     });
+    if (!published) throw new Error("Account change was superseded. Retry.");
     this.#invalidate();
     this.#emit({
       user: this.#record.user,
