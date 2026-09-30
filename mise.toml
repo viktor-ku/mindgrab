@@ -31,6 +31,16 @@ run = "mise -C server exec -- cargo clippy --all-targets -- -D warnings"
 description = "Run server formatting, lint, and tests"
 depends = ["server:fmt", "server:clippy", "server:test"]
 
+[tasks."webapp:install"]
+description = "Install locked webapp dependencies"
+dir = "webapp"
+run = "bun --bun install --frozen-lockfile"
+
+[tasks."webapp:test:cloud"]
+description = "Test browser cloud sync against isolated Rust/Postgres endpoints"
+depends = ["webapp:install", "webapp:build"]
+run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test browser_cloud_sync_recovers -- --ignored"
+
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"
 dir = "webapp"
@@ -48,6 +58,7 @@ run = "bun --bun test ./tests/browser/editor.browser.ts ./tests/browser/project-
 
 [tasks."webapp:build"]
 description = "Build the webapp"
+depends = ["webapp:install"]
 dir = "webapp"
 run = "bun --bun run build"
 
@@ -58,7 +69,7 @@ run = "bun --bun run check"
 
 [tasks.check]
 description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:build", "crdt:test", "crdt:check"]
+depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:build", "crdt:test", "crdt:check"]
 
 [tasks."crdt:install"]
 description = "Install locked CRDT proof-of-concept dependencies"

@@ -59,6 +59,8 @@ import type {
   NodeSize,
 } from "./mind-map";
 import { backendEndpoint } from "./backend";
+import { CloudWorkspace } from "./project-sync";
+import type { CloudStatus } from "./project-sync";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -260,6 +262,26 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   let activeHandle: ProjectHandle | undefined;
   let stopDurability: (() => void) | undefined;
   let stopCatalog: (() => void) | undefined;
+  let cloud: CloudWorkspace | undefined;
+  let authenticated = false;
+  let disposed = false;
+  let activation = 0;
+  const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
+
+  function startCloud() {
+    if (!authenticated || cloud) return;
+    const owner = repository;
+    cloud = new CloudWorkspace(owner, setCloudStatus, () => {
+      void owner
+        .list()
+        .then((entries) => {
+          if (repository === owner && !disposed) setSavedProjects(entries);
+        })
+        .catch(() => {});
+    });
+    if (activeHandle && handleRepository === owner)
+      cloud.activate(activeHandle);
+  }
 
   function ephemeralDocument() {
     return createProjectDocument(crypto.randomUUID(), generateProjectName([]), {
@@ -268,10 +290,20 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   async function activate(handle: ProjectHandle, owner = repository) {
+    const request = ++activation;
+    if (disposed || owner !== repository) {
+      await handle.close();
+      return;
+    }
+    cloud?.detach();
     const previous = activeHandle;
     if (previous && previous !== handle) {
       await previous.flush();
       await previous.close();
+    }
+    if (disposed || request !== activation || owner !== repository) {
+      await handle.close();
+      return;
     }
     stopDurability?.();
     handleRepository = owner;
@@ -279,6 +311,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     resetProjectUi();
     setDoc(handle.doc);
     setStorageReady(true);
+    cloud?.activate(handle);
     setSaveStatus(handle.durability().status === "saved" ? "done" : "saving");
     stopDurability = handle.onDurability((durability) => {
       setSaveStatus(
@@ -294,6 +327,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     });
     try {
       const preference = await owner.preference(`project/${handle.id}/view`);
+      if (request !== activation || disposed || owner !== repository) return;
       if (preference && typeof preference === "object") {
         const view = preference as Project["view"] & { anchor?: LayoutAnchor };
         setLayoutAnchor(view.anchor);
@@ -308,6 +342,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   async function openLatestOrCreate(target = repository) {
     const latest = await target.latestProject();
+    if (target !== repository || disposed) return;
     if (latest) {
       await activate(await target.open(latest), target);
       return;
@@ -322,7 +357,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   async function accountChanged(user: User | undefined) {
+    if (disposed) return;
     const nextUserId = user?.id;
+    authenticated = Boolean(user);
     try {
       if (nextUserId)
         window.localStorage.setItem(cachedUserKey, String(nextUserId));
@@ -330,7 +367,15 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     } catch {
       // Authentication remains usable when the cache hint cannot be written.
     }
-    if (nextUserId === activeUserId) return;
+    if (nextUserId === activeUserId) {
+      startCloud();
+      cloud?.retry();
+      return;
+    }
+    cloud?.destroy();
+    cloud = undefined;
+    setCloudStatus(undefined);
+    activation++;
     activeUserId = nextUserId;
     const previousRepository = repository;
     const nextRepository = new ProjectRepository({
@@ -344,7 +389,10 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     stopCatalog = nextRepository.onCatalogChange(() => {
       void nextRepository
         .list()
-        .then(setSavedProjects)
+        .then((entries) => {
+          if (repository === nextRepository && !disposed)
+            setSavedProjects(entries);
+        })
         .catch(() => {});
     });
     try {
@@ -353,6 +401,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage("Could not open this account’s local projects.");
     }
     await previousRepository.close();
+    if (repository === nextRepository) startCloud();
   }
 
   // The document is the only writable project content. Everything else here
@@ -596,10 +645,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   async function openProject(id: string) {
+    const target = repository;
     try {
       await activeHandle?.flush();
-      const handle = await repository.open(id);
-      await activate(handle);
+      const handle = await target.open(id);
+      await activate(handle, target);
+      if (target !== repository || disposed) return;
       const state = handle.state();
       setStorageMessage(
         state.status === "ready"
@@ -614,15 +665,17 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   async function createNewProject() {
+    const target = repository;
     try {
       await activeHandle?.flush();
-      const projects = await repository.list();
+      const projects = await target.list();
       const name = generateProjectName(projects.map((project) => project.name));
-      const handle = await repository.create({
+      const handle = await target.create({
         name,
         root: { text: "New idea" },
       });
-      await activate(handle);
+      await activate(handle, target);
+      if (target !== repository || disposed) return;
       setStorageMessage("");
     } catch (error) {
       setStorageMessage(
@@ -690,6 +743,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     clearSaveStatus();
     finishWriting();
     try {
+      cloud?.retry();
       setSavedProjects(await repository.list());
       setStorageMessage("");
       setShowLoad(true);
@@ -1017,12 +1071,18 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     stopCatalog = initialRepository.onCatalogChange(() => {
       void initialRepository
         .list()
-        .then(setSavedProjects)
+        .then((entries) => {
+          if (repository === initialRepository && !disposed)
+            setSavedProjects(entries);
+        })
         .catch(() => {});
     });
     void initialRepository
       .list()
-      .then(setSavedProjects)
+      .then((entries) => {
+        if (repository === initialRepository && !disposed)
+          setSavedProjects(entries);
+      })
       .catch(() => {});
     void openLatestOrCreate(initialRepository).catch((error) => {
       setStorageMessage(
@@ -1032,6 +1092,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       );
     });
     onCleanup(() => {
+      disposed = true;
+      activation++;
+      cloud?.destroy();
       stopCatalog?.();
       stopDurability?.();
       void repository.close();
@@ -1349,6 +1412,34 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                   : ""}
           </span>
         </fieldset>
+        <Show when={cloudStatus()}>
+          {(status) => (
+            <div class="flex items-center gap-1 px-2 py-1 text-xs text-stone-500">
+              <span role="status">
+                {status().status === "saved"
+                  ? "Saved to cloud"
+                  : status().status === "saving"
+                    ? "Saving to cloud…"
+                    : status().status === "offline"
+                      ? "Offline · cloud save pending"
+                      : "message" in status()
+                        ? (status() as { message: string }).message
+                        : ""}
+              </span>
+              <Show
+                when={["retrying", "blocked", "auth"].includes(status().status)}
+              >
+                <button
+                  type="button"
+                  class="map-control"
+                  onClick={() => cloud?.retry()}
+                >
+                  Retry
+                </button>
+              </Show>
+            </div>
+          )}
+        </Show>
         <Show when={showLoad()}>
           <div id="saved-projects" class="border-t border-stone-200 pt-2">
             <p class="px-2 text-xs text-stone-500">Saved in this browser</p>
