@@ -36,7 +36,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if !args.is_empty() {
-        return Err("Usage: server [rebuild-read-models]".into());
+        let usage = "Usage: server [rebuild-read-models | compact-project <uuid> <owner-external-id> | backup-project <uuid> <owner-external-id> <file> | restore-project <uuid> <source-owner-external-id> <destination-owner-external-id> <file>]";
+        let expected = match args[0].as_str() {
+            "compact-project" => 3,
+            "backup-project" => 4,
+            "restore-project" => 5,
+            _ => return Err(usage.into()),
+        };
+        if args.len() != expected {
+            return Err(usage.into());
+        }
+        let id = project::parse_new_project_id(&args[1]).map_err(|_| "Invalid project UUID")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&std::env::var("DATABASE_URL")?)
+            .await?;
+        sqlx::migrate!().run(&pool).await?;
+        match args[0].as_str() {
+            "compact-project" => {
+                let owner = project::updates::backup::owner(&pool, &args[2])
+                    .await
+                    .map_err(|_| "Owner not found")?;
+                let metrics = project::updates::maintenance::compact(&pool, owner, id)
+                    .await
+                    .map_err(|_| "Compaction failed; source rows retained")?;
+                println!("{}", serde_json::to_string(&metrics)?);
+            }
+            "backup-project" => {
+                let archive = project::updates::backup::export(&pool, id, &args[2])
+                    .await
+                    .map_err(|_| "Backup validation failed")?;
+                archive.write(std::path::Path::new(&args[3]))?;
+                println!("Binary backup written for project {id}");
+            }
+            "restore-project" => {
+                let archive =
+                    project::updates::backup::Archive::read(std::path::Path::new(&args[4]))?;
+                project::updates::backup::restore(&pool, id, &args[2], &args[3], archive)
+                    .await
+                    .map_err(
+                        |_| "Restore refused or rolled back; check identities, archive and storage",
+                    )?;
+                println!("Canonical binary state restored for project {id}");
+                let owner = project::updates::backup::owner(&pool, &args[3])
+                    .await
+                    .map_err(|_| "Owner not found")?;
+                project::read_model::rebuild_project(&pool, owner, id).await.map_err(|_| "Binary restore committed; read-model rebuild failed. Run rebuild-read-models")?;
+                println!("Read models rebuilt");
+            }
+            _ => unreachable!(),
+        }
+        return Ok(());
     }
     let config = Config::from_env()?;
     let pool = PgPoolOptions::new()
@@ -56,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     project::read_model::start_worker(pool.clone());
+    project::updates::maintenance::start_worker(pool.clone());
 
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {

@@ -188,6 +188,22 @@ database configuration and does not start the API or require WorkOS credentials.
 See [ADR 0005](docs/architecture/0005-yjs-read-models.md) for the response shape,
 causal-gap/failure policy, worker limits, concurrency guarantees and repair runbook.
 
+## Safe checkpoints and binary backup/restore
+
+A bounded background worker consolidates complete CRDT updates into verified
+full-state V1 checkpoints and prunes covered binary log rows atomically. Pending
+causal gaps and uncertain encodings retain their original rows. Immutable receipt
+metadata survives pruning, and old replay cursors require a fresh baseline.
+
+Admin commands `compact-project`, `backup-project`, and `restore-project` use
+`DATABASE_URL` without starting the API. Binary archives preserve project UUID,
+CRDT clocks/deletes, explicit owner mapping, checksums, receipts and required
+tail; they are separate from user JSON import. See
+[ADR 0007](docs/architecture/0007-safe-checkpoints-and-backups.md) for coverage
+criteria, GC/undo behavior, triggers/metrics, command syntax, limits, measured
+replay costs and the coordinated database recovery runbook. Migration `0009`
+backfills receipts and adds maintenance metadata without resetting projects.
+
 ## Health check
 
 Open **/checkhealth** in the webapp for a status page showing whether the API

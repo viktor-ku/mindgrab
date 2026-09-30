@@ -13,6 +13,8 @@ pub(super) struct Candidate {
     pub state_vector: Vec<u8>,
     pub validation: &'static str,
     pub content: Option<Content>,
+    /// Only present after proving coverage of every source insertion and delete.
+    pub checkpoint: Option<Vec<u8>>,
 }
 
 fn node_id(id: &str) -> bool {
@@ -153,11 +155,16 @@ fn schema(doc: &Doc) -> Result<Content, ApiError> {
 
 /// Merge original bytes before applying to a fresh document. Never replay a
 /// gapped log into a cached room or build a baseline from observer output.
-pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> {
+fn build(updates: Vec<Vec<u8>>, checkpoint: bool) -> Result<Candidate, ApiError> {
     let mut decoded = Vec::with_capacity(updates.len());
+    let mut insertions = yrs::IdSet::new();
+    let mut deletes = yrs::IdSet::new();
     for bytes in updates {
         preflight(&bytes)?;
-        decoded.push(Update::decode_v1(&bytes).map_err(|_| ApiError::InvalidUpdate)?);
+        let update = Update::decode_v1(&bytes).map_err(|_| ApiError::InvalidUpdate)?;
+        insertions.merge_with(update.insertions(true));
+        deletes.merge_with(update.delete_set().clone());
+        decoded.push(update);
     }
     let merged = Update::merge_updates(decoded);
     let contiguous = merged.state_vector();
@@ -173,6 +180,7 @@ pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> 
     }
     let doc = Doc::with_options(Options {
         offset_kind: OffsetKind::Utf16,
+        skip_gc: true,
         ..Options::default()
     });
     doc.transact_mut()
@@ -183,10 +191,53 @@ pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> 
     let state_vector = txn.state_vector().encode_v1();
     drop(txn);
     let content = if pending { None } else { Some(schema(&doc)?) };
+    // #670/#673: neither successful encoding nor has_missing_updates proves
+    // coverage. Compare ALL original ranges (including GC) and delete sets with
+    // the full re-encoding, not just the merged contiguous vector. GC stays off
+    // so surviving item payloads/identities are not recreated from JSON.
+    let checkpoint = if checkpoint && !pending {
+        let encoded = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let check = Update::decode_v1(&encoded).map_err(|_| ApiError::InvalidUpdate)?;
+        if encoded.len() <= MAX_DOCUMENT_BYTES
+            && check.insertions(true) == insertions
+            && deletes.diff(check.delete_set()).is_empty()
+            && check.state_vector() == contiguous
+            && check.state_vector().encode_v1() == state_vector
+        {
+            let fresh = Doc::with_options(Options {
+                offset_kind: OffsetKind::Utf16,
+                skip_gc: true,
+                ..Options::default()
+            });
+            fresh
+                .transact_mut()
+                .apply_update(check)
+                .map_err(|_| ApiError::InvalidUpdate)?;
+            // The publication must also survive our production preflight and
+            // merge/reconstruct path, not merely a direct apply of decoded bytes.
+            // Yrs can encode states outside that path's safe subset.
+            let replay = reconstruct(vec![encoded.clone()]);
+            if !fresh.transact().has_missing_updates()
+                && schema(&fresh)? == *content.as_ref().unwrap()
+                && replay.is_ok_and(|c| c.validation == "valid" && c.content == content)
+            {
+                Some(encoded)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(Candidate {
         bytes,
         state_vector,
         content,
+        checkpoint,
         validation: if pending {
             "pending_dependencies"
         } else {
@@ -195,12 +246,31 @@ pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> 
     })
 }
 
+pub(super) fn reconstruct(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> {
+    build(updates, false)
+}
+
 pub(super) async fn candidate(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> {
+    bounded(updates, false).await
+}
+
+pub(super) async fn checkpoint_candidate(updates: Vec<Vec<u8>>) -> Result<Candidate, ApiError> {
+    bounded(updates, true).await
+}
+
+async fn bounded(updates: Vec<Vec<u8>>, checkpoint: bool) -> Result<Candidate, ApiError> {
     static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
     let permit = WORKERS.acquire().await.map_err(|_| ApiError::Unavailable)?;
     // Keep at most two decoded candidates resident across all project locks.
     let result = tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(|| reconstruct(updates)).unwrap_or(Err(ApiError::InvalidUpdate))
+        std::panic::catch_unwind(|| {
+            if checkpoint {
+                build(updates, true)
+            } else {
+                reconstruct(updates)
+            }
+        })
+        .unwrap_or(Err(ApiError::InvalidUpdate))
     })
     .await
     .map_err(|_| ApiError::Unavailable)?;
