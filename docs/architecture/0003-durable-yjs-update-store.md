@@ -1,6 +1,7 @@
 # ADR 0003: Durable Yjs V1 update storage
 
-Status: implemented by MIN-35. Builds on [ADR 0001](0001-yjs-document-contract.md).
+Status: implemented by MIN-35; checkpoint/receipt maintenance is extended by
+[ADR 0007](0007-safe-checkpoints-and-backups.md) (MIN-39). Builds on [ADR 0001](0001-yjs-document-contract.md).
 Yrs remains exactly `0.28.0` with `small-client` and UTF-16 offsets; no upstream
 patch or alternate CRDT service is used.
 
@@ -105,19 +106,14 @@ An allocation-free V1 preflight bounds counts to actual remaining input and
 200,000 entries, atomic JSON nesting to 16, UTF-8 and clock arithmetic before
 Yrs decoding. At most two candidate workers run across all projects.
 
-Until MIN-39 implements checkpoint maintenance, reconstruction additionally
-bounds the retained checkpoint plus tail inputs to 10 MiB and the tail to 10,000
-rows. Reaching that budget returns 413 and requires checkpoint maintenance;
-updates are never silently dropped. These are deliberately conservative work
-limits, not a promise that every document with a 10 MiB visible encoding fits.
-
-No compaction worker or raw-row deletion is introduced here. A future checkpoint
-worker **must acquire the same project row lock**, verify checksum and covered
-sequence, and prove causal completeness before retiring bytes. Receipt identities
-and original immutable responses must survive compaction; raw-row removal without
-an independent receipt archive would break retries. `load` verifies checksums
-and requires a gapless committed tail after the checkpoint. Never compact based
-only on `has_missing_updates`, an observer event or a state-vector diff.
+Reconstruction bounds checkpoint plus tail inputs to 10 MiB and the tail to
+10,000 rows. Reaching that budget returns 413; accepted updates are never dropped.
+[ADR 0007](0007-safe-checkpoints-and-backups.md) specifies earlier maintenance
+triggers, sufficient coverage checks, atomic publication/pruning, retained
+receipt identities, canonical binary backups and recovery commands. Unsafe
+states keep their source rows. Raw replay with a cursor older than the published
+checkpoint returns `409 baseline_required`; obtain and persist a new baseline
+before resuming. Receipt retries remain valid after binary row pruning.
 
 ## Verification
 

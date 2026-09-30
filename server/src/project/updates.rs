@@ -1,6 +1,8 @@
 //! Shared HTTP/WebSocket durable ingestion boundary. A returned receipt always
 //! follows PostgreSQL COMMIT; no live room is mutated during candidate validation.
+pub(crate) mod backup;
 mod document;
+pub(crate) mod maintenance;
 mod wire;
 
 use std::sync::Arc;
@@ -31,7 +33,7 @@ use crate::auth::AppState;
 pub(crate) const MAX_UPDATE_BYTES: usize = 1_048_576;
 const MAX_DOCUMENT_BYTES: usize = 10_485_760;
 const MAX_PAGE_BYTES: usize = 2_097_152;
-// Bound reconstruction work until MIN-39 supplies checkpoint maintenance.
+// Hard reconstruction budgets; maintenance triggers well below these limits.
 const MAX_TAIL_ROWS: i64 = 10_000;
 
 pub(super) fn router() -> Router<Arc<AppState>> {
@@ -89,15 +91,17 @@ pub(super) async fn load(
     id: Uuid,
     last: i64,
 ) -> Result<Vec<Vec<u8>>, ApiError> {
-    let checkpoint: Option<(i64, Vec<u8>, String)> = sqlx::query_as(
-        "SELECT covered_sequence, data, sha256 FROM crdt_checkpoint WHERE project_id = $1",
+    let checkpoint: Option<(i64, Vec<u8>, String, i16, String)> = sqlx::query_as(
+        "SELECT covered_sequence, data, sha256, checkpoint_version, encoding FROM crdt_checkpoint WHERE project_id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *connection)
     .await?;
     let mut updates = Vec::new();
     let covered = match checkpoint {
-        Some((covered, bytes, sha256)) if covered <= last && digest(&bytes) == sha256 => {
+        Some((covered, bytes, sha256, 1, encoding))
+            if covered <= last && encoding == "yjs-v1" && digest(&bytes) == sha256 =>
+        {
             updates.push(bytes);
             covered
         }
@@ -146,10 +150,10 @@ pub(crate) async fn ingest(
     if project.schema_version != 1 || project.protocol_version != 1 {
         return Err(ApiError::UnsupportedSchema);
     }
-    let previous: Option<(Vec<u8>, i64, String, String)> = sqlx::query_as("SELECT data, sequence, sha256, validation FROM crdt_update WHERE project_id = $1 AND update_id = $2")
+    let previous: Option<(i32, i64, String, String)> = sqlx::query_as("SELECT byte_length, sequence, sha256, validation FROM crdt_receipt WHERE project_id = $1 AND update_id = $2")
         .bind(id).bind(update_id).fetch_optional(&mut *transaction).await?;
     if let Some((stored, sequence, sha256, validation)) = previous {
-        if stored != bytes {
+        if stored as usize != bytes.len() || sha256 != digest(&bytes) {
             return Err(ApiError::UpdateIdConflict);
         }
         transaction.commit().await?;
@@ -290,18 +294,30 @@ async fn replay(
     {
         return Err(ApiError::NotFound);
     }
+    let mut transaction = state.pool.begin().await?;
+    lock_project(&mut transaction, id, owner.id).await?;
+    let covered: i64 = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT covered_sequence FROM crdt_checkpoint WHERE project_id = $1), 0)",
+    )
+    .bind(id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if after < covered {
+        return Err(ApiError::BaselineRequired);
+    }
     // Select a bounded byte window in SQL so a page never allocates 100 MiB.
     let rows: Vec<(i64, Uuid, String, Vec<u8>)> = sqlx::query_as(
         "WITH page AS (SELECT sequence, update_id, sha256, octet_length(data) AS size FROM crdt_update WHERE project_id = $1 AND sequence > $2 ORDER BY sequence LIMIT $3), sized AS (SELECT *, SUM(size) OVER (ORDER BY sequence) AS total FROM page) SELECT u.sequence, u.update_id, u.sha256, u.data FROM sized p JOIN crdt_update u ON u.project_id = $1 AND u.sequence = p.sequence WHERE p.total <= $4 ORDER BY u.sequence")
-        .bind(id).bind(after).bind(i64::from(limit)).bind(MAX_PAGE_BYTES as i64).fetch_all(&state.pool).await?;
+        .bind(id).bind(after).bind(i64::from(limit)).bind(MAX_PAGE_BYTES as i64).fetch_all(&mut *transaction).await?;
     let next = rows.last().map_or(after, |row| row.0);
     let has_more: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM crdt_update WHERE project_id = $1 AND sequence > $2)",
     )
     .bind(id)
     .bind(next)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     let updates: Vec<_> = rows.into_iter().map(|(seq, update, sha256, bytes)| json!({"sequence": seq.to_string(), "updateId": update, "sha256": sha256, "encoding": "yjs-v1", "data": STANDARD.encode(bytes)})).collect();
     Ok(Json(
         json!({"updates": updates, "nextAfter": next.to_string(), "hasMore": has_more}),

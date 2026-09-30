@@ -79,6 +79,7 @@ pub(crate) enum ApiError {
     InvalidSchema,
     ResourceLimit,
     UpdateIdConflict,
+    BaselineRequired,
     Quarantined,
     Unavailable,
 }
@@ -150,6 +151,11 @@ impl IntoResponse for ApiError {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "resource_limit",
                 "The update or document exceeds a resource limit.",
+            ),
+            Self::BaselineRequired => (
+                StatusCode::CONFLICT,
+                "baseline_required",
+                "The replay cursor was compacted. Persist a fresh baseline before continuing.",
             ),
             Self::UpdateIdConflict => (
                 StatusCode::CONFLICT,
@@ -240,7 +246,7 @@ fn parse_project_id(value: &str) -> Result<Uuid, ApiError> {
         .ok_or(ApiError::InvalidProjectId)
 }
 
-fn parse_new_project_id(value: &str) -> Result<Uuid, ApiError> {
+pub(crate) fn parse_new_project_id(value: &str) -> Result<Uuid, ApiError> {
     let id = parse_project_id(value)?;
     if id.get_version() == Some(Version::Random) && id.get_variant() == Variant::RFC4122 {
         Ok(id)

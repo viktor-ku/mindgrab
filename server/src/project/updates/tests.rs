@@ -144,7 +144,7 @@ pub(crate) fn javascript(input: Value) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-async fn process_baseline(pool: &PgPool, id: Uuid) -> Value {
+pub(crate) async fn process_baseline(pool: &PgPool, id: Uuid) -> Value {
     let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
         .bind(id)
         .fetch_one(pool)
@@ -205,7 +205,12 @@ fn restart_probe() {
     });
 }
 
-async fn assert_baseline(state: &Arc<AppState>, cookie: &str, id: Uuid, expected: &Value) {
+pub(crate) async fn assert_baseline(
+    state: &Arc<AppState>,
+    cookie: &str,
+    id: Uuid,
+    expected: &Value,
+) {
     let (status, baseline) = get(state, cookie, id, "baseline").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(baseline["validation"], "valid");
@@ -577,7 +582,17 @@ async fn reconstruction_uses_checkpoint_and_committed_tail(pool: PgPool) {
     let id = register(&f.state, &cookie).await;
     let initial = binary(&data["initial"]);
     put(&f.state, &cookie, id, new_id(), &initial).await;
-    sqlx::query("INSERT INTO crdt_checkpoint (project_id, covered_sequence, data, sha256) VALUES ($1, 1, $2, $3)").bind(id).bind(&initial).bind(digest(&initial)).execute(&f.state.pool).await.unwrap();
+    let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
+        .bind(id)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        maintenance::compact(&f.state.pool, owner, id)
+            .await
+            .unwrap()
+            .coverage
+    );
     for update in data["causal"].as_array().unwrap().iter().rev() {
         put(&f.state, &cookie, id, new_id(), &binary(update)).await;
     }
@@ -671,6 +686,11 @@ async fn every_golden_fixture_converges_through_shuffled_duplicate_api_delivery(
         }
         let fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         let id = register(&f.state, &cookie).await;
+        let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
+            .bind(id)
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
         for update in fixture["updates"].as_array().unwrap().iter().rev() {
             let bytes = std::fs::read(directory.join(update.as_str().unwrap())).unwrap();
             let update_id = new_id();
@@ -681,6 +701,9 @@ async fn every_golden_fixture_converges_through_shuffled_duplicate_api_delivery(
                 "{}: {receipt:?}",
                 file.display()
             );
+            maintenance::compact(&f.state.pool, owner, id)
+                .await
+                .unwrap();
             assert_eq!(
                 put(&f.state, &cookie, id, update_id, &bytes).await.1,
                 receipt.1
