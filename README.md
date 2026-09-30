@@ -291,6 +291,7 @@ mise run webapp:test
 mise run webapp:test:browser
 mise run webapp:test:cloud
 mise run webapp:test:offline
+mise run test:release
 ```
 
 `webapp:test:browser` drives the editor in headless Chromium through Playwright
@@ -311,3 +312,5 @@ project catalog, durability notifications, and failure handling — is specified
 in [ADR 0002](docs/architecture/0002-local-project-repository.md), with its
 storage lifecycle APIs tested against real Chromium IndexedDB by
 `mise run webapp:test`.
+
+Release regression setup, fault scenarios, fixtures and acceptance budgets: [local-first release gate](docs/release-regression.md).

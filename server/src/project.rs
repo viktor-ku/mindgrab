@@ -6,6 +6,8 @@
 mod legacy;
 mod projection;
 pub(crate) mod read_model;
+#[cfg(test)]
+mod release_tests;
 mod sync;
 pub(crate) mod updates;
 

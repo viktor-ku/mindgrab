@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["bun", "vite/client"],
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.release.tsbuildinfo"
+  },
+  "include": [
+    "tests/browser/release-harness.ts",
+    "tests/browser/release.integration.ts"
+  ]
+}

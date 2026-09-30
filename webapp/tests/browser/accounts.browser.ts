@@ -593,3 +593,62 @@ test("a focus event during an old session check queues a fresh account check", a
     (await call("catalog", "account-2")).some((entry) => entry.id === previous),
   ).toBe(false);
 });
+
+test("durable hints recover the workspace and logout when localStorage is missing or stale", async () => {
+  await login();
+  await rename("Crash hint recovery");
+  await cloudSaved();
+  const id = await call("id");
+  const stale = await page.evaluate(() =>
+    localStorage.getItem(
+      `mindgrab/${encodeURIComponent(location.origin)}/auth`,
+    ),
+  );
+  backend.meStatus = 503;
+  await page.evaluate(() =>
+    localStorage.removeItem(
+      `mindgrab/${encodeURIComponent(location.origin)}/auth`,
+    ),
+  );
+  await page.reload();
+  await ready();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  expect(await call("id")).toBe(id);
+  expect(await page.getByLabel("Project name").inputValue()).toBe(
+    "Crash hint recovery",
+  );
+  backend.meStatus = undefined;
+  await refreshAccount();
+  await cloudSaved();
+  backend.leaveCookieOnLogout = true;
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.evaluate((stale) => {
+    if (stale)
+      localStorage.setItem(
+        `mindgrab/${encodeURIComponent(location.origin)}/auth`,
+        stale,
+      );
+  }, stale);
+  await page.reload();
+  await ready();
+  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  expect(await call("id")).not.toBe(id);
+  expect(await page.getByText(A.name, { exact: true }).count()).toBe(0);
+});
+
+test("an aborted durable account hint prevents logout acknowledgement and can be retried", async () => {
+  await login();
+  await cloudSaved();
+  const id = await call("id");
+  await call("failAuthDatabase", true);
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByText(/Could not save your project before leaving/).waitFor();
+  expect(backend.logoutRequests).toBe(0);
+  expect(await call("id")).toBe(id);
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await call("failAuthDatabase", false);
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  expect(backend.logoutRequests).toBe(1);
+});

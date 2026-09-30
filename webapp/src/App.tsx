@@ -390,6 +390,18 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     );
   }
 
+  async function initializeWorkspace() {
+    await auth.hydrate();
+    if (disposed) return;
+    if (auth.state.user?.id !== activeUserId) await accountChanged(auth.state);
+    else {
+      setAccount(auth.state);
+      watchCatalog(repository);
+      await openLatestOrCreate(repository);
+    }
+    if (!disposed) auth.start();
+  }
+
   function watchCatalog(owner: ProjectRepository) {
     const refresh = () => {
       void owner
@@ -654,6 +666,38 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     ContextMenuState | undefined
   >();
   const [nodeSizes, setNodeSizes] = createSignal(new Map<string, NodeSize>());
+  const measuredSizes = new Map<string, NodeSize>();
+  let sizeFrame: number | undefined;
+  // ResizeObserver delivers one callback per mounted node. Publish their sizes
+  // once per frame so opening a large map performs one layout, not N layouts.
+  function measureNode(id: string, size: NodeSize) {
+    measuredSizes.set(id, size);
+    if (sizeFrame !== undefined) return;
+    sizeFrame = requestAnimationFrame(() => {
+      sizeFrame = undefined;
+      const live = visibleIds();
+      setNodeSizes((current) => {
+        let next = current;
+        for (const [id, size] of measuredSizes) {
+          if (!live.has(id)) continue;
+          const previous = current.get(id);
+          if (
+            previous?.width === size.width &&
+            previous?.height === size.height
+          )
+            continue;
+          if (next === current) next = new Map(current);
+          next.set(id, size);
+        }
+        return next;
+      });
+      measuredSizes.clear();
+    });
+  }
+  onCleanup(() => {
+    if (sizeFrame !== undefined) cancelAnimationFrame(sizeFrame);
+    measuredSizes.clear();
+  });
   const [layoutAnchor, setLayoutAnchor] = createSignal<LayoutAnchor>();
   // A drag renders as a local preview over the current document and commits
   // once on release.
@@ -867,6 +911,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   async function retryLocalSaving() {
+    if (!activeHandle) await initializeWorkspace();
     for (const recovery of [...parked]) {
       await recovery.handle.flush();
       await recovery.handle.close();
@@ -916,7 +961,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed)
         return false;
-      auth.prepareNavigation(action);
+      await auth.prepareNavigation(action);
       leaving = true;
       return true;
     } catch {
@@ -1257,12 +1302,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   onMount(() => {
-    const initialRepository = repository;
-    watchCatalog(initialRepository);
     const stopAuth = auth.subscribe((state) => void accountChanged(state));
-    auth.start();
-    void openLatestOrCreate(initialRepository).catch((error) => {
-      if (repository !== initialRepository || disposed) return;
+    void initializeWorkspace().catch((error) => {
+      if (disposed) return;
       setStorageMessage(
         error instanceof Error
           ? error.message
@@ -1838,17 +1880,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                 selected={selectedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
-                onSize={(size) =>
-                  setNodeSizes((current) => {
-                    const previous = current.get(id);
-                    if (
-                      previous?.width === size.width &&
-                      previous?.height === size.height
-                    )
-                      return current;
-                    return new Map(current).set(id, size);
-                  })
-                }
+                onSize={(size) => measureNode(id, size)}
                 onSelect={() => select(id)}
                 onWrite={() => write(id)}
                 onFinish={() => {
