@@ -26,15 +26,12 @@ import {
   createSibling,
   deleteSubtree,
   LIMITS,
-  materializeProject,
   ORIGIN,
-  projectMindMap,
   renameProject,
   reorderNode,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
-import { openSnapshot, snapshotProject } from "./project-snapshot";
 import { createProjectView } from "./project-view";
 import { bindTextarea } from "./text-binding";
 import { retainUndoHistory } from "./undo-history";
@@ -45,11 +42,18 @@ import {
 } from "./project-repository";
 import type { CatalogEntry, ProjectHandle } from "./project-repository";
 import type { Project } from "./project-schema";
-import { parseProject } from "./projects";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
-import { readProjectFile, writeProjectFile } from "./project-import-export";
+import {
+  exportProjectDocument,
+  parseProjectFile,
+  prepareProjectImport,
+  PROJECT_FILE_MAX_BYTES,
+  ProjectFileError,
+  readProjectFile,
+  writeProjectFile,
+} from "./project-import-export";
 import { AccountControls } from "./AccountControls";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
@@ -349,7 +353,9 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             : "error",
       );
       if (durability.status === "unsaved")
-        setStorageMessage(durability.error.message);
+        setStorageMessage(
+          `${durability.error.message} Export a copy to keep your changes.`,
+        );
       else if (durability.status === "saved") setStorageMessage("");
     });
     if (previous && previous !== handle) await previous.close();
@@ -835,14 +841,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  function currentProject(): Project {
-    return snapshotProject(session().doc, layoutAnchor(), {
-      left: left(),
-      top: top(),
-      zoom: zoom(),
-    });
-  }
-
   async function save() {
     finishWriting();
     finishProjectName();
@@ -964,12 +962,20 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     finishProjectName();
     setFileBusy(true);
     try {
-      const project = currentProject();
-      await writeProjectFile(project);
-      setStorageMessage(`Exported “${project.name}”.`);
+      const name = view().name();
+      const json = exportProjectDocument(session().doc, {
+        viewport: { left: left(), top: top(), zoom: zoom() },
+        ...(layoutAnchor() && { anchor: layoutAnchor() }),
+      });
+      await writeProjectFile(name, json);
+      setStorageMessage(`Exported “${name}”.`);
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
-        setStorageMessage("Could not export this project.");
+        setStorageMessage(
+          error instanceof Error
+            ? error.message
+            : "Could not export this project.",
+        );
       }
     } finally {
       setFileBusy(false);
@@ -981,63 +987,42 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     setFileBusy(true);
     const owner = repository;
     try {
-      await activeHandle?.flush();
       const file = await readProjectFile();
       if (!file || owner !== repository || disposed) return;
-      const imported = parseProject(await file.text());
-      const existing = await owner.list();
+      if (file.size > PROJECT_FILE_MAX_BYTES)
+        throw new ProjectFileError(
+          "Project file exceeds the 10 MiB size limit.",
+        );
+      const imported = parseProjectFile(await file.text());
       if (owner !== repository || disposed) return;
-      const baseName = imported.name;
-      let name = baseName;
-      let suffix = 2;
-      while (existing.some((entry) => entry.name === name))
-        name = `${baseName} (copy ${suffix++})`;
-      const normalized = { ...imported, name };
-      const importedDoc = openSnapshot(normalized).doc;
-      const content = materializeProject(importedDoc);
-      importedDoc.destroy();
-      const roots = projectMindMap(content);
-      const first = roots[0];
-      const handle = await owner.create({
-        name,
-        root: first && {
-          id: first.id,
-          text: first.text,
-          color: first.color,
-          position: first.position,
-        },
-      });
-      const addBranch = (parentId: string, children: MindMapNode[]) => {
-        for (const child of children) {
-          const id = createChild(handle.doc, parentId, {
-            id: child.id,
-            text: child.text,
-            color: child.color,
-            position: child.position,
-          });
-          if (id) addBranch(id, child.next ?? []);
-        }
-      };
-      if (first) addBranch(first.id, first.next ?? []);
-      for (const root of roots.slice(1)) {
-        const id = createRoot(handle.doc, {
-          id: root.id,
-          text: root.text,
-          color: root.color,
-          position: root.position,
-        });
-        if (id) addBranch(id, root.next ?? []);
+      const { content, preferences } = prepareProjectImport(imported);
+      await activeHandle?.flush();
+      if (owner !== repository || disposed) return;
+      const handle = await owner.importContent(content);
+      if (owner !== repository || disposed) {
+        await handle.close();
+        return;
       }
-      await handle.flush();
+      if (preferences)
+        await owner
+          .setPreference(`project/${handle.id}/view`, {
+            left: 0,
+            top: 0,
+            zoom: 1,
+            ...preferences.viewport,
+            ...(preferences.anchor && { anchor: preferences.anchor }),
+          })
+          .catch(() => {});
       await activate(handle, owner);
       if (owner !== repository || disposed) return;
-      setStorageMessage(`Imported “${name}”.`);
+      await owner.setLatestProject(handle.id).catch(() => {});
+      setStorageMessage(`Imported “${content.metadata.name}”.`);
     } catch (error) {
       if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
-          error instanceof Error && error.message.includes("invalid")
-            ? "This file is not a valid Mindgrab project or uses an unsupported version."
+          error instanceof Error
+            ? error.message
             : "Could not import this project file.",
         );
       }
@@ -1546,23 +1531,29 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         <fieldset
           class="flex flex-wrap items-center text-sm"
           aria-label="Project actions"
-          disabled={!storageReady() || fileBusy()}
+          disabled={fileBusy()}
         >
           <button
             type="button"
             class="map-control"
+            disabled={!storageReady()}
             onClick={() => void createNewProject()}
           >
             New
           </button>
-          <button type="button" class="map-control" onClick={save}>
+          <button
+            type="button"
+            class="map-control"
+            disabled={!storageReady()}
+            onClick={save}
+          >
             Save
           </button>
           <button
             type="button"
             class="map-control"
             aria-label="Undo"
-            disabled={!canUndo()}
+            disabled={!storageReady() || !canUndo()}
             onClick={undo}
           >
             Undo
@@ -1571,7 +1562,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             type="button"
             class="map-control"
             aria-label="Redo"
-            disabled={!canRedo()}
+            disabled={!storageReady() || !canRedo()}
             onClick={redo}
           >
             Redo
@@ -1581,6 +1572,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             class="map-control"
             aria-expanded={showLoad()}
             aria-controls="saved-projects"
+            disabled={!storageReady()}
             onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
           >
             Load
@@ -1588,6 +1580,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
           <button
             type="button"
             class="map-control"
+            disabled={!storageReady()}
             onClick={() => void importProjectFromFile()}
           >
             Import

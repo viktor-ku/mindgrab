@@ -2,13 +2,14 @@ import { IndexeddbPersistence, PREFERRED_TRIM_SIZE } from "y-indexeddb";
 import * as Y from "yjs";
 import {
   createProjectDocument,
+  importProjectDocument,
   isNodeId,
   ORIGIN,
   openProjectDocument,
   projectName,
   readProject,
 } from "./project-document";
-import type { NewNode, ProjectState } from "./project-document";
+import type { NewNode, ProjectContent, ProjectState } from "./project-document";
 
 // Lifecycle and guarantees: docs/architecture/0002-local-project-repository.md.
 export const STORAGE_GENERATION = 1;
@@ -21,6 +22,7 @@ const UPDATES = "updates";
 const PROJECTS = "projects";
 const PREFERENCES = "preferences";
 const LATEST_PROJECT = "latestProject";
+const pendingImportKey = (id: string) => `pendingImport/${id}`;
 const DEFAULT_OPEN_TIMEOUT_MS = 10_000;
 const TRIM_DELAY_MS = 1000;
 
@@ -107,6 +109,47 @@ function factory(): IDBFactory {
     throw storageError(error, "unavailable");
   }
   throw new StorageError("unavailable");
+}
+
+function deleteDatabase(name: string, timeoutMs: number): Promise<void> {
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      const deletion = factory().deleteDatabase(name);
+      deletion.onsuccess = () => resolve();
+      deletion.onerror = () => reject(storageError(deletion.error, "aborted"));
+    }),
+    timeoutMs,
+  );
+}
+
+async function persistImportedSeed(
+  name: string,
+  seed: Y.Doc,
+  timeoutMs: number,
+) {
+  let created = false;
+  const db = await openDatabase(name, timeoutMs, (db) => {
+    created = true;
+    // The y-indexeddb database layout; hydration starts only after this commit.
+    db.createObjectStore(UPDATES, { autoIncrement: true });
+    db.createObjectStore("custom");
+  });
+  if (!db) throw new StorageError("open");
+  try {
+    if (!created) throw new ProjectExistsError(seed.guid);
+    const tx = db.transaction([UPDATES], "readwrite");
+    const done = committed(tx);
+    try {
+      tx.objectStore(UPDATES).add(Y.encodeStateAsUpdate(seed));
+    } catch (error) {
+      tx.abort();
+      await done.catch(() => {});
+      throw storageError(error, "aborted");
+    }
+    await done;
+  } finally {
+    db.close();
+  }
 }
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
@@ -294,6 +337,12 @@ class Catalog {
     const store = await this.#transaction(PREFERENCES, "readwrite");
     if (value === undefined) store.delete(key);
     else store.put(value, key);
+    await committed(store.transaction);
+  }
+
+  async remove(id: string) {
+    const store = await this.#transaction(PROJECTS, "readwrite");
+    store.delete(id);
     await committed(store.transaction);
   }
 
@@ -696,6 +745,7 @@ export class ProjectRepository {
   readonly #catalog: Catalog;
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #listeners = new Set<() => void>();
+  readonly #pendingImports = new Set<string>();
   readonly #channel?: BroadcastChannel;
   #closed = false;
   #detached = false;
@@ -715,22 +765,66 @@ export class ProjectRepository {
   // Seeds only an explicitly new UUID, and registers it after the seed commits.
   async create({ id = crypto.randomUUID(), name, root }: NewProject) {
     const seed = createProjectDocument(id, name, root);
+    return this.#createFromSeed(id, seed);
+  }
+
+  // Imports complete validated content as one update under a fresh project UUID.
+  async importContent(content: ProjectContent) {
+    const id = crypto.randomUUID();
+    const seed = importProjectDocument(id, content);
+    return this.#createFromSeed(id, seed, true);
+  }
+
+  async #createFromSeed(id: string, seed: Y.Doc, importing = false) {
+    if (importing) this.#pendingImports.add(id);
     let handle: ProjectHandle | undefined;
     try {
+      if (importing) {
+        // Other tabs must not discover a durable seed before its catalog commit.
+        await this.#catalog.setPreference(pendingImportKey(id), true);
+        await persistImportedSeed(
+          this.names.project(id),
+          seed,
+          this.#timeoutMs,
+        );
+      }
       handle = await this.#acquire(id);
-      const { store } = handle.doc;
-      if (store.clients.size || store.pendingStructs || store.pendingDs)
-        throw new ProjectExistsError(id);
-      Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(seed), ORIGIN.create);
+      if (!importing) {
+        const { store } = handle.doc;
+        if (store.clients.size || store.pendingStructs || store.pendingDs)
+          throw new ProjectExistsError(id);
+        Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(seed), ORIGIN.create);
+      }
       await handle.flush();
       await handle.refreshMetadata();
-      await this.setLatestProject(id).catch(() => {});
+      if (importing)
+        await this.#catalog
+          .setPreference(pendingImportKey(id), undefined)
+          .catch(() => {});
+      else await this.setLatestProject(id).catch(() => {});
       return handle;
     } catch (error) {
       await handle?.close();
-      throw error;
+      if (importing && !(error instanceof ProjectExistsError)) {
+        // Remove durable seed data as well, so catalog recovery cannot surface
+        // an import whose catalog transaction failed.
+        await this.#catalog.remove(id).catch(() => {});
+        await deleteDatabase(this.names.project(id), this.#timeoutMs)
+          .then(() =>
+            this.#catalog.setPreference(pendingImportKey(id), undefined),
+          )
+          .catch(() => {});
+      } else if (importing) {
+        await this.#catalog
+          .setPreference(pendingImportKey(id), undefined)
+          .catch(() => {});
+      }
+      throw importing && !(error instanceof ProjectExistsError)
+        ? storageError(error, "aborted")
+        : error;
     } finally {
       seed.destroy();
+      this.#pendingImports.delete(id);
     }
   }
 
@@ -943,6 +1037,7 @@ export class ProjectRepository {
   }
 
   #metadataChanged(session: ProjectSession) {
+    if (this.#pendingImports.has(session.id)) return;
     const name = projectName(session.doc);
     if (name === undefined) return;
     if (session.registered && name === session.catalogName) return;
@@ -998,6 +1093,11 @@ export class ProjectRepository {
   }
 
   async #recover(id: string) {
+    if (
+      this.#pendingImports.has(id) ||
+      (await this.#catalog.preference(pendingImportKey(id)))
+    )
+      return;
     const name = await readStoredName(
       this.names.project(id),
       id,
