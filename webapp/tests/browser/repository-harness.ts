@@ -2,6 +2,7 @@
 import * as Y from "yjs";
 import * as project from "../../src/project-document";
 import * as storage from "../../src/project-repository";
+import * as files from "../../src/project-import-export";
 
 // Open IndexedDB connections by database name, for leak checks.
 const connections = new Map<string, number>();
@@ -70,6 +71,7 @@ const harness = {
   Y,
   project,
   storage,
+  files,
   repo: undefined as unknown as storage.ProjectRepository,
   open(scope: Partial<storage.RepositoryOptions> = {}) {
     harness.repo = new storage.ProjectRepository({

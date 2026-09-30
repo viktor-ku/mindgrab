@@ -621,3 +621,266 @@ describe("IndexedDB project repository", () => {
     TIMEOUT,
   );
 });
+
+describe("portable project imports", () => {
+  test(
+    "imports the same file twice as independent offline documents",
+    () =>
+      withContext(async (context) => {
+        const page = await tab(context);
+        await context.setOffline(true);
+        const result = await page.evaluate(async () => {
+          const repo = mg.open();
+          const active = await repo.create({
+            name: "Same",
+            root: { text: "Original" },
+          });
+          const [root] = mg.project.projectForest(mg.content(active));
+          mg.project.createChild(active.doc, root.id, {
+            text: "Child\n😀",
+            position: { x: -12, y: 9 },
+          });
+          const json = mg.files.exportProjectDocument(active.doc);
+          await active.flush();
+          const file = mg.files.parseProjectFile(json);
+          const first = await repo.importContent(
+            mg.files.prepareProjectImport(file).content,
+          );
+          const second = await repo.importContent(
+            mg.files.prepareProjectImport(file).content,
+          );
+          const before = mg.content(second);
+          const firstRoot = Object.keys(mg.content(first).nodes)[0];
+          mg.project.replaceNodeText(first.doc, firstRoot, "First only");
+          await first.flush();
+          const undo = new mg.Y.UndoManager(second.doc.getMap("project"), {
+            trackedOrigins: new Set([mg.project.ORIGIN.local]),
+          });
+          return {
+            online: navigator.onLine,
+            ids: [active.id, first.id, second.id],
+            nodeIds: [active, first, second].map((handle) =>
+              Object.keys(mg.content(handle).nodes),
+            ),
+            names: (await repo.list()).map(({ name }) => name),
+            unchanged:
+              JSON.stringify(before) === JSON.stringify(mg.content(second)),
+            undo: undo.canUndo(),
+            latest: await repo.latestProject(),
+            content: before,
+          };
+        });
+        expect(result.online).toBe(false);
+        expect(new Set(result.ids).size).toBe(3);
+        expect(new Set(result.nodeIds.flat()).size).toBe(6);
+        expect(result.names).toEqual(["Same", "Same", "Same"]);
+        expect(result.unchanged).toBe(true);
+        expect(result.undo).toBe(false);
+        expect(result.latest).toBe(result.ids[0]);
+        await reload(page);
+        const reopened = await page.evaluate(
+          async (id) => mg.content(await mg.open().open(id)),
+          result.ids[2],
+        );
+        expect(reopened).toEqual(result.content);
+      }),
+    TIMEOUT,
+  );
+
+  for (const [database, store] of [
+    ["/project/", "updates"],
+    ["/catalog", "projects"],
+  ]) {
+    test(
+      `failed ${store} commits leave no imported document or catalog entry`,
+      () =>
+        withContext(async (context) => {
+          const page = await tab(context);
+          const result = await page.evaluate(
+            async ([database, store]) => {
+              const repo = mg.open();
+              const active = await repo.create({
+                name: "Kept",
+                root: { text: "Keep me" },
+              });
+              const before = mg.content(active);
+              const databases = (await indexedDB.databases())
+                .map(({ name }) => name)
+                .sort();
+              const file = mg.files.parseProjectFile(
+                mg.files.exportProjectDocument(active.doc),
+              );
+              mg.failWrites(database, store);
+              const error = await repo
+                .importContent(mg.files.prepareProjectImport(file).content)
+                .then(
+                  () => "unexpected success",
+                  (error: Error) => error.name,
+                );
+              mg.clearFaults();
+              return {
+                error,
+                before,
+                after: mg.content(active),
+                list: (await repo.list()).map(({ id, name }) => ({ id, name })),
+                latest: await repo.latestProject(),
+                id: active.id,
+                databases,
+                afterDatabases: (await indexedDB.databases())
+                  .map(({ name }) => name)
+                  .sort(),
+              };
+            },
+            [database, store],
+          );
+          expect(result.error).toBe("StorageError");
+          expect(result.after).toEqual(result.before);
+          expect(result.list).toEqual([{ id: result.id, name: "Kept" }]);
+          expect(result.latest).toBe(result.id);
+          expect(result.afterDatabases).toEqual(result.databases);
+          await reload(page);
+          expect(
+            await page.evaluate(async () =>
+              (await mg.open().list()).map(({ name }) => name),
+            ),
+          ).toEqual(["Kept"]);
+        }),
+      TIMEOUT,
+    );
+  }
+
+  test(
+    "exports in-memory edits while document writes fail",
+    () =>
+      withContext(async (context) => {
+        const page = await tab(context);
+        const result = await page.evaluate(async () => {
+          const handle = await mg
+            .open()
+            .create({ name: "Unsaved", root: { text: "Before" } });
+          const root = Object.keys(mg.content(handle).nodes)[0];
+          mg.failWrites("/project/", "updates");
+          mg.project.replaceNodeText(handle.doc, root, "Kept offline\n😀");
+          await mg.until(handle, "unsaved");
+          const file = mg.files.parseProjectFile(
+            mg.files.exportProjectDocument(handle.doc),
+          );
+          mg.clearFaults();
+          return { file, status: handle.durability().status };
+        });
+        expect(result.status).toBe("unsaved");
+        expect(result.file.project.nodes[0].text).toBe("Kept offline\n😀");
+      }),
+    TIMEOUT,
+  );
+});
+
+test(
+  "an interrupted import seed stays out of catalog recovery in another tab and after reload",
+  () =>
+    withContext(async (context) => {
+      const first = await tab(context);
+      const second = await tab(context);
+      const staged = await first.evaluate(async () => {
+        const repo = mg.open();
+        const active = await repo.create({ name: "Active", root: {} });
+        const id = crypto.randomUUID();
+        // A crash after the seed commit leaves this durable pending marker.
+        const catalog = await new Promise<IDBDatabase>((resolve) => {
+          const open = indexedDB.open(repo.names.catalog);
+          open.onsuccess = () => resolve(open.result);
+        });
+        const mark = catalog.transaction(["preferences"], "readwrite");
+        const marked = new Promise<void>((resolve) => {
+          mark.oncomplete = () => resolve();
+        });
+        mark.objectStore("preferences").put(true, `pendingImport/${id}`);
+        await marked;
+        catalog.close();
+        const seed = mg.project.createProjectDocument(
+          id,
+          "Interrupted import",
+          { text: "Complete seed" },
+        );
+        const db = await new Promise<IDBDatabase>((resolve) => {
+          const open = indexedDB.open(repo.names.project(id));
+          open.onupgradeneeded = () => {
+            open.result.createObjectStore("updates", { autoIncrement: true });
+            open.result.createObjectStore("custom");
+          };
+          open.onsuccess = () => resolve(open.result);
+        });
+        const write = db.transaction(["updates"], "readwrite");
+        const saved = new Promise<void>((resolve) => {
+          write.oncomplete = () => resolve();
+        });
+        write.objectStore("updates").add(mg.Y.encodeStateAsUpdate(seed));
+        await saved;
+        db.close();
+        seed.destroy();
+        return { active: active.id, staged: id };
+      });
+      expect(
+        await second.evaluate(async () =>
+          (await mg.open().list()).map(({ name }) => name),
+        ),
+      ).toEqual(["Active"]);
+      await reload(first);
+      expect(
+        await first.evaluate(async () => {
+          const repo = mg.open();
+          return {
+            ids: (await repo.list()).map(({ id }) => id),
+            latest: await repo.latestProject(),
+          };
+        }),
+      ).toEqual({ ids: [staged.active], latest: staged.active });
+    }),
+  TIMEOUT,
+);
+
+test(
+  "quota failure during import keeps the active document and removes the seed",
+  () =>
+    withContext(async (context) => {
+      const page = await tab(context);
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("Storage.overrideQuotaForOrigin", {
+        origin: ORIGIN,
+        quotaSize: 40_000,
+      });
+      const result = await page.evaluate(async () => {
+        const repo = mg.open();
+        const active = await repo.create({
+          name: "Kept",
+          root: { text: "Keep me" },
+        });
+        const file = mg.files.parseProjectFile(
+          mg.files.exportProjectDocument(active.doc),
+        );
+        file.project.nodes[0].text = mg.noise(60_000);
+        const failure = await repo
+          .importContent(mg.files.prepareProjectImport(file).content)
+          .then(
+            () => "unexpected success",
+            (error: import("../../src/project-repository").StorageError) =>
+              error.reason,
+          );
+        return {
+          failure,
+          texts: Object.values(mg.content(active).nodes).map(
+            ({ text }) => text,
+          ),
+          list: (await repo.list()).map(({ name }) => name),
+          databaseCount: (await indexedDB.databases()).length,
+        };
+      });
+      expect(result).toEqual({
+        failure: "quota",
+        texts: ["Keep me"],
+        list: ["Kept"],
+        databaseCount: 2,
+      });
+    }),
+  TIMEOUT,
+);

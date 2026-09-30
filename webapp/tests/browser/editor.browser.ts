@@ -372,3 +372,179 @@ describe("existing interactions", () => {
     ).toBe("120%");
   });
 });
+
+async function uploadProject(json: string) {
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showOpenFilePicker", {
+      value: undefined,
+      configurable: true,
+    }),
+  );
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  await (await chooser).setFiles({
+    name: "Portable.mindgrab.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(json),
+  });
+  await page.waitForFunction(
+    () =>
+      !document.querySelector<HTMLFieldSetElement>(
+        'fieldset[aria-label="Project actions"]',
+      )?.disabled,
+  );
+}
+
+async function downloadProject() {
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showSaveFilePicker", {
+      value: undefined,
+      configurable: true,
+    }),
+  );
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  const saved = await download;
+  const path = await saved.path();
+  if (!path) throw new Error("No downloaded file.");
+  return { name: saved.suggestedFilename(), json: await Bun.file(path).text() };
+}
+
+describe("portable file actions", () => {
+  test("downloads offline edits and uploads twice with fresh identities and empty undo stacks", async () => {
+    await page.getByRole("textbox", { name: "Project name" }).fill("Portable");
+    const originalId = await call("projectId");
+    const root = await rootId();
+    await edit(root);
+    await editor().fill("Offline\nHäid mõtteid 😀 日本語");
+    await page.keyboard.press("Escape");
+    await call("addChild", root, "Child");
+    await call("place", root, -30, 80);
+    await context.setOffline(true);
+    expect(await page.evaluate(() => navigator.onLine)).toBe(false);
+    const saved = await downloadProject();
+    expect(saved.name).toBe("Portable.mindgrab.json");
+    const file = JSON.parse(saved.json);
+    expect(file.format).toBe("mindgrab-project");
+    expect(file.version).toBe(2);
+    expect(file.project.nodes[0].text).toBe("Offline\nHäid mõtteid 😀 日本語");
+    expect(file.project.nodes[0].position).toEqual({ x: -30, y: 80 });
+    const originalNodes = await call("ids");
+
+    await uploadProject(saved.json);
+    const firstId = await call("projectId");
+    const firstNodes = await call("ids");
+    expect(firstId).not.toBe(originalId);
+    expect(firstNodes.every((id) => !originalNodes.includes(id))).toBe(true);
+    expect(
+      await page
+        .getByRole("button", { name: "Undo", exact: true })
+        .isDisabled(),
+    ).toBe(true);
+    expect(
+      await page
+        .getByRole("button", { name: "Redo", exact: true })
+        .isDisabled(),
+    ).toBe(true);
+
+    await uploadProject(saved.json);
+    const secondId = await call("projectId");
+    const secondNodes = await call("ids");
+    expect(new Set([originalId, firstId, secondId]).size).toBe(3);
+    expect(secondNodes.every((id) => !firstNodes.includes(id))).toBe(true);
+    await edit(secondNodes[0]);
+    await editor().fill("Only the second import");
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Load", exact: true }).click();
+    await page.locator("#saved-projects").waitFor();
+    expect(
+      await page.getByRole("button", { name: /^Portable · / }).count(),
+    ).toBe(3);
+    await page
+      .getByRole("button", {
+        name: `Portable · ${firstId.slice(0, 8)}`,
+        exact: true,
+      })
+      .click();
+    await page.waitForFunction(
+      (id) => window.harness.projectId() === id,
+      firstId,
+    );
+    expect(await call("text", firstNodes[0])).toBe(
+      "Offline\nHäid mõtteid 😀 日本語",
+    );
+    expect(
+      await page
+        .getByRole("button", { name: "Undo", exact: true })
+        .isDisabled(),
+    ).toBe(true);
+  });
+
+  test("a truncated file leaves the active project and catalog unchanged", async () => {
+    const id = await call("projectId");
+    const before = await call("content");
+    await uploadProject('{"format":');
+    expect(await call("projectId")).toBe(id);
+    expect(await call("content")).toEqual(before);
+    expect(
+      await page.getByText("Project file is not valid JSON.").count(),
+    ).toBe(1);
+    await page.getByRole("button", { name: "Load", exact: true }).click();
+    await page.locator("#saved-projects").waitFor();
+    expect(await page.locator("#saved-projects li").count()).toBe(1);
+  });
+
+  test("failed IndexedDB catalog writes preserve the active project and remove the imported seed", async () => {
+    const saved = await downloadProject();
+    const id = await call("projectId");
+    const before = await call("content");
+    await page.evaluate(() => {
+      const original = IDBObjectStore.prototype.put;
+      Object.assign(window, {
+        restoreWrites: () => {
+          IDBObjectStore.prototype.put = original;
+        },
+      });
+      IDBObjectStore.prototype.put = function (...args) {
+        const request = original.apply(this, args);
+        if (this.name === "projects")
+          request.addEventListener("success", () => this.transaction.abort());
+        return request;
+      };
+    });
+    await uploadProject(saved.json);
+    await page.evaluate(() =>
+      (window as unknown as { restoreWrites(): void }).restoreWrites(),
+    );
+    expect(await call("projectId")).toBe(id);
+    expect(await call("content")).toEqual(before);
+    expect(
+      await page.getByText("The browser did not commit the change.").count(),
+    ).toBe(1);
+    await page.getByRole("button", { name: "Load", exact: true }).click();
+    await page.locator("#saved-projects").waitFor();
+    expect(await page.locator("#saved-projects li").count()).toBe(1);
+  });
+
+  test("Export stays usable when browser persistence cannot open", async () => {
+    await context.addInitScript(() => {
+      Object.defineProperty(window, "indexedDB", {
+        configurable: true,
+        get() {
+          throw new DOMException("Unavailable", "SecurityError");
+        },
+      });
+    });
+    await page.reload();
+    await page
+      .getByText("Browser storage is unavailable.", { exact: true })
+      .waitFor();
+    expect(
+      await page
+        .getByRole("button", { name: "Export", exact: true })
+        .isEnabled(),
+    ).toBe(true);
+    const saved = await downloadProject();
+    expect(JSON.parse(saved.json).project.nodes[0].text).toBe("New idea");
+  });
+});

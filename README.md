@@ -98,6 +98,14 @@ browser never uploads name-keyed snapshots. See
 [ADR 0006](docs/architecture/0006-browser-yjs-sync.md) for save states, retry,
 recovery, lifetime fencing and the real-browser test command.
 
+**Export** downloads the active document, including offline or unsaved edits,
+as a readable `.mindgrab.json` file. **Import** validates the version 2 portable
+format and creates a new project with fresh project/node UUIDs and an empty
+undo history. Same-name projects and repeated imports remain independent.
+File or storage errors preserve the active project, and Export stays usable
+when local persistence fails. See the [portable project format](docs/project-file-format.md)
+for the schema, limits, optional local viewport preferences, and test commands.
+
 ## Project catalog API (Yjs protocol v1)
 
 Yjs projects are identified by a client-generated UUID rather than by name.

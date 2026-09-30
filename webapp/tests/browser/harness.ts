@@ -55,6 +55,8 @@ const flatten = (nodes: MindMapNode[]): MindMapNode[] =>
 const nodes = (doc: Y.Doc) => flatten(projectMindMap(materializeProject(doc)));
 
 const harness = {
+  projectId: () => local.guid,
+  content: () => materializeProject(local),
   ids: () => nodes(remote).map((node) => node.id),
   text: (id: string) => nodes(remote).find((node) => node.id === id)?.text,
   localText: (id: string) => nodes(local).find((node) => node.id === id)?.text,
