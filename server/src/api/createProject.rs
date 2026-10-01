@@ -13,7 +13,7 @@ use crate::{
     auth::AppState,
     project::{
         ApiError, CatalogProject, PROTOCOL_VERSION, SCHEMA_VERSION, owned_project,
-        parse_new_project_id, project_columns, project_user, require_same_origin,
+        parse_new_project_id, project_columns, project_user,
     },
 };
 
@@ -30,7 +30,6 @@ pub(super) async fn create_project(
     headers: HeaderMap,
     body: Result<Json<CreateProject>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    require_same_origin(&state, &headers)?;
     let owner = project_user(&state, &jar, &headers).await?;
     let Json(request) = body.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_new_project_id(&request.project_id)?;

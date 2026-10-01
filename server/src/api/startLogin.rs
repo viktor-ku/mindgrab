@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -15,15 +14,7 @@ use crate::{
 pub(super) async fn start_login(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    headers: HeaderMap,
 ) -> Result<Response, AuthError> {
-    if headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        != Some(state.config.origin().as_str())
-    {
-        return Ok((StatusCode::FORBIDDEN, "Invalid request origin").into_response());
-    }
     let nonce = random_token();
     let verifier = random_token();
     // Replace the previous attempt for this browser when restarting sign-in.

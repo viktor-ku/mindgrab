@@ -2652,6 +2652,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "mime",
  "pin-project-lite",
  "tower",
  "tower-layer",
