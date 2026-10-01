@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
@@ -12,6 +12,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
+use tower_sessions::Session;
 
 use crate::{
     config::Config,
@@ -19,9 +20,11 @@ use crate::{
     workos::{AuthError, WorkOs, WorkOsUser},
 };
 
-pub(crate) const SESSION_COOKIE: &str = "mindgrab_session";
+pub(crate) mod store;
+
+pub(crate) const SESSION_COOKIE: &str = "mindgrab_session_v2";
+pub(crate) const LEGACY_SESSION_COOKIE: &str = "mindgrab_session";
 pub(crate) const STATE_COOKIE: &str = "mindgrab_login";
-const SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 pub struct AppState {
     pub config: Config,
@@ -55,6 +58,20 @@ impl From<sqlx::Error> for AuthError {
         eprintln!("Authentication database operation failed");
         Self::Unavailable
     }
+}
+
+impl From<tower_sessions::session::Error> for AuthError {
+    fn from(_: tower_sessions::session::Error) -> Self {
+        Self::Unavailable
+    }
+}
+
+// Prefer the new credential even if invalid: never fall back to older authority
+// when both cookies are present. Legacy tabs can keep using their issued cookie.
+pub(crate) fn browser_credential(jar: &CookieJar) -> Option<String> {
+    jar.get(SESSION_COOKIE)
+        .or_else(|| jar.get(LEGACY_SESSION_COOKIE))
+        .map(|cookie| token_hash(cookie.value()))
 }
 
 pub(crate) fn random_token() -> String {
@@ -93,23 +110,35 @@ struct Callback {
 
 async fn callback(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    Extension(jar): Extension<CookieJar>,
+    session: Session,
     Query(query): Query<Callback>,
 ) -> Response {
-    let result = finish_login(&state, &jar, query).await;
+    let result = async {
+        let provider = finish_login(&state, query, &jar).await?;
+        let previous: Vec<_> = [SESSION_COOKIE, LEGACY_SESSION_COOKIE]
+            .into_iter()
+            .filter_map(|name| jar.get(name))
+            .map(|cookie| token_hash(cookie.value()))
+            .collect();
+        session.insert(store::PROVIDER, provider).await?;
+        session.insert(store::REPLACE, previous).await?;
+        // Do not publish login success before the credential/rotation COMMIT.
+        session.save().await?;
+        Ok::<_, AuthError>(())
+    }
+    .await;
     let jar = clear_cookie(jar, &state.config, STATE_COOKIE);
     match result {
-        Ok(token) => (
-            jar.add(cookie(
-                &state.config,
-                SESSION_COOKIE,
-                token,
-                SESSION_SECONDS,
-            )),
+        Ok(()) => (
+            clear_cookie(jar, &state.config, LEGACY_SESSION_COOKIE),
             Redirect::to(&state.config.app_url),
         )
             .into_response(),
         Err(error) => {
+            // Avoid a second creation attempt by response middleware after a
+            // failed explicit save. Previous credentials remain untouched.
+            session.clear().await;
             let code = match error {
                 AuthError::Unauthorized => "sign_in_failed",
                 AuthError::Unavailable => "unavailable",
@@ -125,8 +154,8 @@ async fn callback(
 
 async fn finish_login(
     state: &AppState,
-    jar: &CookieJar,
     query: Callback,
+    jar: &CookieJar,
 ) -> Result<String, AuthError> {
     let nonce = query
         .state
@@ -176,22 +205,15 @@ async fn finish_login(
     if claims.exp <= jsonwebtoken::get_current_timestamp() || claims.sub != authentication.user.id {
         return Err(AuthError::Unauthorized);
     }
-    let token = random_token();
+    let hash = token_hash(&random_token());
     let mut tx = state.pool.begin().await?;
     let user = upsert_user(&mut tx, &authentication.user).await?;
-    // Rotate the local session credential on every successful login.
-    if let Some(previous) = jar.get(SESSION_COOKIE) {
-        sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
-            .bind(token_hash(previous.value()))
-            .execute(&mut *tx)
-            .await?;
-    }
     sqlx::query("INSERT INTO auth_sessions (token_hash, user_id, workos_session_id, access_token, refresh_token) VALUES ($1, $2, $3, $4, $5)")
-        .bind(token_hash(&token)).bind(user.id).bind(claims.sid)
+        .bind(&hash).bind(user.id).bind(claims.sid)
         .bind(authentication.access_token).bind(authentication.refresh_token)
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    Ok(token)
+    Ok(hash)
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -211,7 +233,7 @@ async fn upsert_user(
 }
 
 #[derive(sqlx::FromRow)]
-struct Session {
+struct ProviderSession {
     user_id: i64,
     workos_session_id: String,
     access_token: String,
@@ -222,16 +244,15 @@ pub(crate) async fn authenticated_user(
     state: &AppState,
     jar: &CookieJar,
 ) -> Result<User, AuthError> {
-    let token = jar.get(SESSION_COOKIE).ok_or(AuthError::Unauthorized)?;
-    let hash = token_hash(token.value());
+    let hash = browser_credential(jar).ok_or(AuthError::Unauthorized)?;
     let mut tx = state.pool.begin().await?;
     // Lock this session during refresh so concurrent requests never race rotation.
-    let session: Option<Session> = sqlx::query_as("SELECT user_id, workos_session_id, access_token, refresh_token FROM auth_sessions WHERE token_hash = $1 AND expires_at > NOW() FOR UPDATE")
+    let session: Option<ProviderSession> = sqlx::query_as("SELECT user_id, workos_session_id, access_token, refresh_token FROM auth_sessions WHERE (browser_hash = $1 OR (browser_hash IS NULL AND token_hash = $1)) AND expires_at > NOW() FOR UPDATE")
         .bind(&hash).fetch_optional(&mut *tx).await?;
     let session = session.ok_or(AuthError::Unauthorized)?;
     let result = validate_session(state, &mut tx, &hash, session).await;
     if matches!(result, Err(AuthError::Unauthorized)) {
-        sqlx::query("DELETE FROM auth_sessions WHERE token_hash = $1")
+        sqlx::query("DELETE FROM auth_sessions WHERE browser_hash = $1 OR token_hash = $1")
             .bind(hash)
             .execute(&mut *tx)
             .await?;
@@ -245,7 +266,7 @@ async fn validate_session(
     state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
     hash: &str,
-    session: Session,
+    session: ProviderSession,
 ) -> Result<User, AuthError> {
     let claims = state.workos.verify(&session.access_token).await?;
     let user: User = sqlx::query_as("SELECT id, name, email, external_id FROM users WHERE id = $1")
@@ -268,7 +289,7 @@ async fn validate_session(
         return Err(AuthError::Unauthorized);
     }
     sqlx::query(
-        "UPDATE auth_sessions SET access_token = $1, refresh_token = $2 WHERE token_hash = $3",
+        "UPDATE auth_sessions SET access_token = $1, refresh_token = $2 WHERE browser_hash = $3 OR token_hash = $3",
     )
     .bind(authentication.access_token)
     .bind(authentication.refresh_token)

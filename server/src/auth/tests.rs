@@ -9,6 +9,10 @@ use std::sync::{
     atomic::{AtomicU16, AtomicUsize, Ordering},
 };
 use tower::ServiceExt;
+use tower_sessions::{
+    ExpiredDeletion, SessionStore,
+    session::{Id, Record},
+};
 
 // This key is generated solely for tests and is never used by the application.
 const TEST_KEY: &[u8] = include_bytes!("fixtures/test-private.pem");
@@ -183,16 +187,36 @@ pub(crate) async fn sign_in(f: &Fixture) -> String {
         .get_all(header::SET_COOKIE)
         .iter()
         .map(|h| h.to_str().unwrap())
-        .find(|h| h.starts_with("mindgrab_session="))
+        .find(|h| h.starts_with(&format!("{SESSION_COOKIE}=")))
         .unwrap();
     assert!(raw_cookie.contains("HttpOnly"));
     assert!(raw_cookie.contains("SameSite=Lax"));
     assert!(raw_cookie.contains("Path=/"));
+    assert!(raw_cookie.contains("Max-Age=2592000"));
+    assert_eq!(raw_cookie.contains("Secure"), f.state.config.secure_cookies);
     response_cookie(&response, SESSION_COOKIE)
 }
 
 /// Inserts another WorkOS user with a valid session and returns its cookie.
 pub(crate) async fn session_for(f: &Fixture, external_id: &str) -> String {
+    let legacy = legacy_session_for(f, external_id).await;
+    let mut record = Record {
+        id: Id::default(),
+        data: [(
+            store::PROVIDER.into(),
+            json!(token_hash(legacy.split_once('=').unwrap().1)),
+        )]
+        .into(),
+        expiry_date: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+    };
+    store::Store(f.state.pool.clone())
+        .create(&mut record)
+        .await
+        .unwrap();
+    format!("{SESSION_COOKIE}={}", record.id)
+}
+
+async fn legacy_session_for(f: &Fixture, external_id: &str) -> String {
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO users (name, email, external_id) VALUES ('Other', $1, $2) RETURNING id",
     )
@@ -215,7 +239,7 @@ pub(crate) async fn session_for(f: &Fixture, external_id: &str) -> String {
         .execute(&f.state.pool)
         .await
         .unwrap();
-    format!("{SESSION_COOKIE}={token}")
+    format!("{LEGACY_SESSION_COOKIE}={token}")
 }
 
 pub(crate) fn refresh_status(f: &Fixture, status: u16) {
@@ -243,7 +267,7 @@ pub(crate) async fn expire_access_token(f: &Fixture) {
 #[sqlx::test]
 async fn anonymous_and_forged_sessions_are_rejected(pool: PgPool) {
     let f = fixture(pool).await;
-    for cookies in ["", "mindgrab_session=forged"] {
+    for cookies in ["", "mindgrab_session=forged", "mindgrab_session_v2=forged"] {
         let response = request(&f, "POST", "/api/getMe", cookies, None).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -308,6 +332,156 @@ async fn callback_database_failure_redirects_and_clears_login_cookie(pool: PgPoo
 }
 
 #[sqlx::test]
+async fn local_storage_failure_preserves_previous_authority_without_login_success(pool: PgPool) {
+    let f = fixture(pool).await;
+    let session = sign_in(&f).await;
+    let (cookie, callback) = start_login(&f).await;
+    // Fail at credential/rotation COMMIT, after provider authentication committed.
+    sqlx::raw_sql("CREATE FUNCTION fail_session_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'storage fault'; END $$; CREATE CONSTRAINT TRIGGER fail_session_write AFTER UPDATE ON auth_sessions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_session_write()")
+        .execute(&f.state.pool).await.unwrap();
+    let response = request(&f, "GET", &callback, &format!("{cookie}; {session}"), None).await;
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "http://localhost:5173/?auth_error=unavailable"
+    );
+    assert!(
+        !response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|h| h
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("{SESSION_COOKIE}=")))
+    );
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // A transient load failure returns 503 without deleting the browser cookie.
+    sqlx::query("ALTER TABLE auth_sessions RENAME TO unavailable_sessions")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let response = request(&f, "POST", "/api/getMe", &session, None).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    sqlx::query("ALTER TABLE unavailable_sessions RENAME TO auth_sessions")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test]
+async fn legacy_credentials_survive_and_rotate_without_downgrade_fallback(pool: PgPool) {
+    let f = fixture(pool).await;
+    let legacy = legacy_session_for(&f, "legacy_user").await;
+    let response = request(&f, "POST", "/api/getMe", &legacy, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(
+        request(
+            &f,
+            "POST",
+            "/api/getMe",
+            &format!("{legacy}; {SESSION_COOKIE}=forged"),
+            None
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let (nonce, callback) = start_login(&f).await;
+    let response = request(&f, "GET", &callback, &format!("{nonce}; {legacy}"), None).await;
+    let current = response_cookie(&response, SESSION_COOKIE);
+    assert_eq!(session_count(&f).await, 1);
+    assert_eq!(
+        response_cookie(&response, LEGACY_SESSION_COOKIE),
+        format!("{LEGACY_SESSION_COOKIE}=")
+    );
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &legacy, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &current, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let legacy = legacy_session_for(&f, "legacy_logout").await;
+    request(
+        &f,
+        "POST",
+        "/api/logout",
+        &legacy,
+        Some("http://localhost:5173"),
+    )
+    .await;
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &legacy, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test]
+async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: PgPool) {
+    let f = fixture(pool).await;
+    let session = sign_in(&f).await;
+    let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
+    let store = store::Store(f.state.pool.clone());
+    let original = store.load(&id).await.unwrap().unwrap();
+    let legacy = legacy_session_for(&f, "collision").await;
+    let mut record = Record {
+        id,
+        data: [(
+            store::PROVIDER.into(),
+            json!(token_hash(legacy.split_once('=').unwrap().1)),
+        )]
+        .into(),
+        expiry_date: original.expiry_date,
+    };
+    assert!(store.create(&mut record).await.is_err());
+    assert_eq!(store.load(&id).await.unwrap().unwrap(), original);
+    record.id = Id::default();
+    store.create(&mut record).await.unwrap();
+    let (hash, data): (String, Value) = sqlx::query_as(
+        "SELECT browser_hash, session_data FROM auth_sessions WHERE browser_hash = $1",
+    )
+    .bind(token_hash(&record.id.to_string()))
+    .fetch_one(&f.state.pool)
+    .await
+    .unwrap();
+    assert_ne!(hash, record.id.to_string());
+    assert!(data.get("access_token").is_none());
+    assert!(data.get("refresh_token").is_none());
+    assert_eq!(store.load(&record.id).await.unwrap().unwrap(), record);
+    sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert!(store.load(&record.id).await.unwrap().is_none());
+    assert!(store.save(&record).await.is_err());
+    store.delete_expired().await.unwrap();
+    assert_eq!(session_count(&f).await, 0);
+    // Neither stale saves nor new creates can revive the deleted provider row.
+    assert!(store.create(&mut record).await.is_err());
+    store.delete(&record.id).await.unwrap();
+}
+
+#[sqlx::test]
 async fn cancellation_consumes_state_without_authentication(pool: PgPool) {
     let f = fixture(pool).await;
     let (cookie, callback) = start_login(&f).await;
@@ -345,6 +519,17 @@ async fn login_persists_user_rotates_cookie_and_survives_router_recreation(pool:
     assert_eq!(user["external_id"], "user_test");
     assert!(user.get("access_token").is_none());
     assert!(user.get("refresh_token").is_none());
+    let other_pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_with((*f.state.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let other = fixture(other_pool).await;
+    assert_eq!(
+        request(&other, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
     let (cookie, callback) = start_login(&f).await;
     let response = request(&f, "GET", &callback, &format!("{cookie}; {session}"), None).await;
     assert_ne!(response_cookie(&response, SESSION_COOKIE), session);
@@ -370,6 +555,9 @@ async fn login_persists_user_rotates_cookie_and_survives_router_recreation(pool:
 async fn refresh_is_serialized_and_rotated_tokens_are_persisted(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
+    let store = store::Store(f.state.pool.clone());
+    let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
+    let mut stale = store.load(&id).await.unwrap().unwrap();
     expire_access_token(&f).await;
     let (a, b) = tokio::join!(
         request(&f, "POST", "/api/getMe", &session, None),
@@ -378,11 +566,25 @@ async fn refresh_is_serialized_and_rotated_tokens_are_persisted(pool: PgPool) {
     assert_eq!(a.status(), StatusCode::OK);
     assert_eq!(b.status(), StatusCode::OK);
     assert_eq!(f.mock.refresh_calls.load(Ordering::SeqCst), 1);
+    stale.data.insert("ui".into(), json!(true));
+    stale.expiry_date += time::Duration::days(30);
+    store.save(&stale).await.unwrap();
+    assert!(store.load(&id).await.unwrap().unwrap().expiry_date < stale.expiry_date);
     let token: String = sqlx::query_scalar("SELECT refresh_token FROM auth_sessions")
         .fetch_one(&f.state.pool)
         .await
         .unwrap();
     assert_eq!(token, "rotated-refresh");
+    let (deleted, _) = tokio::join!(store.delete(&id), store.save(&stale));
+    deleted.unwrap();
+    assert!(store.save(&stale).await.is_err());
+    assert!(store.load(&id).await.unwrap().is_none());
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[sqlx::test]
@@ -482,7 +684,7 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
     assert_eq!(session_count(&f).await, 0);
     assert_eq!(
         response_cookie(&response, SESSION_COOKIE),
-        "mindgrab_session="
+        format!("{SESSION_COOKIE}=")
     );
 }
 
@@ -504,6 +706,7 @@ async fn production_cookie_is_secure_and_signature_tampering_is_rejected(pool: P
             .unwrap()
             .contains("Secure")
     );
+    sign_in(&f).await;
     let token = signed_token(jsonwebtoken::get_current_timestamp() + 3600, json!({}));
     let mut parts: Vec<_> = token.split('.').map(str::to_owned).collect();
     parts[1] = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"sub":"attacker"})).unwrap());
