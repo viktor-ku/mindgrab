@@ -6,7 +6,7 @@ use tower_sessions::{
     session_store::{self, Error},
 };
 
-use super::token_hash;
+use super::{AUTH_DATA, token_hash};
 
 pub(super) const PROVIDER: &str = "provider";
 pub(super) const REPLACE: &str = "replace";
@@ -75,11 +75,23 @@ impl SessionStore for Store {
     }
 
     async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
-        let row = sqlx::query_as::<_, (Json<_>, _)>("SELECT session_data, expires_at FROM auth_sessions WHERE browser_hash = $1 AND expires_at > NOW()")
+        let row = sqlx::query_as::<_, (String, Json<serde_json::Map<String, serde_json::Value>>, _)>("SELECT token_hash, session_data, expires_at FROM auth_sessions WHERE browser_hash = $1 AND expires_at > NOW()")
             .bind(token_hash(&id.to_string())).fetch_optional(&self.0).await.map_err(unavailable)?;
-        Ok(row.map(|(Json(data), expiry_date)| Record {
+        let Some((provider, Json(mut data), expiry_date)) = row else {
+            return Ok(None);
+        };
+        let identity = serde_json::json!({"user_id": provider, "auth_hash": provider.as_bytes()});
+        // Bind cached identity to this row, never another user's provider session.
+        // Older tower records get an in-memory projection without a storage write.
+        if data.get(PROVIDER).and_then(|v| v.as_str()) != Some(provider.as_str())
+            || data.get(AUTH_DATA).is_some_and(|value| value != &identity)
+        {
+            return Ok(None);
+        }
+        data.entry(AUTH_DATA).or_insert(identity);
+        Ok(Some(Record {
             id: *id,
-            data,
+            data: data.into_iter().collect(),
             expiry_date,
         }))
     }

@@ -6,22 +6,21 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use tower_sessions::Session;
 
 use crate::{
-    auth::{AppState, LEGACY_SESSION_COOKIE, authenticated_user, clear_cookie},
+    auth::{AppState, AuthSession, LEGACY_SESSION_COOKIE, clear_cookie, identified_user},
     workos::AuthError,
 };
 
 pub(super) async fn get_me(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    session: Session,
+    mut auth: AuthSession,
 ) -> Response {
-    match authenticated_user(&state, &jar).await {
+    match identified_user(&auth, &jar).await {
         Ok(user) => Json(user).into_response(),
         Err(AuthError::Unauthorized) => {
-            if let Err(error) = session.flush().await {
+            if let Err(error) = auth.logout().await {
                 return AuthError::from(error).into_response();
             }
             (

@@ -14,6 +14,14 @@ pub enum AuthError {
     Unavailable,
 }
 
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for AuthError {}
+
 #[derive(Deserialize)]
 pub struct WorkOsUser {
     pub id: String,

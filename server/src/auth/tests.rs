@@ -419,6 +419,24 @@ async fn legacy_credentials_survive_and_rotate_without_downgrade_fallback(pool: 
             .status(),
         StatusCode::OK
     );
+    // Pre-axum-login tower records remain readable without a migration/write.
+    sqlx::query("UPDATE auth_sessions SET session_data = session_data - $1")
+        .bind(AUTH_DATA)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f, "POST", "/api/getMe", &current, None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let persisted: bool = sqlx::query_scalar("SELECT session_data ? $1 FROM auth_sessions")
+        .bind(AUTH_DATA)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert!(!persisted);
     let legacy = legacy_session_for(&f, "legacy_logout").await;
     request(
         &f,
@@ -467,7 +485,10 @@ async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: P
     assert_ne!(hash, record.id.to_string());
     assert!(data.get("access_token").is_none());
     assert!(data.get("refresh_token").is_none());
-    assert_eq!(store.load(&record.id).await.unwrap().unwrap(), record);
+    let loaded = store.load(&record.id).await.unwrap().unwrap();
+    assert_eq!(loaded.id, record.id);
+    assert_eq!(loaded.expiry_date, record.expiry_date);
+    assert_eq!(loaded.data[store::PROVIDER], record.data[store::PROVIDER]);
     sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 second'")
         .execute(&f.state.pool)
         .await
@@ -479,6 +500,43 @@ async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: P
     // Neither stale saves nor new creates can revive the deleted provider row.
     assert!(store.create(&mut record).await.is_err());
     store.delete(&record.id).await.unwrap();
+}
+
+#[sqlx::test]
+async fn cached_identity_cannot_borrow_another_provider_session(pool: PgPool) {
+    let f = fixture(pool).await;
+    let other = session_for(&f, "other_user").await;
+    let store = store::Store(f.state.pool.clone());
+    let other_id: Id = other.split_once('=').unwrap().1.parse().unwrap();
+    let other_record = store.load(&other_id).await.unwrap().unwrap();
+    for field in [AUTH_DATA, store::PROVIDER] {
+        let session = sign_in(&f).await;
+        let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record
+            .data
+            .insert(field.into(), other_record.data[field].clone());
+        // Simulate corrupted/stale cached identification while the row's
+        // credential and WorkOS tokens still belong to the original user.
+        sqlx::query("UPDATE auth_sessions SET session_data = $1 WHERE browser_hash = $2")
+            .bind(sqlx::types::Json(record.data))
+            .bind(token_hash(&id.to_string()))
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(&f, "POST", "/api/getMe", &session, None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&f, "POST", "/api/getMe", &other, None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
 }
 
 #[sqlx::test]
@@ -653,6 +711,8 @@ async fn invalid_tokens_and_expired_local_sessions_cannot_authenticate(pool: PgP
 async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
+    expire_access_token(&f).await;
+    refresh_status(&f, 503);
     assert_eq!(
         request(&f, "GET", "/api/logout", &session, None)
             .await
@@ -681,6 +741,7 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(params["session_id"], "session_test");
     assert_eq!(params["return_to"], "http://localhost:5173/");
+    assert_eq!(f.mock.refresh_calls.load(Ordering::SeqCst), 0);
     assert_eq!(session_count(&f).await, 0);
     assert_eq!(
         response_cookie(&response, SESSION_COOKIE),

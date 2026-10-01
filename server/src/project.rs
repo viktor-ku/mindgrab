@@ -15,9 +15,11 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    extract::Request,
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{MethodRouter, get},
 };
 use axum_extra::extract::cookie::CookieJar;
 use serde::{Serialize, Serializer};
@@ -26,7 +28,7 @@ use sqlx::PgPool;
 use uuid::{Uuid, Variant, Version};
 
 use crate::{
-    auth::{AppState, User, authenticated_user},
+    auth::{self, AppState, AuthSession, User},
     response_headers::private_headers,
     workos::AuthError,
 };
@@ -50,7 +52,7 @@ pub(crate) use project_columns;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .merge(sync::router(&state.config))
+        .merge(sync::router(state.clone()))
         // Retired snapshot clients must still receive an explicit upgrade error.
         .route(
             "/api/projects",
@@ -231,19 +233,34 @@ pub(crate) fn parse_new_project_id(value: &str) -> Result<Uuid, ApiError> {
 
 // An expectation is a fence, never an ownership selector. The session remains
 // the authority even when cookies rotate while a previous workspace is active.
-pub(crate) async fn project_user(
-    state: &AppState,
-    jar: &CookieJar,
-    headers: &HeaderMap,
-) -> Result<User, ApiError> {
-    let user = authenticated_user(state, jar).await?;
+pub(crate) fn protect(
+    route: MethodRouter<Arc<AppState>>,
+    state: Arc<AppState>,
+) -> MethodRouter<Arc<AppState>> {
+    auth::manage(
+        route.route_layer(middleware::from_fn(require_user)),
+        state,
+        auth::AUTH_DATA,
+        |error| ApiError::from(error).into_response(),
+    )
+}
+
+async fn require_user(
+    auth: AuthSession,
+    jar: CookieJar,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let user = auth::identified_user(&auth, &jar).await?;
     if let Some(expected) = headers.get("x-mindgrab-account") {
         require_account(
             &user,
             expected.to_str().map_err(|_| ApiError::InvalidRequest)?,
         )?;
     }
-    Ok(user)
+    request.extensions_mut().insert(user);
+    Ok(next.run(request).await)
 }
 
 pub(crate) fn require_account(user: &User, expected: &str) -> Result<(), ApiError> {

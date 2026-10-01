@@ -5,16 +5,14 @@ mod wire;
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{
         Path, Query, State, WebSocketUpgrade,
         ws::{CloseFrame, Message, WebSocket},
     },
-    http::HeaderMap,
     response::{IntoResponse, Response},
     routing::get,
 };
-use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -27,10 +25,9 @@ use yrs::{
     updates::{decoder::Decode, encoder::Encode},
 };
 
-use super::{ApiError, parse_project_id, project_user, require_account, updates};
+use super::{ApiError, parse_project_id, protect, require_account, updates};
 use crate::{
-    auth::{AppState, authenticated_user},
-    config::Config,
+    auth::{AppState, Backend, User},
     request_validation::same_origin,
     workos::AuthError,
 };
@@ -42,12 +39,13 @@ const MAX_FRAME: usize = updates::MAX_UPDATE_BYTES + 16;
 static CONNECTIONS: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(64)));
 
-pub(super) fn router(config: &Config) -> Router<Arc<AppState>> {
+pub(super) fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new().route(
         "/sync/v1/{project_id}",
-        get(upgrade).route_layer(same_origin(config.origin(), || {
-            ApiError::InvalidOrigin.into_response()
-        })),
+        protect(get(upgrade), state.clone())
+            .route_layer(same_origin(state.config.origin(), || {
+                ApiError::InvalidOrigin.into_response()
+            })),
     )
 }
 
@@ -59,8 +57,7 @@ struct SyncScope {
 
 async fn upgrade(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
+    Extension(owner): Extension<User>,
     Path(project): Path<String>,
     Query(scope): Query<SyncScope>,
     ws: WebSocketUpgrade,
@@ -69,7 +66,6 @@ async fn upgrade(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::Unavailable)?;
-    let owner = project_user(&state, &jar, &headers).await?;
     if let Some(expected) = scope.owner_id {
         require_account(&owner, &expected)?;
     }
@@ -82,7 +78,7 @@ async fn upgrade(
         .max_frame_size(MAX_FRAME)
         .write_buffer_size(0)
         .max_write_buffer_size(11 * 1_048_576)
-        .on_upgrade(move |socket| serve(socket, state, jar, owner.id, id, permit)))
+        .on_upgrade(move |socket| serve(socket, Backend(state), owner, id, permit)))
 }
 
 async fn send(socket: &mut WebSocket, message: ProtocolMessage) -> Result<(), ApiError> {
@@ -95,9 +91,10 @@ async fn send(socket: &mut WebSocket, message: ProtocolMessage) -> Result<(), Ap
     .map_err(|_| ApiError::Unavailable)
 }
 
-async fn authorize(state: &AppState, jar: &CookieJar, owner: i64) -> Result<(), ApiError> {
-    match authenticated_user(state, jar).await {
-        Ok(user) if user.id == owner => Ok(()),
+async fn authorize(backend: &Backend, owner: &User) -> Result<(), ApiError> {
+    use axum_login::AuthnBackend;
+    match backend.get_user(&owner.session).await {
+        Ok(Some(user)) if user.id == owner.id => Ok(()),
         Ok(_) | Err(AuthError::Unauthorized) => Err(ApiError::Unauthenticated),
         Err(error) => Err(error.into()),
     }
@@ -105,13 +102,12 @@ async fn authorize(state: &AppState, jar: &CookieJar, owner: i64) -> Result<(), 
 
 async fn serve(
     mut socket: WebSocket,
-    state: Arc<AppState>,
-    jar: CookieJar,
-    owner: i64,
+    backend: Backend,
+    owner: User,
     id: Uuid,
     _permit: OwnedSemaphorePermit,
 ) {
-    let result = run(&mut socket, &state, &jar, owner, id).await;
+    let result = run(&mut socket, &backend, &owner, id).await;
     let (code, reason) = match result {
         Ok(()) => return,
         Err(ApiError::Unauthenticated) => (1008, "Sign in again"),
@@ -141,13 +137,12 @@ struct TailRow {
 
 async fn run(
     socket: &mut WebSocket,
-    state: &AppState,
-    jar: &CookieJar,
-    owner: i64,
+    backend: &Backend,
+    owner: &User,
     id: Uuid,
 ) -> Result<(), ApiError> {
-    authorize(state, jar, owner).await?;
-    let baseline = updates::synchronization_baseline(&state.pool, owner, id).await?;
+    authorize(backend, owner).await?;
+    let baseline = updates::synchronization_baseline(&backend.0.pool, owner.id, id).await?;
     let mut sequence = baseline.sequence;
     // Full merged originals retain pending blocks and delete sets omitted by Yrs
     // transaction events/diffs (#670/#673). Empty rooms wait for client seeds.
@@ -174,10 +169,10 @@ async fn run(
         tokio::select! {
             _ = poll.tick() => {
                 if authorized_at.elapsed() >= AUTH_INTERVAL {
-                    authorize(state, jar, owner).await?;
+                    authorize(backend, owner).await?;
                     authorized_at = Instant::now();
                 }
-                let (next, catching_up) = tail(socket, state, jar, owner, id, sequence).await?;
+                let (next, catching_up) = tail(socket, backend, owner, id, sequence).await?;
                 if next != sequence { authorized_at = Instant::now(); }
                 sequence = next;
                 if catching_up { poll.reset_immediately(); }
@@ -197,9 +192,9 @@ async fn run(
                     Some(Ok(Message::Binary(bytes))) => {
                         last_activity = Instant::now();
                         let message = wire::decode(&bytes)?;
-                        authorize(state, jar, owner).await?;
+                        authorize(backend, owner).await?;
                         authorized_at = Instant::now();
-                        handle(socket, state, owner, id, message).await?;
+                        handle(socket, &backend.0, owner.id, id, message).await?;
                     }
                 }
             }
@@ -211,15 +206,14 @@ async fn run(
 /// fan-out queue; the durable log is the reconnect/backpressure buffer.
 async fn tail(
     socket: &mut WebSocket,
-    state: &AppState,
-    jar: &CookieJar,
-    owner: i64,
+    backend: &Backend,
+    owner: &User,
     id: Uuid,
     sequence: i64,
 ) -> Result<(i64, bool), ApiError> {
     let row: Option<TailRow> = sqlx::query_as(
         "SELECT p.last_sequence, p.validation, p.schema_version, p.protocol_version, u.sequence, u.data FROM crdt_project p LEFT JOIN LATERAL (SELECT sequence, data FROM crdt_update WHERE project_id = p.id AND sequence > $3 ORDER BY sequence LIMIT 1) u ON TRUE WHERE p.id = $1 AND p.owner_id = $2")
-        .bind(id).bind(owner).bind(sequence).fetch_optional(&state.pool).await?;
+        .bind(id).bind(owner.id).bind(sequence).fetch_optional(&backend.0.pool).await?;
     let row = row.ok_or(ApiError::NotFound)?;
     if row.schema_version != 1 || row.protocol_version != 1 {
         return Err(ApiError::UnsupportedSchema);
@@ -231,7 +225,7 @@ async fn tail(
         return Ok((sequence, false));
     }
     // Revalidate before sending, even when the periodic check isn't due.
-    authorize(state, jar, owner).await?;
+    authorize(backend, owner).await?;
     if row.sequence == Some(sequence + 1) {
         send(
             socket,
@@ -242,7 +236,7 @@ async fn tail(
     } else {
         // Compaction may remove a tail while a client is slow. Recover from a
         // coherent checkpoint+tail baseline rather than skipping missing rows.
-        let baseline = updates::synchronization_baseline(&state.pool, owner, id).await?;
+        let baseline = updates::synchronization_baseline(&backend.0.pool, owner.id, id).await?;
         send(
             socket,
             ProtocolMessage::Sync(SyncMessage::Update(baseline.bytes)),
