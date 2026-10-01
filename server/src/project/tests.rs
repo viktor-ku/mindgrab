@@ -13,7 +13,7 @@ use super::*;
 use crate::auth::tests::{fixture, session_for, sign_in};
 
 const ORIGIN: &str = "http://localhost:5173";
-const PROJECTS: &str = "/api/crdt/v1/projects";
+const CREATE_PROJECT: &str = "/api/createProject";
 
 struct Reply {
     status: StatusCode,
@@ -43,7 +43,7 @@ async fn send(
         }
         None => Body::empty(),
     };
-    let response = router(state.clone())
+    let response = crate::router(state.clone())
         .oneshot(builder.body(body).unwrap())
         .await
         .unwrap();
@@ -63,11 +63,27 @@ async fn send(
 }
 
 async fn create(state: &Arc<AppState>, cookies: &str, body: Value) -> Reply {
-    send(state, "POST", PROJECTS, cookies, Some(ORIGIN), Some(body)).await
+    send(
+        state,
+        "POST",
+        CREATE_PROJECT,
+        cookies,
+        Some(ORIGIN),
+        Some(body),
+    )
+    .await
 }
 
-async fn get(state: &Arc<AppState>, path: &str, cookies: &str) -> Reply {
-    send(state, "GET", path, cookies, None, None).await
+async fn rpc(state: &Arc<AppState>, method: &str, cookies: &str, args: Value) -> Reply {
+    send(
+        state,
+        "POST",
+        &format!("/api/{method}"),
+        cookies,
+        None,
+        Some(args),
+    )
+    .await
 }
 
 fn new_id() -> Uuid {
@@ -115,11 +131,11 @@ async fn list_all(state: &Arc<AppState>, cookies: &str, limit: u32) -> Vec<Value
     let mut projects = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let path = match &cursor {
-            Some(cursor) => format!("{PROJECTS}?limit={limit}&cursor={cursor}"),
-            None => format!("{PROJECTS}?limit={limit}"),
-        };
-        let page = get(state, &path, cookies).await;
+        let mut args = json!({"limit": limit});
+        if let Some(cursor) = &cursor {
+            args["cursor"] = json!(cursor);
+        }
+        let page = rpc(state, "listProjects", cookies, args).await;
         assert_eq!(page.status, StatusCode::OK);
         let items = page.body["projects"].as_array().unwrap();
         assert!(items.len() <= limit as usize);
@@ -147,8 +163,8 @@ async fn catalog_rejects_unauthenticated_and_forged_sessions(pool: PgPool) {
     let id = new_id();
     for cookies in ["", "mindgrab_session=forged"] {
         for reply in [
-            get(&f.state, PROJECTS, cookies).await,
-            get(&f.state, &format!("{PROJECTS}/{id}"), cookies).await,
+            rpc(&f.state, "listProjects", cookies, json!({})).await,
+            rpc(&f.state, "getProject", cookies, json!({"projectId": id})).await,
             create(&f.state, cookies, register(id)).await,
         ] {
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
@@ -168,7 +184,7 @@ async fn creation_requires_the_app_origin(pool: PgPool) {
         let reply = send(
             &f.state,
             "POST",
-            PROJECTS,
+            CREATE_PROJECT,
             &session,
             origin,
             Some(register(id)),
@@ -188,10 +204,7 @@ async fn registration_is_idempotent_and_reports_reconnect_status(pool: PgPool) {
 
     let first = create(&f.state, &session, register(id)).await;
     assert_eq!(first.status, StatusCode::CREATED);
-    assert_eq!(
-        first.headers[header::LOCATION],
-        format!("{PROJECTS}/{id}").as_str()
-    );
+    assert!(!first.headers.contains_key(header::LOCATION));
     assert_eq!(first.headers[header::CACHE_CONTROL], "no-store");
     assert_eq!(first.body["projectId"], id.to_string());
     assert_eq!(first.body["protocolVersion"], 1);
@@ -226,7 +239,7 @@ async fn registration_is_idempotent_and_reports_reconnect_status(pool: PgPool) {
         assert_eq!(retry.status, StatusCode::OK);
         assert_eq!(retry.body, first.body);
     }
-    let fetched = get(&f.state, &format!("{PROJECTS}/{id}"), &session).await;
+    let fetched = rpc(&f.state, "getProject", &session, json!({"projectId": id})).await;
     assert_eq!(fetched.status, StatusCode::OK);
     assert_eq!(fetched.body, first.body);
 
@@ -259,20 +272,26 @@ async fn a_claimed_uuid_cannot_be_overwritten_or_read_by_another_user(pool: PgPo
     assert_eq!(error_code(&collision), "project_id_conflict");
     assert!(!collision.body.to_string().contains("secret"));
 
-    let read = get(&f.state, &format!("{PROJECTS}/{id}"), &other).await;
+    let read = rpc(&f.state, "getProject", &other, json!({"projectId": id})).await;
     assert_eq!(read.status, StatusCode::NOT_FOUND);
     assert_eq!(error_code(&read), "project_not_found");
-    let missing = get(&f.state, &format!("{PROJECTS}/{}", new_id()), &other).await;
+    let missing = rpc(
+        &f.state,
+        "getProject",
+        &other,
+        json!({"projectId": new_id()}),
+    )
+    .await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert_eq!(read.body, missing.body);
 
-    let listed = get(&f.state, PROJECTS, &other).await;
+    let listed = rpc(&f.state, "listProjects", &other, json!({})).await;
     assert_eq!(listed.body, json!({"projects": [], "nextCursor": null}));
     assert_eq!(
         catalog_rows(&f.state.pool, id).await,
         vec![user_id(&f.state.pool, "user_test").await]
     );
-    let owned = get(&f.state, &format!("{PROJECTS}/{id}"), &owner).await;
+    let owned = rpc(&f.state, "getProject", &owner, json!({"projectId": id})).await;
     assert_eq!(owned.body["name"], "Owner's secret");
     assert_eq!(owned.body["lastSequence"], "4");
 }
@@ -341,15 +360,22 @@ async fn forged_owner_metadata_cannot_grant_access(pool: PgPool) {
     }
     assert!(catalog_rows(&f.state.pool, forged).await.is_empty());
 
-    let forged_list = get(&f.state, &format!("{PROJECTS}?ownerId={owner_id}"), &other).await;
-    assert_eq!(forged_list.status, StatusCode::BAD_REQUEST);
-    let forged_read = get(
+    let forged_list = rpc(
         &f.state,
-        &format!("{PROJECTS}/{owned}?ownerId={owner_id}"),
+        "listProjects",
         &other,
+        json!({"ownerId": owner_id}),
     )
     .await;
-    assert_eq!(forged_read.status, StatusCode::NOT_FOUND);
+    assert_eq!(forged_list.status, StatusCode::BAD_REQUEST);
+    let forged_read = rpc(
+        &f.state,
+        "getProject",
+        &other,
+        json!({"projectId": owned, "ownerId": owner_id}),
+    )
+    .await;
+    assert_eq!(forged_read.status, StatusCode::BAD_REQUEST);
 
     let other_project = new_id();
     assert_eq!(
@@ -410,14 +436,15 @@ async fn malformed_project_ids_and_requests_are_rejected(pool: PgPool) {
     assert_eq!(unsupported.status, StatusCode::UPGRADE_REQUIRED);
 
     for path in ["not-a-uuid", &valid.to_uppercase(), &valid.replace('-', "")] {
-        let reply = get(&f.state, &format!("{PROJECTS}/{path}"), &session).await;
+        let reply = rpc(&f.state, "getProject", &session, json!({"projectId": path})).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path}");
         assert_eq!(error_code(&reply), "invalid_project_id");
     }
-    let v1 = get(
+    let v1 = rpc(
         &f.state,
-        &format!("{PROJECTS}/10000000-0000-1000-8000-000000000000"),
+        "getProject",
         &session,
+        json!({"projectId": "10000000-0000-1000-8000-000000000000"}),
     )
     .await;
     assert_eq!(v1.status, StatusCode::NOT_FOUND);
@@ -448,10 +475,23 @@ async fn duplicate_names_are_allowed_and_renames_keep_identity(pool: PgPool) {
         HashSet::from([first.to_string(), second.to_string()])
     );
 
-    let path = format!("{PROJECTS}/{first}");
-    let before = get(&f.state, &path, &session).await.body;
+    let before = rpc(
+        &f.state,
+        "getProject",
+        &session,
+        json!({"projectId": first}),
+    )
+    .await
+    .body;
     project_summary(&f.state.pool, first, "Plans", 2).await;
-    let after = get(&f.state, &path, &session).await.body;
+    let after = rpc(
+        &f.state,
+        "getProject",
+        &session,
+        json!({"projectId": first}),
+    )
+    .await
+    .body;
     assert_eq!(after["projectId"], before["projectId"]);
     assert_eq!(after["createdAt"], before["createdAt"]);
     assert_eq!(after["name"], "Plans");
@@ -480,7 +520,17 @@ async fn duplicate_names_are_allowed_and_renames_keep_identity(pool: PgPool) {
             .await;
         assert!(result.is_err(), "{statement}");
     }
-    assert_eq!(get(&f.state, &path, &session).await.body, after);
+    assert_eq!(
+        rpc(
+            &f.state,
+            "getProject",
+            &session,
+            json!({"projectId": first})
+        )
+        .await
+        .body,
+        after
+    );
 }
 
 #[sqlx::test]
@@ -516,14 +566,14 @@ async fn listing_is_paginated_owner_scoped_and_stable(pool: PgPool) {
     for limit in [1, 2, 3, 7, 8, 100] {
         assert_eq!(ids(&list_all(&f.state, &owner, limit).await), expected);
     }
-    let default_page = get(&f.state, PROJECTS, &owner).await;
+    let default_page = rpc(&f.state, "listProjects", &owner, json!({})).await;
     assert_eq!(default_page.body["projects"].as_array().unwrap().len(), 8);
     assert_eq!(default_page.body["nextCursor"], Value::Null);
     assert_eq!(list_all(&f.state, &other, 1).await.len(), 2);
 
-    let first_page = get(&f.state, &format!("{PROJECTS}?limit=3"), &owner).await;
+    let first_page = rpc(&f.state, "listProjects", &owner, json!({"limit": 3})).await;
     let cursor = first_page.body["nextCursor"].as_str().unwrap();
-    let foreign = get(&f.state, &format!("{PROJECTS}?cursor={cursor}"), &other).await;
+    let foreign = rpc(&f.state, "listProjects", &other, json!({"cursor": cursor})).await;
     assert_eq!(foreign.status, StatusCode::OK);
     assert!(
         ids(foreign.body["projects"].as_array().unwrap())
@@ -532,15 +582,15 @@ async fn listing_is_paginated_owner_scoped_and_stable(pool: PgPool) {
     );
 
     for query in [
-        "limit=0",
-        "limit=101",
-        "limit=-1",
-        "limit=abc",
-        "cursor=not-a-cursor",
-        "cursor=AAAA",
-        "page=2",
+        json!({"limit": 0}),
+        json!({"limit": 101}),
+        json!({"limit": -1}),
+        json!({"limit": "abc"}),
+        json!({"cursor": "not-a-cursor"}),
+        json!({"cursor": "AAAA"}),
+        json!({"page": 2}),
     ] {
-        let reply = get(&f.state, &format!("{PROJECTS}?{query}"), &owner).await;
+        let reply = rpc(&f.state, "listProjects", &owner, query.clone()).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
     }
 }
@@ -581,7 +631,9 @@ async fn stale_snapshot_clients_must_upgrade_without_writing(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(
-        get(&f.state, "/api/projects", &session).await.status,
+        send(&f.state, "GET", "/api/projects", &session, None, None)
+            .await
+            .status,
         StatusCode::UPGRADE_REQUIRED
     );
 }
@@ -639,24 +691,41 @@ async fn account_expectations_reject_changed_cookies_before_reads_registration_o
         .unwrap();
     let owner_b = user_id(&f.state.pool, "user_other").await;
     let id = new_id();
-    for (method, path, body) in [
-        ("POST", PROJECTS.to_owned(), register(id).to_string()),
-        ("GET", PROJECTS.to_owned(), String::new()),
-        ("GET", format!("{PROJECTS}/{id}"), String::new()),
-        ("GET", format!("{PROJECTS}/{id}/baseline"), String::new()),
-        ("GET", format!("{PROJECTS}/{id}/status"), String::new()),
-        ("GET", format!("{PROJECTS}/{id}/state"), String::new()),
-        ("GET", format!("{PROJECTS}/{id}/updates"), String::new()),
+    for (path, body) in [
+        (CREATE_PROJECT.to_owned(), register(id).to_string()),
+        ("/api/listProjects".to_owned(), "{}".into()),
         (
-            "PUT",
-            format!("{PROJECTS}/{id}/updates/{}", new_id()),
+            "/api/getProject".to_owned(),
+            json!({"projectId": id}).to_string(),
+        ),
+        (
+            "/api/getProjectBaseline".to_owned(),
+            json!({"projectId": id}).to_string(),
+        ),
+        (
+            "/api/getProjectStatus".to_owned(),
+            json!({"projectId": id}).to_string(),
+        ),
+        (
+            "/api/getProjectState".to_owned(),
+            json!({"projectId": id}).to_string(),
+        ),
+        (
+            "/api/getProjectUpdates".to_owned(),
+            json!({"projectId": id}).to_string(),
+        ),
+        (
+            format!(
+                "/api/submitProjectUpdate?projectId={id}&updateId={}",
+                new_id()
+            ),
             String::new(),
         ),
     ] {
-        let response = router(f.state.clone())
+        let response = crate::router(f.state.clone())
             .oneshot(
                 axum::http::Request::builder()
-                    .method(method)
+                    .method("POST")
                     .uri(path)
                     .header(header::COOKIE, &b)
                     .header(header::ORIGIN, ORIGIN)
@@ -673,11 +742,11 @@ async fn account_expectations_reject_changed_cookies_before_reads_registration_o
         assert_eq!(body["error"]["code"], "account_changed");
     }
     assert!(catalog_rows(&f.state.pool, id).await.is_empty());
-    let response = router(f.state.clone())
+    let response = crate::router(f.state.clone())
         .oneshot(
             axum::http::Request::builder()
                 .method("POST")
-                .uri(PROJECTS)
+                .uri(CREATE_PROJECT)
                 .header(header::COOKIE, b)
                 .header(header::ORIGIN, ORIGIN)
                 .header(header::CONTENT_TYPE, "application/json")

@@ -64,27 +64,28 @@ class Backend {
   async route(route: Route) {
     const request = route.request();
     const url = new URL(request.url());
+    expect(request.method()).toBe("POST");
     const owner = this.user;
     const error = (status: number, code: string) =>
       route.fulfill({ status, json: { error: { code, message: code } } });
-    if (url.pathname === "/api/auth/login") {
+    if (url.pathname === "/api/startLogin") {
       this.loginRequests++;
       this.user = this.nextUser;
       this.meStatus = undefined;
       return route.fulfill({
-        status: 302,
+        status: 303,
         headers: { Location: "/tests/browser/accounts-harness.html" },
       });
     }
-    if (url.pathname === "/api/auth/logout") {
+    if (url.pathname === "/api/logout") {
       this.logoutRequests++;
       if (!this.leaveCookieOnLogout) this.user = undefined;
       return route.fulfill({
-        status: 302,
+        status: 303,
         headers: { Location: "/tests/browser/accounts-harness.html" },
       });
     }
-    if (url.pathname === "/api/me") {
+    if (url.pathname === "/api/getMe") {
       this.meStarted = true;
       const status = this.meStatus;
       await this.meGate?.promise;
@@ -101,10 +102,7 @@ class Backend {
     if (!owner || this.meStatus === 401) return error(401, "unauthenticated");
     if (this.meStatus === 503) return error(503, "unavailable");
     if (expected !== String(owner.id)) return error(409, "account_changed");
-    if (
-      url.pathname === "/api/crdt/v1/projects" &&
-      request.method() === "POST"
-    ) {
+    if (url.pathname === "/api/createProject") {
       const { projectId } = request.postDataJSON();
       let record = this.projects.get(projectId);
       if (record && record.ownerId !== owner.id)
@@ -122,7 +120,7 @@ class Backend {
         json: { projectId, protocolVersion: 1, schemaVersion: 1, name: null },
       });
     }
-    if (url.pathname === "/api/crdt/v1/projects") {
+    if (url.pathname === "/api/listProjects") {
       this.catalogStarted = true;
       const projects = [...this.projects]
         .filter(([, entry]) => entry.ownerId === owner.id)
@@ -135,14 +133,15 @@ class Backend {
       await this.catalogGate?.promise;
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
-    const [, id, operation, updateId] =
-      url.pathname.match(
-        /\/projects\/([^/]+)\/(baseline|status|updates)(?:\/([^/]+))?/,
-      ) ?? [];
+    const operation = url.pathname;
+    const { projectId: id, updateId } =
+      operation === "/api/submitProjectUpdate"
+        ? Object.fromEntries(url.searchParams)
+        : request.postDataJSON();
     const record = this.projects.get(id);
     if (!record || record.ownerId !== owner.id)
       return error(404, "project_not_found");
-    if (operation === "baseline")
+    if (operation === "/api/getProjectBaseline")
       return route.fulfill({
         json: {
           schemaVersion: 1,
@@ -153,11 +152,11 @@ class Backend {
           stateVector: base64(Y.encodeStateVector(record.doc)),
         },
       });
-    if (operation === "status")
+    if (operation === "/api/getProjectStatus")
       return route.fulfill({
         json: { schemaVersion: 1, lastSequence: "1", validation: "valid" },
       });
-    if (operation === "updates" && request.method() === "PUT") {
+    if (operation === "/api/submitProjectUpdate") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       Y.applyUpdate(record.doc, bytes);
       this.uploads.push({ projectId: id, ownerId: owner.id, expected });
@@ -215,7 +214,7 @@ beforeEach(async () => {
   page = await context.newPage();
   await page.goto(appUrl);
   await ready(page);
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
 });
 afterEach(async () => {
   backend.meGate?.resolve();
@@ -240,7 +239,7 @@ async function ready(target = page) {
 }
 async function login(user = A) {
   backend.nextUser = user;
-  await page.getByRole("link", { name: /Sign in/ }).click();
+  await page.getByRole("button", { name: /Sign in/ }).click();
   await page.getByText(user.name, { exact: true }).waitFor();
   await ready();
 }
@@ -384,7 +383,7 @@ test("503 and terminal 401 preserve cached edits, offline expiry pauses sync, an
   await edit("Pending while expired and offline");
   await rename("Cached A offline");
   await context.setOffline(false);
-  await page.getByRole("link", { name: "Sign in again" }).waitFor();
+  await page.getByRole("button", { name: "Sign in again" }).waitFor();
   expect(backend.uploads.length).toBe(uploaded);
   expect(await call("sockets")).toEqual([]);
   await login();
@@ -431,7 +430,7 @@ test("A to B switching fences old catalogs, providers, relays and observers; log
     0,
   );
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await ready();
   expect(
     (await call("catalog", "anonymous")).some((entry) => entry.id === idA),
@@ -447,7 +446,7 @@ test("A to B switching fences old catalogs, providers, relays and observers; log
   ).toBe(true);
 });
 
-test("logout from another tab fences a delayed /me response and survives a stale server cookie", async () => {
+test("logout from another tab fences a delayed getMe response and survives a stale server cookie", async () => {
   await login();
   await rename("Hidden after logout");
   await cloudSaved();
@@ -462,7 +461,7 @@ test("logout from another tab fences a delayed /me response and survives a stale
   while (!backend.meStarted) await Bun.sleep(10);
   backend.leaveCookieOnLogout = true;
   await other.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await ready();
   backend.meGate.resolve();
   backend.meGate = undefined;
@@ -470,7 +469,7 @@ test("logout from another tab fences a delayed /me response and survives a stale
   expect(await call("sockets")).toEqual([]);
   await page.reload();
   await ready();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   expect(await page.getByText(A.name, { exact: true }).count()).toBe(0);
   expect(
     (await call("catalog", "anonymous")).some((entry) => entry.id === id),
@@ -481,7 +480,7 @@ test("failed local commits and failed auth coordination prevent navigation until
   const id = await call("id");
   await call("failWrites", true);
   await edit("Unsaved local content");
-  await page.getByRole("link", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByText(/Could not save your project before leaving/).waitFor();
   expect(backend.loginRequests).toBe(0);
   expect(await call("id")).toBe(id);
@@ -495,7 +494,7 @@ test("failed local commits and failed auth coordination prevent navigation until
   expect(await page.getByText(A.name, { exact: true }).isVisible()).toBe(true);
   await call("failAuthWrites", false);
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
 });
 
 test("forced logout parks failed local writes outside anonymous UI until they can be retried", async () => {
@@ -510,7 +509,7 @@ test("forced logout parks failed local writes outside anonymous UI until they ca
   await call("failWrites", true);
   await edit("Retain these failed local edits");
   await other.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page
     .getByText(/Edits from the previous account could not be saved/)
     .waitFor();
@@ -622,7 +621,7 @@ test("durable hints recover the workspace and logout when localStorage is missin
   await cloudSaved();
   backend.leaveCookieOnLogout = true;
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page.evaluate((stale) => {
     if (stale)
       localStorage.setItem(
@@ -632,7 +631,7 @@ test("durable hints recover the workspace and logout when localStorage is missin
   }, stale);
   await page.reload();
   await ready();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   expect(await call("id")).not.toBe(id);
   expect(await page.getByText(A.name, { exact: true }).count()).toBe(0);
 });
@@ -649,6 +648,6 @@ test("an aborted durable account hint prevents logout acknowledgement and can be
   await page.getByText(A.name, { exact: true }).waitFor();
   await call("failAuthDatabase", false);
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   expect(backend.logoutRequests).toBe(1);
 });

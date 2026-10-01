@@ -9,7 +9,11 @@ import {
 function deps(respond: () => Promise<Response>) {
   const times = [100, 142.4];
   return {
-    fetch: respond as unknown as typeof fetch,
+    fetch: ((url, init) => {
+      expect(new URL(String(url)).pathname).toBe("/api/getHealth");
+      expect(init?.method).toBe("POST");
+      return respond();
+    }) as typeof fetch,
     now: () => times.shift() ?? 0,
     clock: () => 1_700_000_000_000,
   };

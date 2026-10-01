@@ -306,9 +306,16 @@ test("HTTP receipts verify project, batch UUID and exact SHA-256; catalogs pagin
   const updateId = crypto.randomUUID();
   const seen: RequestInit[] = [];
   const api = new CrdtApi((path) => `http://localhost${path}`, (async (
-    _url,
+    url,
     init,
   ) => {
+    const call = new URL(String(url));
+    expect(call.pathname).toBe("/api/submitProjectUpdate");
+    expect(Object.fromEntries(call.searchParams)).toEqual({
+      projectId: ID,
+      updateId,
+    });
+    expect(new Uint8Array(init?.body as ArrayBuffer)).toEqual(bytes);
     seen.push(init as RequestInit);
     return Response.json({
       protocolVersion: 1,
@@ -323,29 +330,38 @@ test("HTTP receipts verify project, batch UUID and exact SHA-256; catalogs pagin
   await expect(
     api.submit(ID, updateId, bytes, new AbortController().signal),
   ).rejects.toThrow("receipt did not match");
+  expect(seen[0].method).toBe("POST");
   expect(seen[0].credentials).toBe("include");
   expect(Object.fromEntries(new Headers(seen[0].headers))).toEqual({
     "content-type": "application/octet-stream",
     "x-mindgrab-schema-version": "1",
   });
   let pages = 0;
-  const catalog = new CrdtApi(
-    (path) => `http://localhost${path}`,
-    (async () => {
-      pages++;
-      return Response.json({
-        projects: [
-          {
-            projectId: ID,
-            protocolVersion: 1,
-            schemaVersion: 1,
-            name: "Duplicate name",
-          },
-        ],
-        nextCursor: pages === 1 ? "second page" : null,
-      });
-    }) as typeof fetch,
-  );
+  const catalog = new CrdtApi((path) => `http://localhost${path}`, (async (
+    url,
+    init,
+  ) => {
+    expect(String(url)).toBe("http://localhost/api/listProjects");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("content-type")).toBe(
+      "application/json",
+    );
+    expect(JSON.parse(String(init?.body))).toEqual(
+      pages ? { limit: 100, cursor: "second page" } : { limit: 100 },
+    );
+    pages++;
+    return Response.json({
+      projects: [
+        {
+          projectId: ID,
+          protocolVersion: 1,
+          schemaVersion: 1,
+          name: "Duplicate name",
+        },
+      ],
+      nextCursor: pages === 1 ? "second page" : null,
+    });
+  }) as typeof fetch);
   expect(await catalog.list(new AbortController().signal)).toHaveLength(2);
   expect(pages).toBe(2);
 });

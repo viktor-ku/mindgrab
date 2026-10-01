@@ -70,9 +70,12 @@ async fn shared_goldens_match_js_content_and_effective_trees_after_duplicate_rev
                 let receipt = put(&f.state, &cookie, id, update, bytes).await;
                 assert_eq!(receipt.0, StatusCode::CREATED, "{}", path.display());
                 assert_eq!(put(&f.state, &cookie, id, update, bytes).await.1, receipt.1);
-                assert_eq!(get(&f.state, &cookie, id, "state").await.0, StatusCode::OK);
+                assert_eq!(
+                    get(&f.state, &cookie, id, "getProjectState").await.0,
+                    StatusCode::OK
+                );
             }
-            let state = get(&f.state, &cookie, id, "state").await.1;
+            let state = get(&f.state, &cookie, id, "getProjectState").await.1;
             assert_eq!(state["current"], true, "{}", path.display());
             assert_eq!(
                 state["content"],
@@ -102,7 +105,7 @@ async fn uninitialized_and_owner_boundaries_never_expose_or_seed_content(pool: P
     let cookie = sign_in(&f).await;
     let other = session_for(&f, "other_user").await;
     let id = register(&f.state, &cookie).await;
-    let initial = get(&f.state, &cookie, id, "state").await;
+    let initial = get(&f.state, &cookie, id, "getProjectState").await;
     assert_eq!(initial.0, StatusCode::OK);
     assert_eq!(initial.1["content"], Value::Null);
     assert_eq!(initial.1["current"], false);
@@ -113,11 +116,14 @@ async fn uninitialized_and_owner_boundaries_never_expose_or_seed_content(pool: P
         ("", StatusCode::UNAUTHORIZED),
         (other.as_str(), StatusCode::NOT_FOUND),
     ] {
-        assert_eq!(get(&f.state, session, id, "state").await.0, status);
+        assert_eq!(
+            get(&f.state, session, id, "getProjectState").await.0,
+            status
+        );
     }
     assert_eq!(
-        get(&f.state, &other, new_id(), "state").await.1,
-        get(&f.state, &other, id, "state").await.1
+        get(&f.state, &other, new_id(), "getProjectState").await.1,
+        get(&f.state, &other, id, "getProjectState").await.1
     );
     assert!(matches!(
         current_state(&f.state.pool, owner(&f.state.pool, id).await + 10, id).await,
@@ -134,10 +140,10 @@ async fn causal_gaps_keep_the_last_complete_projection_then_catch_up_including_d
     let cookie = sign_in(&f).await;
     let id = register(&f.state, &cookie).await;
     put(&f.state, &cookie, id, new_id(), &binary(&data["gapBase"])).await;
-    let first = get(&f.state, &cookie, id, "state").await.1;
+    let first = get(&f.state, &cookie, id, "getProjectState").await.1;
     put(&f.state, &cookie, id, new_id(), &binary(&data["gapped"])).await;
     catch_up(&f.state.pool).await.unwrap();
-    let pending = get(&f.state, &cookie, id, "state").await.1;
+    let pending = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(pending["current"], false);
     assert_eq!(pending["freshness"]["status"], "pending_dependencies");
     assert_eq!(pending["freshness"]["lastSequence"], "2");
@@ -153,18 +159,18 @@ async fn causal_gaps_keep_the_last_complete_projection_then_catch_up_including_d
     )
     .await;
     catch_up(&f.state.pool).await.unwrap();
-    let ready = get(&f.state, &cookie, id, "state").await.1;
+    let ready = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(ready["current"], true);
     assert_eq!(ready["content"], canonical(&data["gapExpected"]));
     assert_eq!(ready["freshness"]["sourceSequence"], "3");
     put(&f.state, &cookie, id, new_id(), &binary(&data["deletion"])).await;
-    let deleted = get(&f.state, &cookie, id, "state").await.1;
+    let deleted = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(deleted["content"], canonical(&data["deleteExpected"]));
     assert_eq!(deleted["freshness"]["sourceSequence"], "4");
     // No valid prefix exists when the first submitted update is gapped.
     let empty = register(&f.state, &cookie).await;
     put(&f.state, &cookie, empty, new_id(), &binary(&data["gapped"])).await;
-    let missing = get(&f.state, &cookie, empty, "state").await.1;
+    let missing = get(&f.state, &cookie, empty, "getProjectState").await.1;
     assert_eq!(missing["content"], Value::Null);
     assert_eq!(missing["placements"], json!({}));
     assert_eq!(missing["freshness"]["status"], "pending_dependencies");
@@ -185,7 +191,7 @@ async fn rebuild_repairs_deleted_corrupt_rows_and_summaries_from_checkpoint_and_
     )
     .await;
     put(&f.state, &cookie, id, new_id(), &binary(&data["deletion"])).await;
-    let expected = get(&f.state, &cookie, id, "state").await.1;
+    let expected = get(&f.state, &cookie, id, "getProjectState").await.1;
     // Model a published checkpoint with a delete-only tail. No production
     // compaction/pruning is introduced by this read-model task.
     let checkpoint = binary(&data["deleteBase"]);
@@ -203,7 +209,10 @@ async fn rebuild_repairs_deleted_corrupt_rows_and_summaries_from_checkpoint_and_
         .await
         .unwrap();
     rebuild_all(&f.state.pool).await.unwrap();
-    assert_eq!(get(&f.state, &cookie, id, "state").await.1, expected);
+    assert_eq!(
+        get(&f.state, &cookie, id, "getProjectState").await.1,
+        expected
+    );
     sqlx::query("DELETE FROM crdt_node_read WHERE project_id = $1")
         .bind(id)
         .execute(&f.state.pool)
@@ -211,7 +220,10 @@ async fn rebuild_repairs_deleted_corrupt_rows_and_summaries_from_checkpoint_and_
         .unwrap();
     rebuild_all(&f.state.pool).await.unwrap();
     rebuild_all(&f.state.pool).await.unwrap();
-    assert_eq!(get(&f.state, &cookie, id, "state").await.1, expected);
+    assert_eq!(
+        get(&f.state, &cookie, id, "getProjectState").await.1,
+        expected
+    );
     let rows: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT source_sequence FROM crdt_node_read WHERE project_id = $1",
     )
@@ -236,14 +248,14 @@ async fn failed_projection_commit_preserves_updates_and_the_old_atomic_view(pool
         &binary(&data["deleteBase"]),
     )
     .await;
-    let first = get(&f.state, &cookie, id, "state").await.1;
+    let first = get(&f.state, &cookie, id, "getProjectState").await.1;
     sqlx::raw_sql("CREATE FUNCTION fail_projection() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected projection commit failure'; END; $$; CREATE CONSTRAINT TRIGGER fail_projection AFTER INSERT ON crdt_node_read DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_projection();")
         .execute(&f.state.pool).await.unwrap();
     let receipt = put(&f.state, &cookie, id, new_id(), &binary(&data["deletion"])).await;
     assert_eq!(receipt.0, StatusCode::CREATED);
     assert_eq!(receipt.1["durable"], true);
     assert_eq!(
-        get(&f.state, &cookie, id, "state").await.0,
+        get(&f.state, &cookie, id, "getProjectState").await.0,
         StatusCode::SERVICE_UNAVAILABLE
     );
     let (sequence, name): (Option<i64>, String) =
@@ -267,11 +279,11 @@ async fn failed_projection_commit_preserves_updates_and_the_old_atomic_view(pool
     .unwrap();
     catch_up(&f.state.pool).await.unwrap();
     assert_eq!(
-        get(&f.state, &cookie, id, "state").await.1["content"],
+        get(&f.state, &cookie, id, "getProjectState").await.1["content"],
         canonical(&data["deleteExpected"])
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates").await.1["updates"]
+        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"]
             .as_array()
             .unwrap()
             .len(),
@@ -308,11 +320,14 @@ async fn competing_jobs_and_appends_never_regress_source_sequence(pool: PgPool) 
         tasks.join_next().await.unwrap().unwrap();
     }
     catch_up(&f.state.pool).await.unwrap();
-    let final_state = get(&f.state, &cookie, id, "state").await.1;
+    let final_state = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(final_state["freshness"]["sourceSequence"], "13");
     // A job scheduled before a newer publication still reloads under the lock.
     rebuild_project(&f.state.pool, owner, id).await.unwrap();
-    assert_eq!(get(&f.state, &cookie, id, "state").await.1, final_state);
+    assert_eq!(
+        get(&f.state, &cookie, id, "getProjectState").await.1,
+        final_state
+    );
 }
 
 #[sqlx::test]
@@ -329,7 +344,7 @@ async fn quarantined_content_is_marked_and_rebuild_clears_untrusted_caches_only(
         &binary(&data["invalidBase"]),
     )
     .await;
-    let first = get(&f.state, &cookie, id, "state").await.1;
+    let first = get(&f.state, &cookie, id, "getProjectState").await.1;
     put(
         &f.state,
         &cookie,
@@ -339,16 +354,16 @@ async fn quarantined_content_is_marked_and_rebuild_clears_untrusted_caches_only(
     )
     .await;
     put(&f.state, &cookie, id, new_id(), &binary(&data["withheld"])).await;
-    let invalid = get(&f.state, &cookie, id, "state").await.1;
+    let invalid = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(invalid["freshness"]["status"], "quarantined");
     assert_eq!(invalid["current"], false);
     assert_eq!(invalid["content"], first["content"]);
     rebuild_all(&f.state.pool).await.unwrap();
-    let rebuilt = get(&f.state, &cookie, id, "state").await.1;
+    let rebuilt = get(&f.state, &cookie, id, "getProjectState").await.1;
     assert_eq!(rebuilt["freshness"]["status"], "quarantined");
     assert_eq!(rebuilt["content"], Value::Null);
     assert_eq!(
-        get(&f.state, &cookie, id, "updates").await.1["updates"]
+        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"]
             .as_array()
             .unwrap()
             .len(),
@@ -406,7 +421,7 @@ async fn empty_forests_and_nul_unicode_round_trip_through_read_models_and_catalo
             StatusCode::CREATED
         );
         catch_up(&f.state.pool).await.unwrap();
-        let state = get(&f.state, &cookie, id, "state").await.1;
+        let state = get(&f.state, &cookie, id, "getProjectState").await.1;
         assert_eq!(state["content"], canonical(&data["content"]));
         assert_eq!(state["placements"], flattened(&data["forest"]));
         let catalog =
@@ -424,7 +439,7 @@ async fn empty_forests_and_nul_unicode_round_trip_through_read_models_and_catalo
         assert_eq!(catalog["projectionStatus"], "ready");
         assert_eq!(catalog["projectionVersion"], VERSION);
         rebuild_all(&f.state.pool).await.unwrap();
-        assert_eq!(get(&f.state, &cookie, id, "state").await.1, state);
+        assert_eq!(get(&f.state, &cookie, id, "getProjectState").await.1, state);
     }
 }
 

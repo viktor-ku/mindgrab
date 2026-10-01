@@ -26,9 +26,7 @@ async fn server(state: Arc<AppState>) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("ws://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
-        axum::serve(listener, crate::project::router(state))
-            .await
-            .unwrap();
+        axum::serve(listener, crate::router(state)).await.unwrap();
     });
     Server { address, task }
 }
@@ -38,7 +36,7 @@ fn request(
     id: Uuid,
     origin: Option<&str>,
 ) -> axum::http::Request<()> {
-    let mut request = format!("{}/api/crdt/v1/sync/{id}", server.address)
+    let mut request = format!("{}/sync/v1/{id}", server.address)
         .into_client_request()
         .unwrap();
     request
@@ -152,7 +150,7 @@ async fn independent_instances_forward_committed_http_and_socket_updates_and_rec
         b_text.get_string(&b_doc.transact())
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
         "2"
     );
     receive_update(&mut a).await;
@@ -337,7 +335,7 @@ async fn failed_commit_never_reaches_another_socket_and_retry_recovers(pool: PgP
     assert_eq!(u16::from(frame.code), 1013);
     assert!(timeout(Duration::from_millis(600), b.next()).await.is_err());
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
         "0"
     );
     sqlx::raw_sql("DROP TRIGGER fail_commit ON crdt_update; DROP FUNCTION fail_commit();")
@@ -380,7 +378,7 @@ async fn malformed_and_oversized_clients_are_isolated_and_awareness_is_not_persi
     send_update(&mut healthy, INITIAL).await;
     assert_eq!(receive_update(&mut healthy).await, INITIAL);
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
         "1"
     );
 }
@@ -450,7 +448,7 @@ async fn pinned_y_websocket_providers_converge_after_offline_text_and_tree_edits
     let cookie = sign_in(&f).await;
     let id = register(&f.state, &cookie).await;
     let server = server(f.state.clone()).await;
-    let input = json!({"serverUrl": format!("{}/api/crdt/v1/sync", server.address), "projectId": id, "cookie": cookie});
+    let input = json!({"serverUrl": format!("{}/sync/v1", server.address), "projectId": id, "cookie": cookie});
     let result = tokio::task::spawn_blocking(move || {
         let mut child = Command::new("bun")
             .args(["--bun", "server-websocket.ts"])
@@ -821,7 +819,7 @@ async fn socket_account_expectation_rejects_a_changed_cookie_before_upgrade(pool
     let server = server(f.state.clone()).await;
     let id = register(&f.state, &b).await;
     let mut req = request(&server, &b, id, Some("http://localhost:5173"));
-    *req.uri_mut() = format!("{}/api/crdt/v1/sync/{id}?ownerId={owner_a}", server.address)
+    *req.uri_mut() = format!("{}/sync/v1/{id}?ownerId={owner_a}", server.address)
         .parse()
         .unwrap();
     match connect_async(req).await {

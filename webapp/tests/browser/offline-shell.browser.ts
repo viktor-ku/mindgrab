@@ -66,7 +66,7 @@ beforeAll(async () => {
       const path = new URL(request.url).pathname;
       requests.push(`${request.method} ${path}`);
       const headers = { "Cache-Control": "no-store" };
-      if (path === "/api/me")
+      if (path === "/api/getMe")
         return Response.json(
           {
             id: user,
@@ -76,14 +76,14 @@ beforeAll(async () => {
           },
           { headers },
         );
-      if (path === "/api/auth/logout" && request.method === "POST") {
+      if (path === "/api/logout" && request.method === "POST") {
         user = 0;
         return new Response(null, {
           status: 303,
           headers: { ...headers, Location: "/" },
         });
       }
-      if (path === "/api/auth/login")
+      if (path === "/api/startLogin")
         return new Response(null, {
           status: 303,
           headers: { ...headers, Location: "/" },
@@ -244,7 +244,7 @@ test("production shell cold-opens an account project after process exit, edits o
   await context.setOffline(false);
   const me = page.waitForResponse(
     (response) =>
-      response.url() === `${origin}/api/me` && response.status() === 200,
+      response.url() === `${origin}/api/getMe` && response.status() === 200,
   );
   await page.evaluate(() => window.dispatchEvent(new Event("online")));
   await me;
@@ -257,13 +257,13 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   await load();
   await installed();
   const paths = [
-    "/api/me",
-    "/api/crdt/v1/projects",
-    "/api/health",
-    "/api/auth/login",
-    "/api/auth/callback",
-    "/api/auth/logout",
+    "/api/getMe",
+    "/api/listProjects",
+    "/api/getHealth",
+    "/api/startLogin",
     "/auth/callback",
+    "/api/logout",
+    "/sync/v1/test-project",
     "/checkhealth",
     "/?token=secret",
     "/unknown",
@@ -271,22 +271,24 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   for (const path of paths) {
     const result = await page.evaluate(async (path) => {
       const response = await fetch(path, {
-        method: path === "/api/auth/logout" ? "POST" : "GET",
+        method: path.startsWith("/api/") ? "POST" : "GET",
       });
       return { status: response.status, body: await response.text() };
     }, path);
     expect(result.body).not.toContain("Ready to reopen offline");
   }
   for (const path of [
-    "/api/me",
-    "/api/crdt/v1/projects",
-    "/api/health",
-    "/api/auth/login",
-    "/api/auth/callback",
+    "/api/getMe",
+    "/api/listProjects",
+    "/api/getHealth",
+    "/api/startLogin",
+    "/auth/callback",
     "/checkhealth",
   ])
-    expect(requests).toContain(`GET ${path}`);
-  expect(requests).toContain("POST /api/auth/logout");
+    expect(requests).toContain(
+      `${path.startsWith("/api/") ? "POST" : "GET"} ${path}`,
+    );
+  expect(requests).toContain("POST /api/logout");
   const cache = await cacheKeys();
   expect(cache.names).toHaveLength(1);
   expect(cache.urls).toHaveLength(6);
@@ -302,7 +304,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     ),
   ).toBe(true);
   await context.setOffline(true);
-  for (const path of [...paths, "https://example.invalid/api/me"])
+  for (const path of [...paths, "https://example.invalid/api/getMe"])
     expect(
       await page.evaluate(async (path) => {
         try {
@@ -315,7 +317,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     ).toBe("network unavailable");
   const tab = await context.newPage();
   await expect(
-    tab.goto(`${origin}/api/auth/callback?code=secret`),
+    tab.goto(`${origin}/auth/callback?code=secret`),
   ).rejects.toThrow();
   await tab.close();
 });
@@ -443,13 +445,13 @@ test("cached shell logout and account switches preserve local workspace isolatio
   await installed();
   await edit("Private account A");
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "New idea",
   );
   user = 2;
-  await page.getByRole("link", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByText("Account 2", { exact: true }).waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
@@ -464,9 +466,9 @@ test("cached shell logout and account switches preserve local workspace isolatio
   );
   await context.setOffline(false);
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("link", { name: "Sign in", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   user = 1;
-  await page.getByRole("link", { name: "Sign in", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByText("Account 1", { exact: true }).waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(

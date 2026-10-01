@@ -31,17 +31,15 @@ export function AccountControls(props: {
     setMessage("");
     try {
       if (!(await props.beforeNavigate(action))) return;
-      if (action === "login")
-        window.location.assign(backendEndpoint("/api/auth/login"));
-      else {
-        // The logout transition removes the account controls before navigation.
-        const form = document.createElement("form");
-        form.method = "post";
-        form.action = backendEndpoint("/api/auth/logout");
-        form.hidden = true;
-        document.body.append(form);
-        form.submit();
-      }
+      // Account transitions can remove these controls before navigation.
+      const form = document.createElement("form");
+      form.method = "post";
+      form.action = backendEndpoint(
+        action === "login" ? "/api/startLogin" : "/api/logout",
+      );
+      form.hidden = true;
+      document.body.append(form);
+      form.submit();
     } catch {
       setMessage(
         "Could not save the account change in this browser. Free up browser storage and retry.",
@@ -84,16 +82,14 @@ export function AccountControls(props: {
           props.state.status !== "checking"
         }
       >
-        <a
+        <button
+          type="button"
           class="map-control block"
-          href={backendEndpoint("/api/auth/login")}
-          onClick={(event) => {
-            event.preventDefault();
-            void navigate("login");
-          }}
+          disabled={navigating() || props.claiming}
+          onClick={() => void navigate("login")}
         >
           {props.state.user ? "Sign in again" : "Sign in"}
-        </a>
+        </button>
       </Show>
       <Show
         when={props.state.status === "authenticated" && props.claimCount > 0}

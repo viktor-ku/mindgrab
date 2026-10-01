@@ -1,12 +1,15 @@
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
+    sync::Arc,
 };
 
+use crate::auth::AppState;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use sqlx::ConnectOptions;
 use sqlx::PgPool;
@@ -18,7 +21,7 @@ use crate::auth::tests::{fixture, session_for, sign_in};
 
 pub(crate) const INITIAL: &[u8] =
     include_bytes!("../../../../webapp/tests/fixtures/yjs/unicode.0.bin");
-const PROJECTS: &str = "/api/crdt/v1/projects";
+const CREATE_PROJECT: &str = "/api/createProject";
 
 pub(crate) fn new_id() -> Uuid {
     uuid::Builder::from_random_bytes(rand::random()).into_uuid()
@@ -39,7 +42,7 @@ async fn send(
     for (key, value) in headers {
         request = request.header(*key, *value);
     }
-    let response = super::super::router(state.clone())
+    let response = crate::router(state.clone())
         .oneshot(request.body(Body::from(bytes)).unwrap())
         .await
         .unwrap();
@@ -55,7 +58,7 @@ pub(crate) async fn register(state: &Arc<AppState>, cookie: &str) -> Uuid {
         state,
         cookie,
         "POST",
-        PROJECTS,
+        CREATE_PROJECT,
         json!({"projectId": id, "schemaVersion": 1})
             .to_string()
             .into_bytes(),
@@ -79,8 +82,8 @@ pub(crate) async fn put(
     send(
         state,
         cookie,
-        "PUT",
-        &format!("{PROJECTS}/{id}/updates/{update}"),
+        "POST",
+        &format!("/api/submitProjectUpdate?projectId={id}&updateId={update}"),
         bytes.to_vec(),
         &[
             ("origin", "http://localhost:5173"),
@@ -91,21 +94,30 @@ pub(crate) async fn put(
     .await
 }
 
-pub(crate) async fn get(
+pub(crate) async fn rpc(
     state: &Arc<AppState>,
     cookie: &str,
-    id: Uuid,
-    suffix: &str,
+    method: &str,
+    args: Value,
 ) -> (StatusCode, Value) {
     send(
         state,
         cookie,
-        "GET",
-        &format!("{PROJECTS}/{id}/{suffix}"),
-        vec![],
-        &[],
+        "POST",
+        &format!("/api/{method}"),
+        args.to_string().into_bytes(),
+        &[("content-type", "application/json")],
     )
     .await
+}
+
+pub(crate) async fn get(
+    state: &Arc<AppState>,
+    cookie: &str,
+    id: Uuid,
+    method: &str,
+) -> (StatusCode, Value) {
+    rpc(state, cookie, method, json!({"projectId": id})).await
 }
 
 pub(crate) fn binary(value: &Value) -> Vec<u8> {
@@ -211,7 +223,7 @@ pub(crate) async fn assert_baseline(
     id: Uuid,
     expected: &Value,
 ) {
-    let (status, baseline) = get(state, cookie, id, "baseline").await;
+    let (status, baseline) = get(state, cookie, id, "getProjectBaseline").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(baseline["validation"], "valid");
     let bytes = STANDARD.decode(baseline["data"].as_str().unwrap()).unwrap();
@@ -308,11 +320,11 @@ async fn rejected_updates_never_change_durable_state(pool: PgPool) {
     .await;
     assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
         "0"
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates").await.1["updates"],
+        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"],
         json!([])
     );
     assert_eq!(
@@ -334,11 +346,11 @@ async fn storage_failure_including_commit_failure_has_no_receipt(pool: PgPool) {
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
         "0"
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates").await.1["updates"],
+        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"],
         json!([])
     );
     sqlx::raw_sql("DROP TRIGGER fail_commit ON crdt_update; DROP FUNCTION fail_commit();")
@@ -365,7 +377,11 @@ async fn every_read_and_submission_checks_ownership_and_origin(pool: PgPool) {
             put(&f.state, session, id, new_id(), INITIAL).await.0,
             expected
         );
-        for endpoint in ["baseline", "status", "updates"] {
+        for endpoint in [
+            "getProjectBaseline",
+            "getProjectStatus",
+            "getProjectUpdates",
+        ] {
             assert_eq!(get(&f.state, session, id, endpoint).await.0, expected);
         }
     }
@@ -380,8 +396,11 @@ async fn every_read_and_submission_checks_ownership_and_origin(pool: PgPool) {
         let response = send(
             &f.state,
             &cookie,
-            "PUT",
-            &format!("{PROJECTS}/{id}/updates/{}", new_id()),
+            "POST",
+            &format!(
+                "/api/submitProjectUpdate?projectId={id}&updateId={}",
+                new_id()
+            ),
             INITIAL.to_vec(),
             &headers,
         )
@@ -414,11 +433,11 @@ async fn concurrent_writers_allocate_gapless_sequences_and_deduplicate_retries(p
     let mut cursor = "0".to_string();
     let mut sequences = Vec::new();
     loop {
-        let page = get(
+        let page = rpc(
             &f.state,
             &cookie,
-            id,
-            &format!("updates?after={cursor}&limit=3"),
+            "getProjectUpdates",
+            json!({"projectId": id, "after": cursor, "limit": 3}),
         )
         .await
         .1;
@@ -438,15 +457,15 @@ async fn concurrent_writers_allocate_gapless_sequences_and_deduplicate_retries(p
         sequences,
         (1..=8).map(|n| n.to_string()).collect::<Vec<_>>()
     );
-    for suffix in [
-        "updates?after=-1",
-        "updates?after=01",
-        "updates?limit=0",
-        "updates?limit=101",
-        "updates?unknown=1",
+    for args in [
+        json!({"projectId": id, "after": "-1"}),
+        json!({"projectId": id, "after": "01"}),
+        json!({"projectId": id, "limit": 0}),
+        json!({"projectId": id, "limit": 101}),
+        json!({"projectId": id, "unknown": 1}),
     ] {
         assert_eq!(
-            get(&f.state, &cookie, id, suffix).await.0,
+            rpc(&f.state, &cookie, "getProjectUpdates", args).await.0,
             StatusCode::BAD_REQUEST
         );
     }
@@ -478,7 +497,7 @@ async fn causal_gap_regressions_survive_restart_and_converge_in_js_and_rust(pool
             let original = put(&f.state, &cookie, id, update, &bytes).await;
             assert_eq!(original.0, StatusCode::CREATED);
             // Read/reconstruct between arrivals, and retry the exact receipt.
-            let baseline = get(&f.state, &cookie, id, "baseline").await;
+            let baseline = get(&f.state, &cookie, id, "getProjectBaseline").await;
             assert_eq!(baseline.0, StatusCode::OK);
             let restarted = process_baseline(&f.state.pool, id).await;
             assert_eq!(
@@ -503,7 +522,7 @@ async fn causal_gap_regressions_survive_restart_and_converge_in_js_and_rust(pool
     let gapped = binary(&data["gapped"]);
     let receipt = put(&f.state, &cookie, id, update, &gapped).await.1;
     assert_eq!(receipt["validation"], "pending_dependencies");
-    let baseline = get(&f.state, &cookie, id, "baseline").await.1;
+    let baseline = get(&f.state, &cookie, id, "getProjectBaseline").await.1;
     assert_eq!(baseline["validation"], "pending_dependencies");
     let probe = process_baseline(&f.state.pool, id).await;
     assert_eq!(
@@ -536,7 +555,9 @@ async fn causal_gap_regressions_survive_restart_and_converge_in_js_and_rust(pool
     );
     assert_eq!(forward["content"], data["gapExpected"]);
     assert_eq!(
-        get(&restarted.state, &cookie, id, "status").await.1["validation"],
+        get(&restarted.state, &cookie, id, "getProjectStatus")
+            .await
+            .1["validation"],
         "valid"
     );
     assert_eq!(
@@ -559,7 +580,7 @@ async fn delete_only_updates_are_durable_even_when_state_vectors_match(pool: PgP
         &binary(&data["deleteBase"]),
     )
     .await;
-    let before = get(&f.state, &cookie, id, "baseline").await.1;
+    let before = get(&f.state, &cookie, id, "getProjectBaseline").await.1;
     let deletion = binary(&data["deletion"]);
     assert!(
         Update::decode_v1(&deletion)
@@ -569,7 +590,7 @@ async fn delete_only_updates_are_durable_even_when_state_vectors_match(pool: PgP
     );
     let receipt = put(&f.state, &cookie, id, new_id(), &deletion).await.1;
     assert_eq!(receipt["sequence"], "2");
-    let after = get(&f.state, &cookie, id, "baseline").await.1;
+    let after = get(&f.state, &cookie, id, "getProjectBaseline").await.1;
     assert_eq!(before["stateVector"], after["stateVector"]);
     assert_baseline(&f.state, &cookie, id, &data["deleteExpected"]).await;
 }
@@ -627,15 +648,15 @@ async fn pending_invalid_content_is_retained_and_quarantined_when_dependencies_a
     assert_eq!(resolving.0, StatusCode::CREATED);
     assert_eq!(resolving.1["validation"], "quarantined");
     assert_eq!(
-        get(&f.state, &cookie, id, "status").await.1["validation"],
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["validation"],
         "quarantined"
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "baseline").await.0,
+        get(&f.state, &cookie, id, "getProjectBaseline").await.0,
         StatusCode::CONFLICT
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates").await.1["updates"]
+        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"]
             .as_array()
             .unwrap()
             .len(),
@@ -665,7 +686,7 @@ async fn complete_candidates_enforce_schema_and_content_limits(pool: PgPool) {
             "{result:?}"
         );
         assert_eq!(
-            get(&f.state, &cookie, id, "status").await.1["lastSequence"],
+            get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
             "0"
         );
     }

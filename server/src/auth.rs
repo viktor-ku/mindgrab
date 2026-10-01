@@ -3,10 +3,10 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::get,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -19,8 +19,8 @@ use crate::{
     workos::{AuthError, WorkOs, WorkOsUser},
 };
 
-const SESSION_COOKIE: &str = "mindgrab_session";
-const STATE_COOKIE: &str = "mindgrab_login";
+pub(crate) const SESSION_COOKIE: &str = "mindgrab_session";
+pub(crate) const STATE_COOKIE: &str = "mindgrab_login";
 const SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 pub struct AppState {
@@ -31,10 +31,7 @@ pub struct AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/api/auth/login", get(login))
-        .route("/api/auth/callback", get(callback))
-        .route("/api/auth/logout", post(logout))
-        .route("/api/me", get(current_user))
+        .route("/auth/callback", get(callback))
         .layer(middleware::from_fn(private_response))
         .with_state(state)
 }
@@ -71,15 +68,20 @@ impl From<sqlx::Error> for AuthError {
     }
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
 }
 
-fn token_hash(value: &str) -> String {
+pub(crate) fn token_hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value.as_bytes()))
 }
 
-fn cookie(config: &Config, name: &'static str, value: String, seconds: i64) -> Cookie<'static> {
+pub(crate) fn cookie(
+    config: &Config,
+    name: &'static str,
+    value: String,
+    seconds: i64,
+) -> Cookie<'static> {
     Cookie::build((name, value))
         .path("/")
         .http_only(true)
@@ -89,31 +91,8 @@ fn cookie(config: &Config, name: &'static str, value: String, seconds: i64) -> C
         .build()
 }
 
-fn clear_cookie(jar: CookieJar, config: &Config, name: &'static str) -> CookieJar {
+pub(crate) fn clear_cookie(jar: CookieJar, config: &Config, name: &'static str) -> CookieJar {
     jar.add(cookie(config, name, String::new(), 0))
-}
-
-async fn login(State(state): State<Arc<AppState>>, jar: CookieJar) -> Result<Response, AuthError> {
-    let nonce = random_token();
-    let verifier = random_token();
-    // Replace the previous attempt for this browser when restarting sign-in.
-    if let Some(previous) = jar.get(STATE_COOKIE) {
-        sqlx::query("DELETE FROM auth_login_attempts WHERE state_hash = $1")
-            .bind(token_hash(previous.value()))
-            .execute(&state.pool)
-            .await?;
-    }
-    sqlx::query("INSERT INTO auth_login_attempts (state_hash, code_verifier) VALUES ($1, $2)")
-        .bind(token_hash(&nonce))
-        .bind(&verifier)
-        .execute(&state.pool)
-        .await?;
-    let url =
-        state
-            .workos
-            .authorization_url(&state.config.redirect_uri, &nonce, &token_hash(&verifier));
-    let jar = jar.add(cookie(&state.config, STATE_COOKIE, nonce, 600));
-    Ok((jar, Redirect::to(url.as_str())).into_response())
 }
 
 #[derive(Deserialize)]
@@ -250,18 +229,6 @@ struct Session {
     refresh_token: String,
 }
 
-async fn current_user(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    match authenticated_user(&state, &jar).await {
-        Ok(user) => Json(user).into_response(),
-        Err(AuthError::Unauthorized) => (
-            clear_cookie(jar, &state.config, SESSION_COOKIE),
-            AuthError::Unauthorized,
-        )
-            .into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-
 pub(crate) async fn authenticated_user(
     state: &AppState,
     jar: &CookieJar,
@@ -320,48 +287,6 @@ async fn validate_session(
     .execute(&mut **tx)
     .await?;
     upsert_user(tx, &authentication.user).await
-}
-
-async fn logout(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-) -> Result<Response, AuthError> {
-    // A same-origin POST is required; SameSite alone does not protect sibling domains.
-    if headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        != Some(state.config.origin().as_str())
-    {
-        return Ok((StatusCode::FORBIDDEN, "Invalid request origin").into_response());
-    }
-    let mut destination = state.config.app_url.clone();
-    if let Some(token) = jar.get(SESSION_COOKIE) {
-        let sid: Option<String> = sqlx::query_scalar(
-            "DELETE FROM auth_sessions WHERE token_hash = $1 RETURNING workos_session_id",
-        )
-        .bind(token_hash(token.value()))
-        .fetch_optional(&state.pool)
-        .await?;
-        if let Some(sid) = sid {
-            destination = state
-                .workos
-                .logout_url(&sid, &state.config.app_url)
-                .to_string();
-        }
-    }
-    if let Some(nonce) = jar.get(STATE_COOKIE) {
-        sqlx::query("DELETE FROM auth_login_attempts WHERE state_hash = $1")
-            .bind(token_hash(nonce.value()))
-            .execute(&state.pool)
-            .await?;
-    }
-    let jar = clear_cookie(
-        clear_cookie(jar, &state.config, SESSION_COOKIE),
-        &state.config,
-        STATE_COOKIE,
-    );
-    Ok((jar, Redirect::to(&destination)).into_response())
 }
 
 #[cfg(test)]

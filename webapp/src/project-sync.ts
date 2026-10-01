@@ -26,7 +26,7 @@ export function websocketProvider(
   doc: Y.Doc,
   ownerId?: number,
 ): SyncProvider {
-  const url = new URL(backendEndpoint("/api/crdt/v1/sync"));
+  const url = new URL(backendEndpoint("/sync/v1"));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   const provider = new WebsocketProvider(url.href, id, doc, {
     connect: false,
