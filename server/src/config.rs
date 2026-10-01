@@ -24,10 +24,7 @@ impl Config {
             .trim_end_matches('/')
             .to_owned();
         let redirect_uri = required("WORKOS_REDIRECT_URI")?;
-        let redirect = validate_url(&redirect_uri)?;
-        if redirect.path() != "/auth/callback" {
-            return Err("WORKOS_REDIRECT_URI must end with /auth/callback".into());
-        }
+        let redirect = validate_redirect_uri(&redirect_uri)?;
         let origin = redirect.origin().ascii_serialization();
         let app_url = std::env::var("APP_URL").unwrap_or_else(|_| format!("{origin}/"));
         let app = validate_url(&app_url)?;
@@ -81,6 +78,14 @@ fn is_loopback(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
+fn validate_redirect_uri(value: &str) -> Result<Url, String> {
+    let redirect = validate_url(value)?;
+    if redirect.path() != "/api/auth/callback" {
+        return Err("WORKOS_REDIRECT_URI must end with /api/auth/callback".into());
+    }
+    Ok(redirect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,9 +103,19 @@ mod tests {
     }
 
     #[test]
+    fn redirect_uri_requires_the_workos_callback_route() {
+        for origin in ["http://localhost:5173", "https://mindgrab.example"] {
+            assert!(validate_redirect_uri(&format!("{origin}/api/auth/callback")).is_ok());
+            for path in ["/auth/callback", "/api/auth/callback/", "/api/getMe", "/"] {
+                assert!(validate_redirect_uri(&format!("{origin}{path}")).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn authentication_urls_require_https_except_on_loopback() {
-        assert!(validate_url("http://localhost:5173/auth/callback").is_ok());
-        assert!(validate_url("https://mindgrab.example/auth/callback").is_ok());
+        assert!(validate_url("http://localhost:5173/api/auth/callback").is_ok());
+        assert!(validate_url("https://mindgrab.example/api/auth/callback").is_ok());
         for url in [
             "http://example.com/",
             "https://user:secret@example.com/",

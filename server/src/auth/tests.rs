@@ -1,5 +1,6 @@
 use super::*;
 use axum::body::{Body, to_bytes};
+use axum::http::header;
 use axum::routing::post;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
@@ -84,7 +85,7 @@ pub(crate) async fn fixture(pool: PgPool) -> Fixture {
         database_url: String::new(),
         client_id: "client_test".into(),
         api_key: "test-secret".into(),
-        redirect_uri: "http://localhost:5173/auth/callback".into(),
+        redirect_uri: "http://localhost:5173/api/auth/callback".into(),
         app_url: "http://localhost:5173/".into(),
         issuer: crate::config::default_issuer("client_test"),
         secure_cookies: false,
@@ -115,10 +116,12 @@ async fn request(
     if let Some(origin) = origin {
         builder = builder.header(header::ORIGIN, origin);
     }
-    crate::router(f.state.clone())
+    let response = crate::router(f.state.clone())
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
-        .unwrap()
+        .unwrap();
+    crate::response_headers::assert_private_headers(response.headers());
+    response
 }
 
 fn response_cookie(response: &Response, name: &str) -> String {
@@ -161,7 +164,10 @@ async fn start_login(f: &Fixture) -> (String, String) {
     assert_eq!(params["code_challenge"], token_hash(&verifier));
     (
         cookie,
-        format!("/auth/callback?code=valid-code&state={}", params["state"]),
+        format!(
+            "/api/auth/callback?code=valid-code&state={}",
+            params["state"]
+        ),
     )
 }
 
@@ -240,7 +246,6 @@ async fn anonymous_and_forged_sessions_are_rejected(pool: PgPool) {
     for cookies in ["", "mindgrab_session=forged"] {
         let response = request(&f, "POST", "/api/getMe", cookies, None).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
 }
 
@@ -285,6 +290,21 @@ async fn callback_is_bound_to_browser_expiring_and_one_use(pool: PgPool) {
             .contains("auth_error=")
     );
     assert_eq!(f.mock.requests.lock().unwrap().len(), 1);
+}
+
+#[sqlx::test]
+async fn callback_database_failure_redirects_and_clears_login_cookie(pool: PgPool) {
+    let f = fixture(pool).await;
+    let (cookie, callback) = start_login(&f).await;
+    f.state.pool.close().await;
+    let response = request(&f, "GET", &callback, &cookie, None).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "http://localhost:5173/?auth_error=unavailable"
+    );
+    assert_eq!(response_cookie(&response, STATE_COOKIE), "mindgrab_login=");
+    assert!(f.mock.requests.lock().unwrap().is_empty());
 }
 
 #[sqlx::test]

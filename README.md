@@ -10,9 +10,9 @@ durable Rust/Axum/Postgres synchronization and WorkOS AuthKit login.
    exported variables take precedence. Credentials never enter the Vite bundle.
 2. Register these local URLs in WorkOS and enable password or another desired
    authentication method:
-   - Redirect: `http://localhost:5173/auth/callback`
+   - Redirect: `http://localhost:5173/api/auth/callback`
    - Initiate login: `http://localhost:5173/`
-   - Sign-out: `http://localhost:5173/`
+   - Default sign-out URI: `http://localhost:5173/`
 3. Start Postgres and the API:
 
    ```sh
@@ -77,7 +77,7 @@ later sign-in. Auth navigation awaits local commits and stays in place on storag
 failure. Local caches are not encrypted.
 
 - `POST /api/startLogin` starts browser-bound, one-use AuthKit state and PKCE.
-- `GET /auth/callback` verifies the token, upserts the WorkOS user and rotates
+- `GET /api/auth/callback` verifies the token, upserts the WorkOS user and rotates
   the local session credential.
 - `POST /api/getMe` returns basic user fields, 401 when signed out, or 503 on temporary
   authentication failure. Tokens are never returned to browser JavaScript.
@@ -121,7 +121,7 @@ Sign-in and logout are browser form POSTs that return 303 redirects.
 | `POST /api/getProjectState` | `{ projectId }`; canonical content and effective placements from a current read model. |
 | `POST /api/submitProjectUpdate?projectId=<uuid>&updateId=<updateUUID>` | Exact V1 bytes, `application/octet-stream`, `X-Mindgrab-Schema-Version: 1`; durable receipt after commit. Retries retain the same IDs and exact bytes. |
 
-The GET-only protocol endpoints are outside the RPC namespace: `/auth/callback`
+The GET-only protocol endpoints are separate from the POST RPC methods: `/api/auth/callback`
 receives the OAuth redirect, and `/sync/v1/<uuid>` upgrades to an authenticated
 y-websocket connection. The retired `/api/projects` route only returns 426 to
 obsolete snapshot clients; it is not a callable public API method.
@@ -143,7 +143,7 @@ publish HTML/assets/workers together. Set `DATABASE_URL`, WorkOS credentials,
 production hosting. An external backend needs credentialed CORS.
 
 When upgrading from the REST routes, deploy the frontend and backend together,
-update `WORKOS_REDIRECT_URI` and the WorkOS allowed redirect to `/auth/callback`,
+keep `WORKOS_REDIRECT_URI` and the WorkOS allowed redirect at `/api/auth/callback`,
 and register the application root as the initiate-login URL. Older cached clients
 retain their local data and need to reload before resuming cloud sync.
 

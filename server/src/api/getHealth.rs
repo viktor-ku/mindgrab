@@ -97,7 +97,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        crate::response_headers::assert_private_headers(response.headers());
         let timing = response.headers()["server-timing"].to_str().unwrap();
         let duration: f64 = timing.strip_prefix("db;dur=").unwrap().parse().unwrap();
         assert!(duration >= 0.0);

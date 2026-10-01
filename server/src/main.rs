@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod local_seed;
 mod project;
+mod response_headers;
 mod workos;
 
 use std::{sync::Arc, time::Duration};
@@ -179,7 +180,13 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
 
 #[cfg(test)]
 mod tests {
-    use axum::{Router, body::Body, http::Request, routing::post};
+    use crate::response_headers::assert_private_headers;
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -200,6 +207,156 @@ mod tests {
         Router::new()
             .route("/api/getMe", post(|| async { "ok" }))
             .layer(cors_layer(config).unwrap())
+    }
+
+    #[sqlx::test]
+    async fn private_router_boundaries_cover_redirects_and_rejections(pool: sqlx::PgPool) {
+        let f = auth::tests::fixture(pool).await;
+        let app = router(f.state.clone());
+        for (method, path, status) in [
+            ("GET", "/api/auth/callback", StatusCode::SEE_OTHER),
+            (
+                "GET",
+                "/api/auth/callback?code=one&code=two",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("POST", "/api/auth/callback", StatusCode::METHOD_NOT_ALLOWED),
+            ("GET", "/api/projects", StatusCode::UPGRADE_REQUIRED),
+            ("PUT", "/api/projects", StatusCode::UPGRADE_REQUIRED),
+            ("POST", "/api/projects", StatusCode::METHOD_NOT_ALLOWED),
+            (
+                "GET",
+                "/sync/v1/10000000-0000-4000-8000-000000000000",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "POST",
+                "/sync/v1/10000000-0000-4000-8000-000000000000",
+                StatusCode::METHOD_NOT_ALLOWED,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{method} {path}");
+            assert_private_headers(response.headers());
+        }
+        let root = app
+            .clone()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(root.status(), StatusCode::OK);
+        assert!(!root.headers().contains_key(header::CACHE_CONTROL));
+        assert!(!root.headers().contains_key(header::REFERRER_POLICY));
+        // Merged private routers also layer the default fallback, as before.
+        let missing = app
+            .oneshot(Request::get("/missing").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_private_headers(missing.headers());
+    }
+
+    #[sqlx::test]
+    async fn private_headers_compose_with_production_cors(pool: sqlx::PgPool) {
+        let mut f = auth::tests::fixture(pool).await;
+        let config = &mut Arc::get_mut(&mut f.state).unwrap().config;
+        config.app_url = "https://mindgrab.example/".into();
+        config.secure_cookies = true;
+        let app = router(f.state.clone()).layer(cors_layer(&f.state.config).unwrap());
+        for (method, path, status) in [
+            ("POST", "/api/getHealth", StatusCode::OK),
+            ("POST", "/api/getMe", StatusCode::UNAUTHORIZED),
+            ("GET", "/api/getMe", StatusCode::METHOD_NOT_ALLOWED),
+            ("POST", "/api/startLogin", StatusCode::SEE_OTHER),
+            ("GET", "/api/auth/callback", StatusCode::SEE_OTHER),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::ORIGIN, "https://mindgrab.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{method} {path}");
+            assert_private_headers(response.headers());
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "https://mindgrab.example"
+            );
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
+                "true"
+            );
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+                "server-timing"
+            );
+            if path == "/api/startLogin" {
+                let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+                for attribute in [
+                    "HttpOnly",
+                    "SameSite=Lax",
+                    "Secure",
+                    "Path=/",
+                    "Max-Age=600",
+                ] {
+                    assert!(cookie.contains(attribute), "{attribute}");
+                }
+            }
+        }
+        // The existing outer CorsLayer answers preflights before private routers.
+        let preflight = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/api/getMe")
+                    .header(header::ORIGIN, "https://mindgrab.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(
+                        header::ACCESS_CONTROL_REQUEST_HEADERS,
+                        "content-type,x-mindgrab-account",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preflight.status(), StatusCode::OK);
+        assert_eq!(
+            preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://mindgrab.example"
+        );
+        assert_eq!(
+            preflight.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
+            "true"
+        );
+        assert_eq!(
+            preflight.headers()[header::ACCESS_CONTROL_ALLOW_METHODS],
+            "GET,POST"
+        );
+        assert!(
+            preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap()
+                .contains("x-mindgrab-account")
+        );
+        assert!(!preflight.headers().contains_key(header::CACHE_CONTROL));
+        assert!(!preflight.headers().contains_key(header::REFERRER_POLICY));
     }
 
     #[tokio::test]
