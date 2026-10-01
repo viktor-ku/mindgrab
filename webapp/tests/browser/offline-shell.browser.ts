@@ -88,6 +88,8 @@ beforeAll(async () => {
           status: 303,
           headers: { ...headers, Location: "/" },
         });
+      if (path === "/api/auth/callback" && request.method === "GET")
+        return new Response("Auth callback", { headers });
       if (path.startsWith("/api/"))
         return Response.json(
           {
@@ -98,8 +100,6 @@ beforeAll(async () => {
           },
           { status: 503, headers },
         );
-      if (path === "/auth/callback")
-        return new Response("Auth callback", { headers });
       if (path === "/legacy-tab")
         return new Response("<title>Old development tab</title>", {
           headers: { ...headers, "Content-Type": "text/html" },
@@ -261,7 +261,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     "/api/listProjects",
     "/api/getHealth",
     "/api/startLogin",
-    "/auth/callback",
+    "/api/auth/callback",
     "/api/logout",
     "/sync/v1/test-project",
     "/checkhealth",
@@ -271,7 +271,10 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   for (const path of paths) {
     const result = await page.evaluate(async (path) => {
       const response = await fetch(path, {
-        method: path.startsWith("/api/") ? "POST" : "GET",
+        method:
+          path.startsWith("/api/") && path !== "/api/auth/callback"
+            ? "POST"
+            : "GET",
       });
       return { status: response.status, body: await response.text() };
     }, path);
@@ -282,11 +285,11 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     "/api/listProjects",
     "/api/getHealth",
     "/api/startLogin",
-    "/auth/callback",
+    "/api/auth/callback",
     "/checkhealth",
   ])
     expect(requests).toContain(
-      `${path.startsWith("/api/") ? "POST" : "GET"} ${path}`,
+      `${path.startsWith("/api/") && path !== "/api/auth/callback" ? "POST" : "GET"} ${path}`,
     );
   expect(requests).toContain("POST /api/logout");
   const cache = await cacheKeys();
@@ -317,7 +320,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     ).toBe("network unavailable");
   const tab = await context.newPage();
   await expect(
-    tab.goto(`${origin}/auth/callback?code=secret`),
+    tab.goto(`${origin}/api/auth/callback?code=secret`),
   ).rejects.toThrow();
   await tab.close();
 });

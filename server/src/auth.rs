@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Query, Request, State},
-    http::{StatusCode, header},
-    middleware::{self, Next},
+    extract::{Query, State},
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
@@ -16,6 +15,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::{
     config::Config,
+    response_headers::private_headers,
     workos::{AuthError, WorkOs, WorkOsUser},
 };
 
@@ -31,20 +31,9 @@ pub struct AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/auth/callback", get(callback))
-        .layer(middleware::from_fn(private_response))
+        .route("/api/auth/callback", get(callback))
+        .layer(private_headers())
         .with_state(state)
-}
-
-pub(crate) async fn private_response(request: Request, next: Next) -> Response {
-    let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    response
-        .headers_mut()
-        .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
-    response
 }
 
 impl IntoResponse for AuthError {

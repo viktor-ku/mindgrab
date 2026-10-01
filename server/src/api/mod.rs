@@ -27,10 +27,10 @@ mod submit_project_update;
 
 use std::sync::Arc;
 
-use axum::{Router, middleware, routing::post};
+use axum::{Router, routing::post};
 use serde::Deserialize;
 
-use crate::auth::{AppState, private_response};
+use crate::{auth::AppState, response_headers::private_headers};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -67,7 +67,7 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
             "/submitProjectUpdate",
             post(submit_project_update::submit_project_update),
         )
-        .layer(middleware::from_fn(private_response));
+        .layer(private_headers());
     Router::new().nest("/api", methods).with_state(state)
 }
 

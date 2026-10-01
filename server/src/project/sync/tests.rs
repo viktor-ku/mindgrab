@@ -11,6 +11,7 @@ use yrs::{Doc, GetString, Map, ReadTxn, Text, Transact, Update};
 use super::*;
 use crate::auth::tests::{fixture, session_for, sign_in};
 use crate::project::updates::tests::{INITIAL, binary, get, javascript, new_id, put, register};
+use crate::response_headers::assert_private_headers;
 
 type Client = WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 struct Server {
@@ -50,10 +51,16 @@ fn request(
     request
 }
 async fn connect(server: &Server, cookie: &str, id: Uuid) -> Client {
-    connect_async(request(server, cookie, id, Some("http://localhost:5173")))
-        .await
-        .unwrap()
-        .0
+    let (socket, response) =
+        connect_async(request(server, cookie, id, Some("http://localhost:5173")))
+            .await
+            .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SWITCHING_PROTOCOLS
+    );
+    assert_private_headers(response.headers());
+    socket
 }
 async fn message(socket: &mut Client) -> WsMessage {
     timeout(Duration::from_secs(8), socket.next())
@@ -262,6 +269,7 @@ async fn upgrades_reject_wrong_owner_session_origin_and_schema(pool: PgPool) {
             panic!("{error}")
         };
         assert_eq!(response.status().as_u16(), expected);
+        assert_private_headers(response.headers());
     }
     sqlx::query("UPDATE crdt_project SET schema_version = 2 WHERE id = $1")
         .bind(id)
@@ -275,6 +283,7 @@ async fn upgrades_reject_wrong_owner_session_origin_and_schema(pool: PgPool) {
         panic!()
     };
     assert_eq!(response.status().as_u16(), 426);
+    assert_private_headers(response.headers());
 }
 
 #[sqlx::test]

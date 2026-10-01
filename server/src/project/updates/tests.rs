@@ -47,7 +47,7 @@ async fn send(
         .await
         .unwrap();
     let status = response.status();
-    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    crate::response_headers::assert_private_headers(response.headers());
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, serde_json::from_slice(&body).unwrap())
 }

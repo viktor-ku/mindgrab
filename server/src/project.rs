@@ -16,7 +16,6 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     http::{HeaderMap, StatusCode, header},
-    middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -27,7 +26,8 @@ use sqlx::PgPool;
 use uuid::{Uuid, Variant, Version};
 
 use crate::{
-    auth::{AppState, User, authenticated_user, private_response},
+    auth::{AppState, User, authenticated_user},
+    response_headers::private_headers,
     workos::AuthError,
 };
 
@@ -56,7 +56,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/projects",
             get(cutover::upgrade_required).put(cutover::upgrade_required),
         )
-        .layer(middleware::from_fn(private_response))
+        .layer(private_headers())
         .with_state(state)
 }
 

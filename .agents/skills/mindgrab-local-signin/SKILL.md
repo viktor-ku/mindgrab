@@ -12,9 +12,9 @@ Use this skill when an agent needs an authenticated session in the locally runni
 - The local API and webapp must be running. The webapp is expected at `http://localhost:5173` and proxies `/api`, `/auth` and `/sync` to the API at `http://localhost:3000`.
 - The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `webapp/.env` should set `VITE_BACKEND_URL=http://localhost:3000`.
 - The WorkOS application must allow these local URLs:
-  - Redirect URI: `http://localhost:5173/auth/callback`
+  - Redirect URI: `http://localhost:5173/api/auth/callback`
   - Initiate login URI: `http://localhost:5173/`
-  - Sign-out URI: `http://localhost:5173/`
+  - Default sign-out URI: `http://localhost:5173/`
 - The person signing in needs an account enabled for the configured WorkOS authentication methods.
 - On local server startup, migrations run first and then the matching profile is inserted into the loopback `mindgrab` database if absent. This does not create a session; sign-in still needs the WorkOS browser flow below.
 
@@ -44,7 +44,7 @@ Enter the credentials only into the expected WorkOS AuthKit sign-in form reached
 
 - **Preview opens but inspection times out:** Check preview status and retry. If the tab remains unavailable, open a fresh collaborative tab with `reuseExistingTab=false`, then start sign-in from the local app in that tab.
 - **Cannot connect / API unavailable:** Confirm Postgres, the Rust API on port 3000, and Vite on port 5173 are running. Check `/checkhealth` in the local app for API and database reachability.
-- **Sign-in did not complete:** Check the browser stayed on `localhost:5173`, and confirm the WorkOS redirect URI exactly matches `http://localhost:5173/auth/callback`. Restart by returning to the app and clicking **Sign in** again; login state is short-lived and one-use.
+- **Sign-in did not complete:** Check the browser stayed on `localhost:5173`, and confirm the WorkOS redirect URI exactly matches `http://localhost:5173/api/auth/callback`. Restart by returning to the app and clicking **Sign in** again; login state is short-lived and one-use.
 - **Sign-in temporarily unavailable:** Check that the API can reach WorkOS and that Postgres is available. Retry after the underlying service recovers.
 - **WorkOS reports a redirect or client configuration error:** Check the client ID, API key presence, enabled sign-in methods, and all three local URLs in the WorkOS application settings. Do not expose credential values while diagnosing.
 - **The agent's browser is not signed in after another browser completed sign-in:** Sign-in is browser-cookie based. Complete the flow in the same browser profile/session the agent will use; sessions are not transferred between browsers or command-line clients.
