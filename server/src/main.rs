@@ -9,22 +9,12 @@ mod workos;
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{
-    Router,
-    extract::Request,
-    http::HeaderName,
-    http::HeaderValue,
-    http::header,
-    middleware::{self, Next},
-    response::Response,
-    routing::get,
-};
-use axum_extra::extract::cookie::CookieJar;
+use axum::{Router, http::HeaderName, http::HeaderValue, http::header, routing::get};
 use axum_server_timing::ServerTimingLayer;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_sessions::{ExpiredDeletion, Expiry, SessionManagerLayer, cookie::SameSite};
+use tower_sessions::ExpiredDeletion;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -164,35 +154,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn router(state: Arc<auth::AppState>) -> Router {
-    let sessions = SessionManagerLayer::new(auth::store::Store(state.pool.clone()))
-        .with_name(auth::SESSION_COOKIE)
-        .with_http_only(true)
-        .with_secure(state.config.secure_cookies)
-        .with_same_site(SameSite::Lax)
-        .with_path("/")
-        .with_expiry(Expiry::OnInactivity(time::Duration::days(30)));
     Router::new()
         .merge(api::router(state.clone()))
         .merge(auth::router(state.clone()))
         .merge(project::router(state))
-        .layer(sessions)
-        .layer(middleware::from_fn(fresh_login_session))
         .layer(response_headers::private_headers())
         // Wrap private routes and their rejecting layers; CORS stays outside.
         .layer(ServerTimingLayer::new("request"))
         .route("/", get(|| async { "Mindgrab API" }))
-}
-
-async fn fresh_login_session(mut request: Request, next: Next) -> Response {
-    if request.uri().path() == "/api/auth/callback" {
-        // Start each login with a fresh library ID. Preserve original cookies for
-        // nonce validation and atomic replacement in Store::create, so a failed
-        // login never deletes an existing session through cycle_id/flush.
-        let jar = CookieJar::from_headers(request.headers());
-        request.extensions_mut().insert(jar);
-        request.headers_mut().remove(header::COOKIE);
-    }
-    next.run(request).await
 }
 
 fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidHeaderValue> {
@@ -312,7 +281,9 @@ mod tests {
             Request::get(SYNC).header(header::ORIGIN, f.state.config.origin()),
         )
         .await;
-        assert_eq!(invalid_upgrade.status(), StatusCode::BAD_REQUEST);
+        // Shared authentication now rejects anonymous clients before upgrade
+        // extraction, using the same JSON contract as the protected RPC routes.
+        assert_eq!(invalid_upgrade.status(), StatusCode::UNAUTHORIZED);
         let root = send(&app, Request::get("/")).await;
         assert_eq!(root.status(), StatusCode::OK);
         assert!(!root.headers().contains_key(header::CACHE_CONTROL));

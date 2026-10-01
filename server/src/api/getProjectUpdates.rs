@@ -1,20 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{State, rejection::JsonRejection},
-    http::HeaderMap,
 };
-use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    auth::AppState,
+    auth::{AppState, User},
     project::{
-        ApiError, owned_project, parse_project_id, project_user,
+        ApiError, owned_project, parse_project_id,
         updates::{MAX_PAGE_BYTES, lock_project},
     },
 };
@@ -38,11 +36,9 @@ fn sequence(value: Option<&str>) -> Result<i64, ApiError> {
 
 pub(super) async fn get_project_updates(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
+    Extension(owner): Extension<User>,
     body: Result<Json<GetProjectUpdates>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
     let Json(args) = body.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_project_id(&args.project_id)?;
     let after = sequence(args.after.as_deref())?;

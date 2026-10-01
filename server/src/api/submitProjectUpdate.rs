@@ -12,15 +12,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{MethodRouter, post},
 };
-use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
 use crate::{
-    auth::AppState,
+    auth::{AppState, User},
     project::{
-        ApiError, parse_new_project_id, parse_project_id, project_user,
+        ApiError, parse_new_project_id, parse_project_id,
         updates::{MAX_UPDATE_BYTES, ingest},
     },
 };
@@ -39,7 +38,7 @@ struct Submission {
     update: Uuid,
 }
 
-pub(super) fn route(state: Arc<AppState>) -> MethodRouter<Arc<AppState>> {
+pub(super) fn route() -> MethodRouter<Arc<AppState>> {
     post(submit_project_update)
         .route_layer(DefaultBodyLimit::max(MAX_UPDATE_BYTES))
         .route_layer(RequestBodyLimitLayer::new(MAX_UPDATE_BYTES))
@@ -52,18 +51,16 @@ pub(super) fn route(state: Arc<AppState>) -> MethodRouter<Arc<AppState>> {
         }))
         // Origin is checked outside this route. Validate metadata before even
         // Content-Length rejection to preserve authentication/account precedence.
-        .route_layer(middleware::from_fn_with_state(state, validate_submission))
+        .route_layer(middleware::from_fn(validate_submission))
 }
 
 async fn validate_submission(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
+    Extension(owner): Extension<User>,
     headers: HeaderMap,
     query: Result<Query<SubmitProjectUpdate>, QueryRejection>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
     let Query(args) = query.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_project_id(&args.project_id)?;
     let update_id = parse_new_project_id(&args.update_id)?;

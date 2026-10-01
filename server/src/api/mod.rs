@@ -31,7 +31,9 @@ use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
 use serde::Deserialize;
 
 use crate::{
-    auth::AppState, project::ApiError, request_validation::same_origin,
+    auth::{self, AppState},
+    project::{self, ApiError},
+    request_validation::same_origin,
     response_headers::private_headers,
 };
 
@@ -48,39 +50,53 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
     let project_origin = same_origin(state.config.origin(), || {
         ApiError::InvalidOrigin.into_response()
     });
+    let project = |route| project::protect(route, state.clone());
+    let auth = |route, key| {
+        auth::manage(
+            route,
+            state.clone(),
+            key,
+            crate::workos::AuthError::into_response,
+        )
+    };
     let methods = Router::new()
-        .route("/getMe", post(get_me::get_me))
+        .route("/getMe", auth(post(get_me::get_me), auth::AUTH_DATA))
         .route("/getHealth", post(get_health::get_health))
         .route(
             "/startLogin",
             post(start_login::start_login).route_layer(auth_origin.clone()),
         )
-        .route("/logout", post(logout::logout).route_layer(auth_origin))
+        // An empty identification key lets explicit logout work during WorkOS
+        // outages; AuthSession still flushes the provider-backed durable record.
+        .route(
+            "/logout",
+            auth(post(logout::logout), "logout").route_layer(auth_origin),
+        )
         .route(
             "/createProject",
-            post(create_project::create_project).route_layer(project_origin.clone()),
+            project(post(create_project::create_project)).route_layer(project_origin.clone()),
         )
-        .route("/listProjects", post(list_projects::list_projects))
-        .route("/getProject", post(get_project::get_project))
+        .route("/listProjects", project(post(list_projects::list_projects)))
+        .route("/getProject", project(post(get_project::get_project)))
         .route(
             "/getProjectBaseline",
-            post(get_project_baseline::get_project_baseline),
+            project(post(get_project_baseline::get_project_baseline)),
         )
         .route(
             "/getProjectUpdates",
-            post(get_project_updates::get_project_updates),
+            project(post(get_project_updates::get_project_updates)),
         )
         .route(
             "/getProjectStatus",
-            post(get_project_status::get_project_status),
+            project(post(get_project_status::get_project_status)),
         )
         .route(
             "/getProjectState",
-            post(get_project_state::get_project_state),
+            project(post(get_project_state::get_project_state)),
         )
         .route(
             "/submitProjectUpdate",
-            submit_project_update::route(state.clone()).route_layer(project_origin),
+            project(submit_project_update::route()).route_layer(project_origin),
         )
         .layer(private_headers());
     Router::new().nest("/api", methods).with_state(state)

@@ -1,19 +1,18 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
-use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
 
 use crate::{
-    auth::AppState,
+    auth::{AppState, User},
     project::{
         ApiError, CatalogProject, PROTOCOL_VERSION, SCHEMA_VERSION, owned_project,
-        parse_new_project_id, project_columns, project_user,
+        parse_new_project_id, project_columns,
     },
 };
 
@@ -26,11 +25,9 @@ pub(super) struct CreateProject {
 
 pub(super) async fn create_project(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
+    Extension(owner): Extension<User>,
     body: Result<Json<CreateProject>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
     let Json(request) = body.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_new_project_id(&request.project_id)?;
     if request.schema_version != i64::from(SCHEMA_VERSION) {

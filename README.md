@@ -90,13 +90,15 @@ on each authenticated request; refreshes are serialized and persisted before
 returning. Local sessions have a 30-day maximum. Configure short provider access
 lifetimes for timely revocation detection. Login attempts expire after 10 minutes.
 
-tower-sessions 0.14 manages the `mindgrab_session_v2` cookie, ready for axum-login
-0.18. A small SQLx 0.9 store uses the existing provider row so generic session
+axum-login 0.18 identifies the specific WorkOS session and protects project
+routes; tower-sessions 0.14 manages the `mindgrab_session_v2` cookie. A small
+SQLx 0.9 store uses the existing provider row so generic session
 saves cannot overwrite rotated tokens or recreate revoked authority. Login
 attaches the new credential and revokes previous credentials in one transaction
 before redirecting. Already-issued `mindgrab_session` cookies retain their
 identities and expiry; successful login replaces them, and logout revokes them.
-When both cookies exist, the new credential takes precedence. No browser data
+Older tower records are identified without rewriting them. When both cookies
+exist, the new credential takes precedence. No browser data
 reset or project migration is required. SQLx 0.8's maintained session store would
 still need custom hashing and revocation behavior, so application SQLx stays 0.9.
 

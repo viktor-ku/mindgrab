@@ -1,20 +1,16 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{State, rejection::JsonRejection},
-    http::HeaderMap,
 };
-use axum_extra::extract::cookie::CookieJar;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    auth::AppState,
-    project::{
-        ApiError, CatalogProject, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, project_columns, project_user,
-    },
+    auth::{AppState, User},
+    project::{ApiError, CatalogProject, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, project_columns},
 };
 
 #[derive(Deserialize)]
@@ -51,11 +47,9 @@ fn decode_cursor(value: &str) -> Result<(i64, Uuid), ApiError> {
 
 pub(super) async fn list_projects(
     State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
+    Extension(owner): Extension<User>,
     body: Result<Json<ListProjects>, JsonRejection>,
 ) -> Result<Json<ProjectPage>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
     let Json(args) = body.map_err(|_| ApiError::InvalidRequest)?;
     let limit = args.limit.unwrap_or(DEFAULT_PAGE_SIZE);
     if !(1..=MAX_PAGE_SIZE).contains(&limit) {

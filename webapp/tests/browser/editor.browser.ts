@@ -168,7 +168,7 @@ describe("text editing", () => {
     const id = await rootId();
     await edit(id);
     await page.keyboard.press("End");
-    call("takeTextDeltas");
+    await call("takeTextDeltas");
     await page.keyboard.type("!?");
     await page.keyboard.press("Shift+Enter");
     await page.keyboard.insertText("😀");

@@ -5,11 +5,11 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
-use tower_sessions::Session;
 
 use crate::{
     auth::{
-        AppState, LEGACY_SESSION_COOKIE, STATE_COOKIE, browser_credential, clear_cookie, token_hash,
+        AppState, AuthSession, LEGACY_SESSION_COOKIE, STATE_COOKIE, browser_credential,
+        clear_cookie, token_hash,
     },
     workos::AuthError,
 };
@@ -17,7 +17,7 @@ use crate::{
 pub(super) async fn logout(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    session: Session,
+    mut auth: AuthSession,
 ) -> Result<Response, AuthError> {
     let mut destination = state.config.app_url.clone();
     if let Some(hash) = browser_credential(&jar) {
@@ -34,7 +34,7 @@ pub(super) async fn logout(
                 .to_string();
         }
     }
-    session.flush().await?;
+    auth.logout().await?;
     if let Some(nonce) = jar.get(STATE_COOKIE) {
         sqlx::query("DELETE FROM auth_login_attempts WHERE state_hash = $1")
             .bind(token_hash(nonce.value()))
