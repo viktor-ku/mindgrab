@@ -6,7 +6,7 @@ use std::{
 
 use crate::auth::AppState;
 use axum::{
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     http::{Request, StatusCode, header},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -32,7 +32,7 @@ async fn send(
     cookie: &str,
     method: &str,
     path: &str,
-    bytes: Vec<u8>,
+    bytes: impl Into<Body>,
     headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
     let mut request = Request::builder()
@@ -43,7 +43,7 @@ async fn send(
         request = request.header(*key, *value);
     }
     let response = crate::router(state.clone())
-        .oneshot(request.body(Body::from(bytes)).unwrap())
+        .oneshot(request.body(bytes.into()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -300,7 +300,6 @@ async fn rejected_updates_never_change_durable_state(pool: PgPool) {
         vec![],
         vec![255],
         vec![0, 0, 9],
-        vec![255; MAX_UPDATE_BYTES + 1],
         vec![255, 255, 255, 255, 15],
     ] {
         let response = put(&f.state, &cookie, id, new_id(), &bytes).await;
@@ -330,6 +329,118 @@ async fn rejected_updates_never_change_durable_state(pool: PgPool) {
     assert_eq!(
         put(&f.state, &cookie, id, new_id(), INITIAL).await.0,
         StatusCode::CREATED
+    );
+}
+
+#[sqlx::test]
+async fn upload_limits_cover_known_lengths_streams_and_read_failures(pool: PgPool) {
+    let f = fixture(pool).await;
+    let cookie = sign_in(&f).await;
+    let id = register(&f.state, &cookie).await;
+    let update = new_id();
+    let path = format!("/api/submitProjectUpdate?projectId={id}&updateId={update}");
+    let headers = [
+        ("origin", "http://localhost:5173"),
+        ("content-type", "application/octet-stream"),
+        ("x-mindgrab-schema-version", "1"),
+    ];
+    // A real update awaiting clock 0 can fill the protocol bound without
+    // exceeding schema text limits. Keep its original bytes and identity.
+    let doc = Doc::with_client_id(1);
+    let text = doc.get_or_insert_text("pending");
+    text.insert(&mut doc.transact_mut(), 0, "x");
+    let vector = doc.transact().state_vector();
+    text.insert(
+        &mut doc.transact_mut(),
+        1,
+        &"x".repeat(MAX_UPDATE_BYTES - 100),
+    );
+    let length = doc.transact().encode_state_as_update_v1(&vector).len();
+    let offset = text.len(&doc.transact());
+    text.insert(
+        &mut doc.transact_mut(),
+        offset,
+        &"x".repeat(MAX_UPDATE_BYTES - length),
+    );
+    let bytes = doc.transact().encode_state_as_update_v1(&vector);
+    assert_eq!(bytes.len(), MAX_UPDATE_BYTES);
+    let stream = |bytes: &[u8]| {
+        Body::from_stream(futures_util::stream::iter(
+            bytes
+                .chunks(8192)
+                .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk)))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let length = bytes.len().to_string();
+    let mut known_length = headers.to_vec();
+    known_length.push(("content-length", &length));
+    let (status, receipt) = send(
+        &f.state,
+        &cookie,
+        "POST",
+        &path,
+        bytes.clone(),
+        &known_length,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(receipt["sha256"], digest(&bytes));
+    assert_eq!(receipt["durable"], true);
+    assert_eq!(
+        send(&f.state, &cookie, "POST", &path, stream(&bytes), &headers).await,
+        (StatusCode::OK, receipt.clone())
+    );
+    let baseline = get(&f.state, &cookie, id, "getProjectBaseline").await;
+    let path = format!(
+        "/api/submitProjectUpdate?projectId={id}&updateId={}",
+        new_id()
+    );
+    let mut oversized = bytes.clone();
+    oversized.push(0);
+    let too_long = oversized.len().to_string();
+    let mut oversized_headers = headers.to_vec();
+    oversized_headers.push(("content-length", &too_long));
+    let read_failure = || {
+        Body::from_stream(futures_util::stream::iter([
+            Ok(Bytes::from_static(&[0])),
+            Err(std::io::Error::other("injected read failure")),
+        ]))
+    };
+    let never_read = Body::from_stream(futures_util::stream::poll_fn::<
+        Result<Bytes, std::io::Error>,
+        _,
+    >(|_| {
+        panic!("Content-Length rejection must not poll the body")
+    }));
+    for (body, headers) in [
+        (never_read, oversized_headers.as_slice()),
+        (Body::from(oversized.clone()), oversized_headers.as_slice()),
+        (stream(&oversized), headers.as_slice()),
+        (read_failure(), headers.as_slice()),
+        (read_failure(), known_length.as_slice()),
+    ] {
+        let response = send(&f.state, &cookie, "POST", &path, body, headers).await;
+        assert_eq!(
+            response,
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({"error": {
+                    "code": "resource_limit", "message": "The update or document exceeds a resource limit."
+                }})
+            )
+        );
+    }
+    assert_eq!(
+        get(&f.state, &cookie, id, "getProjectBaseline").await,
+        baseline
+    );
+    let stored: (Vec<u8>, i64, i64) = sqlx::query_as("SELECT data, (SELECT COUNT(*) FROM crdt_update WHERE project_id = $1), (SELECT COUNT(*) FROM crdt_receipt WHERE project_id = $1) FROM crdt_update WHERE project_id = $1")
+        .bind(id).fetch_one(&f.state.pool).await.unwrap();
+    assert_eq!(stored, (bytes.clone(), 1, 1));
+    assert_eq!(
+        put(&f.state, &cookie, id, update, &bytes).await,
+        (StatusCode::OK, receipt)
     );
 }
 
@@ -433,17 +544,28 @@ async fn every_read_and_submission_checks_ownership_and_upload_headers(pool: PgP
     ] {
         let mut headers = headers;
         headers.push(("origin", "http://localhost:5173"));
-        let response = send(
-            &f.state,
-            session,
-            "POST",
-            &format!("/api/submitProjectUpdate?{query}"),
-            vec![],
-            &headers,
-        )
-        .await;
-        assert_eq!(response.0.as_u16(), status);
-        assert_eq!(response.1["error"]["code"], code);
+        for (size, known_length) in [
+            (0, false),
+            (MAX_UPDATE_BYTES + 1, false),
+            (MAX_UPDATE_BYTES + 1, true),
+        ] {
+            let length = size.to_string();
+            let mut headers = headers.clone();
+            if known_length {
+                headers.push(("content-length", &length));
+            }
+            let response = send(
+                &f.state,
+                session,
+                "POST",
+                &format!("/api/submitProjectUpdate?{query}"),
+                vec![255; size],
+                &headers,
+            )
+            .await;
+            assert_eq!(response.0.as_u16(), status);
+            assert_eq!(response.1["error"]["code"], code);
+        }
     }
     assert_eq!(
         get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],

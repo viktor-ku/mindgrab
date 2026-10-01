@@ -20,7 +20,7 @@ time = "=0.3.55"
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 uuid = { version = "=1.26.1", features = ["serde"] }
 tower-sessions = { version = "=0.14.0", default-features = false, features = ["axum-core"] }
-tower-http = { version = "=0.6.11", features = ["cors", "set-header", "validate-request"] }
+tower-http = { version = "=0.6.11", features = ["cors", "limit", "set-header", "validate-request"] }
 tracing-subscriber = "=0.3.23"
 yrs = { version = "=0.28.0", features = ["small-client"] }
 

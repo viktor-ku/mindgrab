@@ -742,6 +742,12 @@ async fn mutations_and_websocket_require_the_app_origin_before_authentication(po
             ("GET", "/sync/v1/10000000-0000-4000-8000-000000000000"),
         ] {
             let mut request = axum::http::Request::builder().method(method).uri(path);
+            if path == "/api/submitProjectUpdate" {
+                request = request.header(
+                    header::CONTENT_LENGTH,
+                    crate::project::updates::MAX_UPDATE_BYTES + 1,
+                );
+            }
             for &origin in &origins {
                 request = request.header(header::ORIGIN, origin);
             }

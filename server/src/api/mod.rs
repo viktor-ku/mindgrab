@@ -80,7 +80,7 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/submitProjectUpdate",
-            post(submit_project_update::submit_project_update).route_layer(project_origin),
+            submit_project_update::route(state.clone()).route_layer(project_origin),
         )
         .layer(private_headers());
     Router::new().nest("/api", methods).with_state(state)
