@@ -37,65 +37,51 @@ mod tests {
         Router,
         body::{Body, to_bytes},
         extract::{DefaultBodyLimit, Request},
-        http::StatusCode,
+        http::{HeaderMap, HeaderName, StatusCode},
         middleware::{self, Next},
         response::{IntoResponse, Response},
         routing::post,
     };
     use tower::ServiceExt;
 
+    async fn send(app: Router, body: Body) -> Response {
+        app.oneshot(Request::post("/").body(body).unwrap())
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn conflicting_values_are_replaced_without_changing_body_or_other_headers() {
+        let cookies = [
+            "session=one; HttpOnly; SameSite=Lax; Secure; Path=/",
+            "login=; Max-Age=0; Path=/",
+        ];
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            (header::CACHE_CONTROL, "public"),
+            (header::CACHE_CONTROL, "max-age=3600"),
+            (header::REFERRER_POLICY, "unsafe-url"),
+            (header::REFERRER_POLICY, "origin"),
+            (header::SET_COOKIE, cookies[0]),
+            (header::SET_COOKIE, cookies[1]),
+            (HeaderName::from_static("server-timing"), "db;dur=1"),
+        ] {
+            headers.append(name, HeaderValue::from_static(value));
+        }
         let app = Router::new()
-            .route(
-                "/",
-                post(|| async {
-                    let mut response = "private body".into_response();
-                    for value in ["public", "max-age=3600"] {
-                        response
-                            .headers_mut()
-                            .append(header::CACHE_CONTROL, HeaderValue::from_static(value));
-                    }
-                    for value in ["unsafe-url", "origin"] {
-                        response
-                            .headers_mut()
-                            .append(header::REFERRER_POLICY, HeaderValue::from_static(value));
-                    }
-                    for value in [
-                        "session=one; HttpOnly; SameSite=Lax; Secure; Path=/",
-                        "login=; Max-Age=0; Path=/",
-                    ] {
-                        response
-                            .headers_mut()
-                            .append(header::SET_COOKIE, HeaderValue::from_static(value));
-                    }
-                    response
-                        .headers_mut()
-                        .insert("server-timing", HeaderValue::from_static("db;dur=1"));
-                    response
-                }),
-            )
+            .route("/", post(move || async move { (headers, "private body") }))
             .layer(private_headers());
-        let response = app
-            .oneshot(Request::post("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let response = send(app, Body::empty()).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_private_headers(response.headers());
         assert_eq!(response.headers()["server-timing"], "db;dur=1");
-        let cookies: Vec<_> = response
+        let actual_cookies: Vec<_> = response
             .headers()
             .get_all(header::SET_COOKIE)
             .iter()
             .map(|value| value.to_str().unwrap())
             .collect();
-        assert_eq!(
-            cookies,
-            [
-                "session=one; HttpOnly; SameSite=Lax; Secure; Path=/",
-                "login=; Max-Age=0; Path=/"
-            ]
-        );
+        assert_eq!(actual_cookies, cookies);
         assert_eq!(
             to_bytes(response.into_body(), 1024).await.unwrap(),
             "private body"
@@ -120,10 +106,7 @@ mod tests {
                     (status, "rejected").into_response()
                 }))
                 .layer(private_headers());
-            let response = app
-                .oneshot(Request::post("/").body(Body::empty()).unwrap())
-                .await
-                .unwrap();
+            let response = send(app, Body::empty()).await;
             assert_eq!(response.status(), status);
             assert_private_headers(response.headers());
             assert_eq!(
@@ -139,10 +122,7 @@ mod tests {
             .route("/", post(|_: String| async { "ok" }))
             .layer(DefaultBodyLimit::max(1))
             .layer(private_headers());
-        let response: Response = app
-            .oneshot(Request::post("/").body(Body::from("too large")).unwrap())
-            .await
-            .unwrap();
+        let response = send(app, Body::from("too large")).await;
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         assert_private_headers(response.headers());
     }

@@ -182,14 +182,34 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
 mod tests {
     use crate::response_headers::assert_private_headers;
     use axum::{
-        Router,
         body::Body,
-        http::{Request, StatusCode},
+        http::{HeaderMap, Request, StatusCode, request::Builder},
+        response::Response,
         routing::post,
     };
     use tower::ServiceExt;
 
     use super::*;
+
+    const ORIGIN: &str = "https://mindgrab.example";
+    const CORS_HEADERS: &[(&str, &str)] = &[
+        ("access-control-allow-origin", ORIGIN),
+        ("access-control-allow-credentials", "true"),
+        ("access-control-expose-headers", "server-timing"),
+    ];
+
+    async fn send(app: &Router, request: Builder) -> Response {
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn assert_headers(headers: &HeaderMap, expected: &[(&str, &str)]) {
+        for (name, value) in expected {
+            assert_eq!(headers[*name], *value, "{name}");
+        }
+    }
 
     fn config(app_url: &str) -> Config {
         Config {
@@ -211,57 +231,34 @@ mod tests {
 
     #[sqlx::test]
     async fn private_router_boundaries_cover_redirects_and_rejections(pool: sqlx::PgPool) {
+        const CALLBACK: &str = "/api/auth/callback";
+        const SYNC: &str = "/sync/v1/10000000-0000-4000-8000-000000000000";
         let f = auth::tests::fixture(pool).await;
         let app = router(f.state.clone());
         for (method, path, status) in [
-            ("GET", "/api/auth/callback", StatusCode::SEE_OTHER),
+            ("GET", CALLBACK, StatusCode::SEE_OTHER),
             (
                 "GET",
                 "/api/auth/callback?code=one&code=two",
                 StatusCode::BAD_REQUEST,
             ),
-            ("POST", "/api/auth/callback", StatusCode::METHOD_NOT_ALLOWED),
+            ("POST", CALLBACK, StatusCode::METHOD_NOT_ALLOWED),
             ("GET", "/api/projects", StatusCode::UPGRADE_REQUIRED),
             ("PUT", "/api/projects", StatusCode::UPGRADE_REQUIRED),
             ("POST", "/api/projects", StatusCode::METHOD_NOT_ALLOWED),
-            (
-                "GET",
-                "/sync/v1/10000000-0000-4000-8000-000000000000",
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                "POST",
-                "/sync/v1/10000000-0000-4000-8000-000000000000",
-                StatusCode::METHOD_NOT_ALLOWED,
-            ),
+            ("GET", SYNC, StatusCode::BAD_REQUEST),
+            ("POST", SYNC, StatusCode::METHOD_NOT_ALLOWED),
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = send(&app, Request::builder().method(method).uri(path)).await;
             assert_eq!(response.status(), status, "{method} {path}");
             assert_private_headers(response.headers());
         }
-        let root = app
-            .clone()
-            .oneshot(Request::get("/").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let root = send(&app, Request::get("/")).await;
         assert_eq!(root.status(), StatusCode::OK);
         assert!(!root.headers().contains_key(header::CACHE_CONTROL));
         assert!(!root.headers().contains_key(header::REFERRER_POLICY));
         // Merged private routers also layer the default fallback, as before.
-        let missing = app
-            .oneshot(Request::get("/missing").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
+        let missing = send(&app, Request::get("/missing")).await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_private_headers(missing.headers());
     }
@@ -270,7 +267,7 @@ mod tests {
     async fn private_headers_compose_with_production_cors(pool: sqlx::PgPool) {
         let mut f = auth::tests::fixture(pool).await;
         let config = &mut Arc::get_mut(&mut f.state).unwrap().config;
-        config.app_url = "https://mindgrab.example/".into();
+        config.app_url = format!("{ORIGIN}/");
         config.secure_cookies = true;
         let app = router(f.state.clone()).layer(cors_layer(&f.state.config).unwrap());
         for (method, path, status) in [
@@ -280,32 +277,14 @@ mod tests {
             ("POST", "/api/startLogin", StatusCode::SEE_OTHER),
             ("GET", "/api/auth/callback", StatusCode::SEE_OTHER),
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .header(header::ORIGIN, "https://mindgrab.example")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header(header::ORIGIN, ORIGIN);
+            let response = send(&app, request).await;
             assert_eq!(response.status(), status, "{method} {path}");
             assert_private_headers(response.headers());
-            assert_eq!(
-                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-                "https://mindgrab.example"
-            );
-            assert_eq!(
-                response.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
-                "true"
-            );
-            assert_eq!(
-                response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
-                "server-timing"
-            );
+            assert_headers(response.headers(), CORS_HEADERS);
             if path == "/api/startLogin" {
                 let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
                 for attribute in [
@@ -320,31 +299,21 @@ mod tests {
             }
         }
         // The existing outer CorsLayer answers preflights before private routers.
-        let preflight = app
-            .oneshot(
-                Request::builder()
-                    .method("OPTIONS")
-                    .uri("/api/getMe")
-                    .header(header::ORIGIN, "https://mindgrab.example")
-                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                    .header(
-                        header::ACCESS_CONTROL_REQUEST_HEADERS,
-                        "content-type,x-mindgrab-account",
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let preflight = send(
+            &app,
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/api/getMe")
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type,x-mindgrab-account",
+                ),
+        )
+        .await;
         assert_eq!(preflight.status(), StatusCode::OK);
-        assert_eq!(
-            preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-            "https://mindgrab.example"
-        );
-        assert_eq!(
-            preflight.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
-            "true"
-        );
+        assert_headers(preflight.headers(), &CORS_HEADERS[..2]);
         assert_eq!(
             preflight.headers()[header::ACCESS_CONTROL_ALLOW_METHODS],
             "GET,POST"
@@ -361,18 +330,12 @@ mod tests {
 
     #[tokio::test]
     async fn local_development_allows_any_origin_without_credentials() {
-        let response = test_app(&config("http://localhost:5173/"))
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/getMe")
-                    .header(header::ORIGIN, "http://unconfigured.example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
+        let app = test_app(&config("http://localhost:5173/"));
+        let response = send(
+            &app,
+            Request::post("/api/getMe").header(header::ORIGIN, "http://unconfigured.example"),
+        )
+        .await;
         assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
         assert!(
             !response
@@ -383,43 +346,18 @@ mod tests {
 
     #[tokio::test]
     async fn production_allows_only_the_configured_origin_with_credentials() {
-        let app = test_app(&config("https://mindgrab.example/"));
-        let allowed = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/getMe")
-                    .header(header::ORIGIN, "https://mindgrab.example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            allowed.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
-            "https://mindgrab.example"
-        );
-        assert_eq!(
-            allowed.headers()[header::ACCESS_CONTROL_ALLOW_CREDENTIALS],
-            "true"
-        );
-        assert_eq!(
-            allowed.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
-            "server-timing"
-        );
-
-        let rejected = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/getMe")
-                    .header(header::ORIGIN, "https://attacker.example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let app = test_app(&config(&format!("{ORIGIN}/")));
+        let allowed = send(
+            &app,
+            Request::post("/api/getMe").header(header::ORIGIN, ORIGIN),
+        )
+        .await;
+        assert_headers(allowed.headers(), CORS_HEADERS);
+        let rejected = send(
+            &app,
+            Request::post("/api/getMe").header(header::ORIGIN, "https://attacker.example"),
+        )
+        .await;
         assert!(
             !rejected
                 .headers()
