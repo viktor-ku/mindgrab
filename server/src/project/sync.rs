@@ -11,7 +11,7 @@ use axum::{
         ws::{CloseFrame, Message, WebSocket},
     },
     http::HeaderMap,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -27,11 +27,11 @@ use yrs::{
     updates::{decoder::Decode, encoder::Encode},
 };
 
-use super::{
-    ApiError, parse_project_id, project_user, require_account, require_same_origin, updates,
-};
+use super::{ApiError, parse_project_id, project_user, require_account, updates};
 use crate::{
     auth::{AppState, authenticated_user},
+    config::Config,
+    request_validation::same_origin,
     workos::AuthError,
 };
 
@@ -42,8 +42,13 @@ const MAX_FRAME: usize = updates::MAX_UPDATE_BYTES + 16;
 static CONNECTIONS: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(64)));
 
-pub(super) fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/sync/v1/{project_id}", get(upgrade))
+pub(super) fn router(config: &Config) -> Router<Arc<AppState>> {
+    Router::new().route(
+        "/sync/v1/{project_id}",
+        get(upgrade).route_layer(same_origin(config.origin(), || {
+            ApiError::InvalidOrigin.into_response()
+        })),
+    )
 }
 
 #[derive(Deserialize)]
@@ -64,7 +69,6 @@ async fn upgrade(
         .clone()
         .try_acquire_owned()
         .map_err(|_| ApiError::Unavailable)?;
-    require_same_origin(&state, &headers)?;
     let owner = project_user(&state, &jar, &headers).await?;
     if let Some(expected) = scope.owner_id {
         require_account(&owner, &expected)?;

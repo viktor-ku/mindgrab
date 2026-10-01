@@ -364,7 +364,7 @@ async fn storage_failure_including_commit_failure_has_no_receipt(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn every_read_and_submission_checks_ownership_and_origin(pool: PgPool) {
+async fn every_read_and_submission_checks_ownership_and_upload_headers(pool: PgPool) {
     let f = fixture(pool).await;
     let cookie = sign_in(&f).await;
     let other = session_for(&f, "other_user").await;
@@ -385,28 +385,70 @@ async fn every_read_and_submission_checks_ownership_and_origin(pool: PgPool) {
             assert_eq!(get(&f.state, session, id, endpoint).await.0, expected);
         }
     }
-    for headers in [
-        vec![],
-        vec![("origin", "https://evil.example")],
-        vec![
-            ("origin", "http://localhost:5173"),
-            ("x-mindgrab-schema-version", "2"),
-        ],
+    let query = format!("projectId={id}&updateId={}", new_id());
+    let valid = query.as_str();
+    // Header errors follow authentication, account fencing and query IDs.
+    for (session, query, headers, status, code) in [
+        ("", valid, vec![], 401, "unauthenticated"),
+        (&cookie, "", vec![], 400, "invalid_request"),
+        (
+            &cookie,
+            "projectId=invalid&updateId=invalid",
+            vec![],
+            400,
+            "invalid_project_id",
+        ),
+        (
+            &cookie,
+            valid,
+            vec![("x-mindgrab-account", "9223372036854775807")],
+            409,
+            "account_changed",
+        ),
+        (&cookie, valid, vec![], 426, "unsupported_schema"),
+        (
+            &cookie,
+            valid,
+            vec![("x-mindgrab-schema-version", "2")],
+            426,
+            "unsupported_schema",
+        ),
+        (
+            &cookie,
+            valid,
+            vec![("x-mindgrab-schema-version", "1")],
+            400,
+            "invalid_request",
+        ),
+        (
+            &cookie,
+            valid,
+            vec![
+                ("x-mindgrab-schema-version", "1"),
+                ("content-type", "application/json"),
+            ],
+            400,
+            "invalid_request",
+        ),
     ] {
+        let mut headers = headers;
+        headers.push(("origin", "http://localhost:5173"));
         let response = send(
             &f.state,
-            &cookie,
+            session,
             "POST",
-            &format!(
-                "/api/submitProjectUpdate?projectId={id}&updateId={}",
-                new_id()
-            ),
-            INITIAL.to_vec(),
+            &format!("/api/submitProjectUpdate?{query}"),
+            vec![],
             &headers,
         )
         .await;
-        assert!(!response.0.is_success());
+        assert_eq!(response.0.as_u16(), status);
+        assert_eq!(response.1["error"]["code"], code);
     }
+    assert_eq!(
+        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
+        "0"
+    );
 }
 
 #[sqlx::test]

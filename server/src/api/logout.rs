@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -15,16 +14,7 @@ use crate::{
 pub(super) async fn logout(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-    headers: HeaderMap,
 ) -> Result<Response, AuthError> {
-    // A same-origin POST is required; SameSite alone does not protect sibling domains.
-    if headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        != Some(state.config.origin().as_str())
-    {
-        return Ok((StatusCode::FORBIDDEN, "Invalid request origin").into_response());
-    }
     let mut destination = state.config.app_url.clone();
     if let Some(token) = jar.get(SESSION_COOKIE) {
         let sid: Option<String> = sqlx::query_scalar(

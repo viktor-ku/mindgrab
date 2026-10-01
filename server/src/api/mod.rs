@@ -27,10 +27,13 @@ mod submit_project_update;
 
 use std::sync::Arc;
 
-use axum::{Router, routing::post};
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
 use serde::Deserialize;
 
-use crate::{auth::AppState, response_headers::private_headers};
+use crate::{
+    auth::AppState, project::ApiError, request_validation::same_origin,
+    response_headers::private_headers,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -39,12 +42,24 @@ pub(super) struct ProjectRequest {
 }
 
 pub(crate) fn router(state: Arc<AppState>) -> Router {
+    let auth_origin = same_origin(state.config.origin(), || {
+        (StatusCode::FORBIDDEN, "Invalid request origin").into_response()
+    });
+    let project_origin = same_origin(state.config.origin(), || {
+        ApiError::InvalidOrigin.into_response()
+    });
     let methods = Router::new()
         .route("/getMe", post(get_me::get_me))
         .route("/getHealth", post(get_health::get_health))
-        .route("/startLogin", post(start_login::start_login))
-        .route("/logout", post(logout::logout))
-        .route("/createProject", post(create_project::create_project))
+        .route(
+            "/startLogin",
+            post(start_login::start_login).route_layer(auth_origin.clone()),
+        )
+        .route("/logout", post(logout::logout).route_layer(auth_origin))
+        .route(
+            "/createProject",
+            post(create_project::create_project).route_layer(project_origin.clone()),
+        )
         .route("/listProjects", post(list_projects::list_projects))
         .route("/getProject", post(get_project::get_project))
         .route(
@@ -65,7 +80,7 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/submitProjectUpdate",
-            post(submit_project_update::submit_project_update),
+            post(submit_project_update::submit_project_update).route_layer(project_origin),
         )
         .layer(private_headers());
     Router::new().nest("/api", methods).with_state(state)

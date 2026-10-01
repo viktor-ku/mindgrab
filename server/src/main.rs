@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod local_seed;
 mod project;
+mod request_validation;
 mod response_headers;
 mod workos;
 
@@ -246,13 +247,19 @@ mod tests {
             ("GET", "/api/projects", StatusCode::UPGRADE_REQUIRED),
             ("PUT", "/api/projects", StatusCode::UPGRADE_REQUIRED),
             ("POST", "/api/projects", StatusCode::METHOD_NOT_ALLOWED),
-            ("GET", SYNC, StatusCode::BAD_REQUEST),
+            ("GET", SYNC, StatusCode::FORBIDDEN),
             ("POST", SYNC, StatusCode::METHOD_NOT_ALLOWED),
         ] {
             let response = send(&app, Request::builder().method(method).uri(path)).await;
             assert_eq!(response.status(), status, "{method} {path}");
             assert_private_headers(response.headers());
         }
+        let invalid_upgrade = send(
+            &app,
+            Request::get(SYNC).header(header::ORIGIN, f.state.config.origin()),
+        )
+        .await;
+        assert_eq!(invalid_upgrade.status(), StatusCode::BAD_REQUEST);
         let root = send(&app, Request::get("/")).await;
         assert_eq!(root.status(), StatusCode::OK);
         assert!(!root.headers().contains_key(header::CACHE_CONTROL));
@@ -303,7 +310,7 @@ mod tests {
             &app,
             Request::builder()
                 .method("OPTIONS")
-                .uri("/api/getMe")
+                .uri("/api/submitProjectUpdate")
                 .header(header::ORIGIN, ORIGIN)
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                 .header(

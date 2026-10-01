@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -50,7 +50,7 @@ pub(crate) use project_columns;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .merge(sync::router())
+        .merge(sync::router(&state.config))
         // Retired snapshot clients must still receive an explicit upgrade error.
         .route(
             "/api/projects",
@@ -226,18 +226,6 @@ pub(crate) fn parse_new_project_id(value: &str) -> Result<Uuid, ApiError> {
         Ok(id)
     } else {
         Err(ApiError::InvalidProjectId)
-    }
-}
-
-pub(crate) fn require_same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    if headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        == Some(state.config.origin().as_str())
-    {
-        Ok(())
-    } else {
-        Err(ApiError::InvalidOrigin)
     }
 }
 

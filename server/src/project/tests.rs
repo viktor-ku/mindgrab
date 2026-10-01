@@ -176,27 +176,6 @@ async fn catalog_rejects_unauthenticated_and_forged_sessions(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn creation_requires_the_app_origin(pool: PgPool) {
-    let f = fixture(pool).await;
-    let session = sign_in(&f).await;
-    let id = new_id();
-    for origin in [None, Some("https://attacker.example"), Some("null")] {
-        let reply = send(
-            &f.state,
-            "POST",
-            CREATE_PROJECT,
-            &session,
-            origin,
-            Some(register(id)),
-        )
-        .await;
-        assert_eq!(reply.status, StatusCode::FORBIDDEN);
-        assert_eq!(error_code(&reply), "invalid_origin");
-    }
-    assert!(catalog_rows(&f.state.pool, id).await.is_empty());
-}
-
-#[sqlx::test]
 async fn registration_is_idempotent_and_reports_reconnect_status(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;

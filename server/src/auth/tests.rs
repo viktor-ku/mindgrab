@@ -457,7 +457,7 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
             .status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
-    for origin in [None, Some("https://attacker.example"), Some("null")] {
+    for &origin in crate::request_validation::REJECTED_ORIGINS {
         assert_eq!(
             request(&f, "POST", "/api/logout", &session, origin)
                 .await
@@ -514,15 +514,60 @@ async fn production_cookie_is_secure_and_signature_tampering_is_rejected(pool: P
 }
 
 #[sqlx::test]
-async fn login_requires_the_app_origin_before_creating_an_attempt(pool: PgPool) {
+async fn mutations_and_websocket_require_the_app_origin_before_authentication(pool: PgPool) {
     let f = fixture(pool).await;
-    for origin in [None, Some("https://attacker.example"), Some("null")] {
-        let response = request(&f, "POST", "/api/startLogin", "", origin).await;
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let origins = crate::request_validation::REJECTED_ORIGINS
+        .iter()
+        .map(|origin| {
+            origin
+                .iter()
+                .map(|value| (*value).as_bytes())
+                .collect::<Vec<_>>()
+        })
+        .chain([
+            vec![
+                b"http://localhost:5173".as_slice(),
+                b"https://attacker.example".as_slice(),
+            ],
+            vec![b"\xff".as_slice()],
+        ]);
+    for origins in origins {
+        for (method, path) in [
+            ("POST", "/api/startLogin"),
+            ("POST", "/api/createProject"),
+            ("POST", "/api/submitProjectUpdate"),
+            ("GET", "/sync/v1/10000000-0000-4000-8000-000000000000"),
+        ] {
+            let mut request = axum::http::Request::builder().method(method).uri(path);
+            for &origin in &origins {
+                request = request.header(header::ORIGIN, origin);
+            }
+            let response = crate::router(f.state.clone())
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            crate::response_headers::assert_private_headers(response.headers());
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            if path == "/api/startLogin" {
+                assert_eq!(body.as_ref(), b"Invalid request origin");
+            } else {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+                    "invalid_origin"
+                );
+            }
+        }
     }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_login_attempts")
         .fetch_one(&f.state.pool)
         .await
         .unwrap();
     assert_eq!(count, 0);
+    assert!(f.mock.requests.lock().unwrap().is_empty());
+    let projects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crdt_project")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(projects, 0);
 }

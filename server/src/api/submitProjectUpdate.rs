@@ -13,7 +13,7 @@ use serde::Deserialize;
 use crate::{
     auth::AppState,
     project::{
-        ApiError, parse_new_project_id, parse_project_id, project_user, require_same_origin,
+        ApiError, parse_new_project_id, parse_project_id, project_user,
         updates::{MAX_UPDATE_BYTES, ingest},
     },
 };
@@ -32,11 +32,12 @@ pub(super) async fn submit_project_update(
     query: Result<Query<SubmitProjectUpdate>, QueryRejection>,
     request: Request,
 ) -> Result<Response, ApiError> {
-    require_same_origin(&state, &headers)?;
     let owner = project_user(&state, &jar, &headers).await?;
     let Query(args) = query.map_err(|_| ApiError::InvalidRequest)?;
     let id = parse_project_id(&args.project_id)?;
     let update_id = parse_new_project_id(&args.update_id)?;
+    // Keep header errors after authentication, the account fence and query IDs.
+    // A request-header layer here would change their error precedence.
     if headers
         .get("x-mindgrab-schema-version")
         .and_then(|v| v.to_str().ok())
