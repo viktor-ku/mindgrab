@@ -15,18 +15,13 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{
-        Path, Query, State,
-        rejection::{JsonRejection, PathRejection, QueryRejection},
-    },
     http::{HeaderMap, StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
     routing::get,
 };
 use axum_extra::extract::cookie::CookieJar;
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::{Uuid, Variant, Version};
@@ -36,10 +31,10 @@ use crate::{
     workos::AuthError,
 };
 
-const PROTOCOL_VERSION: i16 = 1;
-const SCHEMA_VERSION: i16 = 1;
-const DEFAULT_PAGE_SIZE: u32 = 50;
-const MAX_PAGE_SIZE: u32 = 100;
+pub(crate) const PROTOCOL_VERSION: i16 = 1;
+pub(crate) const SCHEMA_VERSION: i16 = 1;
+pub(crate) const DEFAULT_PAGE_SIZE: u32 = 50;
+pub(crate) const MAX_PAGE_SIZE: u32 = 100;
 
 macro_rules! project_columns {
     () => {
@@ -51,16 +46,12 @@ macro_rules! project_columns {
     };
 }
 
+pub(crate) use project_columns;
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route(
-            "/api/crdt/v1/projects",
-            get(list_projects).post(create_project),
-        )
-        .route("/api/crdt/v1/projects/{project_id}", get(get_project))
-        .merge(updates::router())
-        .merge(read_model::router())
         .merge(sync::router())
+        // Retired snapshot clients must still receive an explicit upgrade error.
         .route(
             "/api/projects",
             get(cutover::upgrade_required).put(cutover::upgrade_required),
@@ -199,51 +190,30 @@ impl From<sqlx::Error> for ApiError {
 
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
-struct CatalogProject {
+pub(crate) struct CatalogProject {
     #[serde(rename = "projectId")]
-    id: Uuid,
-    protocol_version: i16,
-    schema_version: i16,
-    created_at: String,
-    name: Option<read_model::Utf8Text>,
-    node_count: Option<i32>,
+    pub(crate) id: Uuid,
+    pub(crate) protocol_version: i16,
+    pub(crate) schema_version: i16,
+    pub(crate) created_at: String,
+    pub(crate) name: Option<read_model::Utf8Text>,
+    pub(crate) node_count: Option<i32>,
     #[serde(serialize_with = "read_model::optional_sequence")]
-    projection_sequence: Option<i64>,
-    projection_version: Option<i16>,
-    projection_status: String,
+    pub(crate) projection_sequence: Option<i64>,
+    pub(crate) projection_version: Option<i16>,
+    pub(crate) projection_status: String,
     #[serde(serialize_with = "decimal_string")]
-    last_sequence: i64,
-    content_updated_at: Option<String>,
+    pub(crate) last_sequence: i64,
+    pub(crate) content_updated_at: Option<String>,
     #[serde(skip)]
-    created_at_micros: i64,
+    pub(crate) created_at_micros: i64,
 }
 
 fn decimal_string<S: Serializer>(value: &i64, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(value)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct CreateProject {
-    project_id: String,
-    schema_version: i64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListQuery {
-    limit: Option<u32>,
-    cursor: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectPage {
-    projects: Vec<CatalogProject>,
-    next_cursor: Option<String>,
-}
-
-fn parse_project_id(value: &str) -> Result<Uuid, ApiError> {
+pub(crate) fn parse_project_id(value: &str) -> Result<Uuid, ApiError> {
     Uuid::try_parse(value)
         .ok()
         .filter(|id| !id.is_nil() && id.hyphenated().to_string() == value)
@@ -259,25 +229,7 @@ pub(crate) fn parse_new_project_id(value: &str) -> Result<Uuid, ApiError> {
     }
 }
 
-fn encode_cursor(project: &CatalogProject) -> String {
-    let mut bytes = [0; 24];
-    bytes[..8].copy_from_slice(&project.created_at_micros.to_be_bytes());
-    bytes[8..].copy_from_slice(project.id.as_bytes());
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn decode_cursor(value: &str) -> Result<(i64, Uuid), ApiError> {
-    let bytes: [u8; 24] = URL_SAFE_NO_PAD
-        .decode(value)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-        .ok_or(ApiError::InvalidCursor)?;
-    let micros = i64::from_be_bytes(bytes[..8].try_into().unwrap());
-    let id = Uuid::from_slice(&bytes[8..]).map_err(|_| ApiError::InvalidCursor)?;
-    Ok((micros, id))
-}
-
-fn require_same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn require_same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     if headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -291,7 +243,7 @@ fn require_same_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiE
 
 // An expectation is a fence, never an ownership selector. The session remains
 // the authority even when cookies rotate while a previous workspace is active.
-async fn project_user(
+pub(crate) async fn project_user(
     state: &AppState,
     jar: &CookieJar,
     headers: &HeaderMap,
@@ -306,7 +258,7 @@ async fn project_user(
     Ok(user)
 }
 
-fn require_account(user: &User, expected: &str) -> Result<(), ApiError> {
+pub(crate) fn require_account(user: &User, expected: &str) -> Result<(), ApiError> {
     let id = expected
         .parse::<i64>()
         .map_err(|_| ApiError::InvalidRequest)?;
@@ -319,7 +271,7 @@ fn require_account(user: &User, expected: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn owned_project(
+pub(crate) async fn owned_project(
     pool: &PgPool,
     id: Uuid,
     owner_id: i64,
@@ -333,106 +285,6 @@ async fn owned_project(
     .bind(owner_id)
     .fetch_optional(pool)
     .await?)
-}
-
-async fn create_project(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    body: Result<Json<CreateProject>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    require_same_origin(&state, &headers)?;
-    let owner = project_user(&state, &jar, &headers).await?;
-    let Json(request) = body.map_err(|_| ApiError::InvalidRequest)?;
-    let id = parse_new_project_id(&request.project_id)?;
-    if request.schema_version != i64::from(SCHEMA_VERSION) {
-        return Err(ApiError::UnsupportedSchema);
-    }
-    // A concurrent claim of the same UUID waits for the other transaction; the
-    // follow-up read then observes whichever registration committed first.
-    let created: Option<CatalogProject> = sqlx::query_as(concat!(
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version) \
-         VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING RETURNING ",
-        project_columns!()
-    ))
-    .bind(id)
-    .bind(owner.id)
-    .bind(PROTOCOL_VERSION)
-    .bind(SCHEMA_VERSION)
-    .fetch_optional(&state.pool)
-    .await?;
-    if let Some(project) = created {
-        let location = format!("/api/crdt/v1/projects/{id}");
-        return Ok((
-            StatusCode::CREATED,
-            [(header::LOCATION, location)],
-            Json(project),
-        )
-            .into_response());
-    }
-    // Another owner's claim is indistinguishable from a mismatched retry.
-    match owned_project(&state.pool, id, owner.id).await? {
-        Some(project)
-            if project.protocol_version == PROTOCOL_VERSION
-                && project.schema_version == SCHEMA_VERSION =>
-        {
-            Ok((StatusCode::OK, Json(project)).into_response())
-        }
-        _ => Err(ApiError::ProjectIdConflict),
-    }
-}
-
-async fn get_project(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<Json<CatalogProject>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let Path(project_id) = path.map_err(|_| ApiError::InvalidProjectId)?;
-    let id = parse_project_id(&project_id)?;
-    owned_project(&state.pool, id, owner.id)
-        .await?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
-}
-
-async fn list_projects(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    query: Result<Query<ListQuery>, QueryRejection>,
-) -> Result<Json<ProjectPage>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let Query(query) = query.map_err(|_| ApiError::InvalidRequest)?;
-    let limit = query.limit.unwrap_or(DEFAULT_PAGE_SIZE);
-    if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-        return Err(ApiError::InvalidRequest);
-    }
-    let after = query.cursor.as_deref().map(decode_cursor).transpose()?;
-    let mut projects: Vec<CatalogProject> = sqlx::query_as(concat!(
-        "SELECT ",
-        project_columns!(),
-        " FROM crdt_project WHERE owner_id = $1 \
-         AND ($2::BIGINT IS NULL OR (created_at, id) < \
-             (TIMESTAMPTZ 'epoch' + $2::BIGINT * INTERVAL '1 microsecond', $3::UUID)) \
-         ORDER BY created_at DESC, id DESC LIMIT $4"
-    ))
-    .bind(owner.id)
-    .bind(after.map(|(micros, _)| micros))
-    .bind(after.map(|(_, id)| id))
-    .bind(i64::from(limit) + 1)
-    .fetch_all(&state.pool)
-    .await?;
-    let has_more = projects.len() > limit as usize;
-    projects.truncate(limit as usize);
-    let next_cursor = has_more
-        .then(|| projects.last().map(encode_cursor))
-        .flatten();
-    Ok(Json(ProjectPage {
-        projects,
-        next_cursor,
-    }))
 }
 
 #[cfg(test)]

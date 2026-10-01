@@ -63,7 +63,8 @@ export async function checkHealth(
     checkedAt: deps.clock(),
   });
   try {
-    const response = await deps.fetch(backendEndpoint("/api/health"), {
+    const response = await deps.fetch(backendEndpoint("/api/getHealth"), {
+      method: "POST",
       cache: "no-store",
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),

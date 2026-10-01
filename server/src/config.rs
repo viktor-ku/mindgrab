@@ -25,8 +25,8 @@ impl Config {
             .to_owned();
         let redirect_uri = required("WORKOS_REDIRECT_URI")?;
         let redirect = validate_url(&redirect_uri)?;
-        if redirect.path() != "/api/auth/callback" {
-            return Err("WORKOS_REDIRECT_URI must end with /api/auth/callback".into());
+        if redirect.path() != "/auth/callback" {
+            return Err("WORKOS_REDIRECT_URI must end with /auth/callback".into());
         }
         let origin = redirect.origin().ascii_serialization();
         let app_url = std::env::var("APP_URL").unwrap_or_else(|_| format!("{origin}/"));
@@ -99,8 +99,8 @@ mod tests {
 
     #[test]
     fn authentication_urls_require_https_except_on_loopback() {
-        assert!(validate_url("http://localhost:5173/api/auth/callback").is_ok());
-        assert!(validate_url("https://mindgrab.example/api/auth/callback").is_ok());
+        assert!(validate_url("http://localhost:5173/auth/callback").is_ok());
+        assert!(validate_url("https://mindgrab.example/auth/callback").is_ok());
         for url in [
             "http://example.com/",
             "https://user:secret@example.com/",

@@ -43,7 +43,7 @@ static CONNECTIONS: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(64)));
 
 pub(super) fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/crdt/v1/sync/{project_id}", get(upgrade))
+    Router::new().route("/sync/v1/{project_id}", get(upgrade))
 }
 
 #[derive(Deserialize)]

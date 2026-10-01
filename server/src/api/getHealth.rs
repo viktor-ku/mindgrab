@@ -1,14 +1,14 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::auth::AppState;
 use axum::{
-    Json, Router,
+    Json,
     extract::State,
     http::{HeaderName, StatusCode, header},
     response::IntoResponse,
-    routing::get,
 };
 use serde::Serialize;
-use sqlx::PgPool;
 
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -38,18 +38,12 @@ struct Health {
     database: Component,
 }
 
-pub fn router(pool: PgPool) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
-        .with_state(pool)
-}
-
-async fn health(State(pool): State<PgPool>) -> impl IntoResponse {
+pub(super) async fn get_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let started = Instant::now();
     let reachable = matches!(
         tokio::time::timeout(
             DATABASE_TIMEOUT,
-            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&pool),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
         )
         .await,
         Ok(Ok(1))
@@ -90,12 +84,14 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use serde_json::Value;
+    use sqlx::PgPool;
     use tower::ServiceExt;
 
     async fn check(pool: PgPool) -> (StatusCode, Value) {
-        let response = router(pool)
+        let fixture = crate::auth::tests::fixture(pool).await;
+        let response = crate::api::router(fixture.state.clone())
             .oneshot(
-                axum::http::Request::get("/api/health")
+                axum::http::Request::post("/api/getHealth")
                     .body(Body::empty())
                     .unwrap(),
             )

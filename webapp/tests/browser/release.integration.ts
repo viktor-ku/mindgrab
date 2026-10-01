@@ -69,14 +69,19 @@ const server = Bun.serve<ProxySocket>({
   port: 0,
   async fetch(request, server) {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/")) {
+    if (
+      url.pathname.startsWith("/api/") ||
+      url.pathname.startsWith("/auth/") ||
+      url.pathname.startsWith("/sync/")
+    ) {
+      const call = url.pathname + url.search;
       if (!apiAvailable)
         return new Response("API processes stopped by fixture", {
           status: 503,
         });
       if (url.pathname.startsWith("/api/projects"))
         legacyRequests.push(url.pathname);
-      if (url.pathname.startsWith("/api/crdt/v1/sync/")) {
+      if (url.pathname.startsWith("/sync/v1/")) {
         if (!socketsEnabled) return new Response(null, { status: 503 });
         const peer = new ProxyWebSocket(
           `${upstreams[active].replace("http:", "ws:")}${url.pathname}${url.search}`,
@@ -104,15 +109,15 @@ const server = Bun.serve<ProxySocket>({
       headers.delete("host");
       const body =
         request.method === "GET" ? undefined : await request.arrayBuffer();
-      if (request.method === "PUT") {
-        const previous = batches.get(url.pathname);
+      if (url.pathname === "/api/submitProjectUpdate") {
+        const previous = batches.get(call);
         if (
           previous &&
           !Buffer.from(previous.bytes).equals(
             Buffer.from(body ?? new ArrayBuffer(0)),
           )
         )
-          changedRetries.push(url.pathname);
+          changedRetries.push(call);
       }
       const response = await fetch(
         `${upstreams[active]}${url.pathname}${url.search}`,
@@ -124,17 +129,17 @@ const server = Bun.serve<ProxySocket>({
           signal: AbortSignal.timeout(10_000),
         },
       );
-      if (request.method === "PUT") {
-        attempts.set(url.pathname, (attempts.get(url.pathname) ?? 0) + 1);
+      if (url.pathname === "/api/submitProjectUpdate") {
+        attempts.set(call, (attempts.get(call) ?? 0) + 1);
         if (response.status >= 500) failedCommits++;
         if (response.ok && body)
-          batches.set(url.pathname, {
+          batches.set(call, {
             bytes: new Uint8Array(body),
             receipt: await response.clone().json(),
           });
         if (response.ok && dropReceipt) {
           dropReceipt = false;
-          droppedId = url.pathname;
+          droppedId = call;
           // The real COMMIT has finished; discard its receipt before the browser.
           return new Response("Injected lost receipt", { status: 502 });
         }
@@ -460,7 +465,7 @@ try {
   await waitUntil(
     () =>
       Array.from(attempts.values()).reduce((a, b) => a + b, 0) > beforeAttempts,
-    "delayed PUT",
+    "delayed update submission",
   );
   await ar.evaluate(() => mg.edit("Newer generation "));
   await locallySaved(ar);
@@ -612,7 +617,7 @@ try {
   expect(compacted.state.content).toEqual(beforeCompact.state.content);
   const original = [...batches.entries()].find(([path]) => path.includes(id));
   if (!original) throw new Error("Missing committed batch for receipt retry");
-  const retried = await ar.request.put(`${origin}${original[0]}`, {
+  const retried = await ar.request.post(`${origin}${original[0]}`, {
     headers: {
       Origin: origin,
       "Content-Type": "application/octet-stream",
@@ -738,8 +743,8 @@ async function conflictAndReorder(page: Page, id: string) {
     return { updates, content, forest };
   });
   async function put(index: number) {
-    const response = await page.request.put(
-      `${origin}/api/crdt/v1/projects/${id}/updates/${crypto.randomUUID()}`,
+    const response = await page.request.post(
+      `${origin}/api/submitProjectUpdate?${new URLSearchParams({ projectId: id, updateId: crypto.randomUUID() })}`,
       {
         headers: {
           Origin: origin,
@@ -786,14 +791,19 @@ async function verifyAccounts(
   await page.waitForSelector('[data-storage-ready="true"]');
   await page.getByText("Other", { exact: true }).waitFor();
   expect(await page.evaluate(() => mg.doc().guid)).not.toBe(id);
-  for (const suffix of ["", "/baseline", "/state", "/updates"]) {
-    const response = await page.request.get(
-      `${origin}/api/crdt/v1/projects/${id}${suffix}`,
-    );
+  for (const method of [
+    "getProject",
+    "getProjectBaseline",
+    "getProjectState",
+    "getProjectUpdates",
+  ]) {
+    const response = await page.request.post(`${origin}/api/${method}`, {
+      data: { projectId: id },
+    });
     expect(response.status()).toBe(404);
   }
-  const write = await page.request.put(
-    `${origin}/api/crdt/v1/projects/${id}/updates/${crypto.randomUUID()}`,
+  const write = await page.request.post(
+    `${origin}/api/submitProjectUpdate?${new URLSearchParams({ projectId: id, updateId: crypto.randomUUID() })}`,
     {
       headers: {
         Origin: origin,

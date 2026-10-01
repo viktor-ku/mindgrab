@@ -1,5 +1,6 @@
 use super::*;
 use axum::body::{Body, to_bytes};
+use axum::routing::post;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use std::sync::{
@@ -83,7 +84,7 @@ pub(crate) async fn fixture(pool: PgPool) -> Fixture {
         database_url: String::new(),
         client_id: "client_test".into(),
         api_key: "test-secret".into(),
-        redirect_uri: "http://localhost:5173/api/auth/callback".into(),
+        redirect_uri: "http://localhost:5173/auth/callback".into(),
         app_url: "http://localhost:5173/".into(),
         issuer: crate::config::default_issuer("client_test"),
         secure_cookies: false,
@@ -114,7 +115,7 @@ async fn request(
     if let Some(origin) = origin {
         builder = builder.header(header::ORIGIN, origin);
     }
-    router(f.state.clone())
+    crate::router(f.state.clone())
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap()
@@ -135,7 +136,14 @@ fn response_cookie(response: &Response, name: &str) -> String {
 }
 
 async fn start_login(f: &Fixture) -> (String, String) {
-    let response = request(f, "GET", "/api/auth/login", "", None).await;
+    let response = request(
+        f,
+        "POST",
+        "/api/startLogin",
+        "",
+        Some("http://localhost:5173"),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let cookie = response_cookie(&response, STATE_COOKIE);
     let url = reqwest::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
@@ -153,10 +161,7 @@ async fn start_login(f: &Fixture) -> (String, String) {
     assert_eq!(params["code_challenge"], token_hash(&verifier));
     (
         cookie,
-        format!(
-            "/api/auth/callback?code=valid-code&state={}",
-            params["state"]
-        ),
+        format!("/auth/callback?code=valid-code&state={}", params["state"]),
     )
 }
 
@@ -233,7 +238,7 @@ pub(crate) async fn expire_access_token(f: &Fixture) {
 async fn anonymous_and_forged_sessions_are_rejected(pool: PgPool) {
     let f = fixture(pool).await;
     for cookies in ["", "mindgrab_session=forged"] {
-        let response = request(&f, "GET", "/api/me", cookies, None).await;
+        let response = request(&f, "POST", "/api/getMe", cookies, None).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     }
@@ -312,7 +317,7 @@ async fn cancellation_consumes_state_without_authentication(pool: PgPool) {
 async fn login_persists_user_rotates_cookie_and_survives_router_recreation(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
-    let response = request(&f, "GET", "/api/me", &session, None).await;
+    let response = request(&f, "POST", "/api/getMe", &session, None).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), 4096).await.unwrap();
     let user: Value = serde_json::from_slice(&body).unwrap();
@@ -325,7 +330,9 @@ async fn login_persists_user_rotates_cookie_and_survives_router_recreation(pool:
     assert_ne!(response_cookie(&response, SESSION_COOKIE), session);
     assert_eq!(session_count(&f).await, 1);
     assert_eq!(
-        request(&f, "GET", "/api/me", &session, None).await.status(),
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
@@ -345,8 +352,8 @@ async fn refresh_is_serialized_and_rotated_tokens_are_persisted(pool: PgPool) {
     let session = sign_in(&f).await;
     expire_access_token(&f).await;
     let (a, b) = tokio::join!(
-        request(&f, "GET", "/api/me", &session, None),
-        request(&f, "GET", "/api/me", &session, None)
+        request(&f, "POST", "/api/getMe", &session, None),
+        request(&f, "POST", "/api/getMe", &session, None)
     );
     assert_eq!(a.status(), StatusCode::OK);
     assert_eq!(b.status(), StatusCode::OK);
@@ -364,14 +371,16 @@ async fn transient_refresh_failure_preserves_session_and_terminal_failure_remove
     let session = sign_in(&f).await;
     expire_access_token(&f).await;
     f.mock.refresh_status.store(503, Ordering::SeqCst);
-    let response = request(&f, "GET", "/api/me", &session, None).await;
+    let response = request(&f, "POST", "/api/getMe", &session, None).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     assert_eq!(session_count(&f).await, 1);
     assert_eq!(f.mock.refresh_calls.load(Ordering::SeqCst), 2);
     f.mock.refresh_status.store(400, Ordering::SeqCst);
     assert_eq!(
-        request(&f, "GET", "/api/me", &session, None).await.status(),
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(session_count(&f).await, 0);
@@ -397,7 +406,9 @@ async fn invalid_tokens_and_expired_local_sessions_cannot_authenticate(pool: PgP
             .await
             .unwrap();
         assert_eq!(
-            request(&f, "GET", "/api/me", &session, None).await.status(),
+            request(&f, "POST", "/api/getMe", &session, None)
+                .await
+                .status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(session_count(&f).await, 0);
@@ -408,7 +419,9 @@ async fn invalid_tokens_and_expired_local_sessions_cannot_authenticate(pool: PgP
         .await
         .unwrap();
     assert_eq!(
-        request(&f, "GET", "/api/me", &session, None).await.status(),
+        request(&f, "POST", "/api/getMe", &session, None)
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(f.mock.refresh_calls.load(Ordering::SeqCst), 0);
@@ -419,14 +432,14 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
     assert_eq!(
-        request(&f, "GET", "/api/auth/logout", &session, None)
+        request(&f, "GET", "/api/logout", &session, None)
             .await
             .status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
     for origin in [None, Some("https://attacker.example"), Some("null")] {
         assert_eq!(
-            request(&f, "POST", "/api/auth/logout", &session, origin)
+            request(&f, "POST", "/api/logout", &session, origin)
                 .await
                 .status(),
             StatusCode::FORBIDDEN
@@ -436,7 +449,7 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
     let response = request(
         &f,
         "POST",
-        "/api/auth/logout",
+        "/api/logout",
         &session,
         Some("http://localhost:5173"),
     )
@@ -457,7 +470,14 @@ async fn logout_requires_same_origin_post_and_removes_the_session(pool: PgPool) 
 async fn production_cookie_is_secure_and_signature_tampering_is_rejected(pool: PgPool) {
     let mut f = fixture(pool).await;
     Arc::get_mut(&mut f.state).unwrap().config.secure_cookies = true;
-    let response = request(&f, "GET", "/api/auth/login", "", None).await;
+    let response = request(
+        &f,
+        "POST",
+        "/api/startLogin",
+        "",
+        Some("http://localhost:5173"),
+    )
+    .await;
     assert!(
         response.headers()[header::SET_COOKIE]
             .to_str()
@@ -471,4 +491,18 @@ async fn production_cookie_is_secure_and_signature_tampering_is_rejected(pool: P
         f.state.workos.verify(&parts.join(".")).await,
         Err(AuthError::Unauthorized)
     ));
+}
+
+#[sqlx::test]
+async fn login_requires_the_app_origin_before_creating_an_attempt(pool: PgPool) {
+    let f = fixture(pool).await;
+    for origin in [None, Some("https://attacker.example"), Some("null")] {
+        let response = request(&f, "POST", "/api/startLogin", "", origin).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_login_attempts")
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }

@@ -33,7 +33,7 @@ export function authStorageKey(deployment: string) {
 }
 
 // This is an account hint and logout tombstone, never a token or authorization.
-// Only /api/me confirms a session. A 401 retains the cached workspace for reauth.
+// Only /api/getMe confirms a session. A 401 retains the cached workspace for reauth.
 export class AuthSession {
   readonly key: string;
   readonly #listeners = new Set<(state: SessionState) => void>();
@@ -210,7 +210,8 @@ export class AuthSession {
       !this.#disposed && epoch === this.#epoch && !abort.signal.aborted;
     const promise = (async () => {
       try {
-        const response = await fetch(backendEndpoint("/api/me"), {
+        const response = await fetch(backendEndpoint("/api/getMe"), {
+          method: "POST",
           credentials: "include",
           cache: "no-store",
           signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]),

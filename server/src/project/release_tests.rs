@@ -88,7 +88,7 @@ fn release_api_process() {
         let mut f = fixture(pool).await;
         let state = Arc::get_mut(&mut f.state).unwrap();
         state.config.app_url = format!("{}/", input["origin"].as_str().unwrap());
-        let app = crate::auth::router(f.state.clone()).merge(super::router(f.state.clone()));
+        let app = crate::router(f.state.clone());
         // Exercise the real deployment's background workers in both processes.
         read_model::start_worker(f.state.pool.clone());
         maintenance::start_worker(f.state.pool.clone());

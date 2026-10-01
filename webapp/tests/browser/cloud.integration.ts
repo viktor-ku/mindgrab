@@ -11,7 +11,7 @@ const config = JSON.parse(await Bun.stdin.text()) as {
   ownerId: number;
 };
 const origin = "http://localhost:5173";
-const ws = `${config.serverUrl}/api/crdt/v1/sync`;
+const ws = `${config.serverUrl}/sync/v1`;
 const http = config.serverUrl.replace("ws:", "http:");
 const build = await Bun.build({
   entrypoints: [`${import.meta.dir}/cloud-harness.ts`],
@@ -34,7 +34,7 @@ async function context(production = false) {
   ]);
   await context.route(`${origin}/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === "/api/me" && production) {
+    if (path === "/api/getMe" && production) {
       await route.fulfill({
         json: {
           id: config.ownerId,
@@ -57,7 +57,7 @@ async function context(production = false) {
           response.status(),
           await response.text(),
         );
-      if (request.method() === "PUT") {
+      if (path === "/api/submitProjectUpdate") {
         submissions++;
         if (droppedReceipt) {
           droppedReceipt = false;
@@ -65,8 +65,7 @@ async function context(production = false) {
           return;
         }
       }
-      if (request.method() === "GET" && path === "/api/crdt/v1/projects")
-        catalogRequests++;
+      if (path === "/api/listProjects") catalogRequests++;
       await route.fulfill({ response });
     } else if (production) {
       const file = Bun.file(
@@ -230,9 +229,8 @@ try {
   // account. Sockets are covered above; close this UI's socket to exercise HTTP
   // durability when live propagation is temporarily unavailable.
   const uiContext = await context(true);
-  await uiContext.routeWebSocket(
-    "ws://localhost:5173/api/crdt/v1/sync/**",
-    (socket) => socket.close(),
+  await uiContext.routeWebSocket("ws://localhost:5173/sync/v1/**", (socket) =>
+    socket.close(),
   );
   const ui = await uiContext.newPage();
   await ui.goto(origin);

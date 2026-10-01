@@ -1,30 +1,21 @@
 //! Rebuildable inspection indexes. Binary checkpoint/tail is the sole input.
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
-use axum::{
-    Json, Router,
-    extract::{Path, State, rejection::PathRejection},
-    http::HeaderMap,
-    routing::get,
-};
-use axum_extra::extract::cookie::CookieJar;
 use serde::Serialize;
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::project_user;
 use super::{
-    ApiError, decimal_string, parse_project_id,
+    ApiError, decimal_string,
     projection::{self, Content, EffectivePlacement, Metadata, Node, Placement, Position},
     updates,
 };
-use crate::auth::AppState;
 
 // PostgreSQL TEXT cannot hold NUL; canonical names/text can. Decode BYTEA
 // strictly instead of silently escaping or replacing user content.
 #[derive(Clone, Serialize)]
 #[serde(transparent)]
-pub(super) struct Utf8Text(pub String);
+pub(crate) struct Utf8Text(pub String);
 
 impl sqlx::Type<Postgres> for Utf8Text {
     fn type_info() -> sqlx::postgres::PgTypeInfo {
@@ -39,10 +30,6 @@ impl<'r> sqlx::Decode<'r, Postgres> for Utf8Text {
 }
 
 pub(super) const VERSION: i16 = 1;
-
-pub(super) fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/crdt/v1/projects/{project_id}/state", get(get_state))
-}
 
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -262,17 +249,6 @@ pub(crate) async fn current_state(
         content,
         placements,
     })
-}
-
-async fn get_state(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<Json<CurrentState>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
-    Ok(Json(current_state(&state.pool, owner.id, id).await?))
 }
 
 pub(crate) async fn rebuild_project(pool: &PgPool, owner: i64, id: Uuid) -> Result<(), ApiError> {

@@ -1,6 +1,6 @@
+mod api;
 mod auth;
 mod config;
-mod health;
 mod local_seed;
 mod project;
 mod workos;
@@ -136,22 +136,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let workos = workos::WorkOs::new(&config)?;
     let cors = cors_layer(&config)?;
-    let health = health::router(pool.clone());
     let state = Arc::new(auth::AppState {
         config,
         pool,
         workos,
     });
-    let app = Router::new()
-        .route("/", get(|| async { "Mindgrab API" }))
-        .merge(health)
-        .merge(auth::router(state.clone()))
-        .merge(project::router(state))
-        .layer(cors);
+    let app = router(state).layer(cors);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Mindgrab API listening on http://localhost:3000");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn router(state: Arc<auth::AppState>) -> Router {
+    Router::new()
+        .route("/", get(|| async { "Mindgrab API" }))
+        .merge(api::router(state.clone()))
+        .merge(auth::router(state.clone()))
+        .merge(project::router(state))
 }
 
 fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidHeaderValue> {
@@ -165,11 +167,7 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
     Ok(CorsLayer::new()
         .allow_origin(origin)
         .allow_credentials(!local)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-        ])
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
@@ -181,7 +179,7 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
 
 #[cfg(test)]
 mod tests {
-    use axum::{Router, body::Body, http::Request, routing::get};
+    use axum::{Router, body::Body, http::Request, routing::post};
     use tower::ServiceExt;
 
     use super::*;
@@ -200,7 +198,7 @@ mod tests {
 
     fn test_app(config: &Config) -> Router {
         Router::new()
-            .route("/api/me", get(|| async { "ok" }))
+            .route("/api/getMe", post(|| async { "ok" }))
             .layer(cors_layer(config).unwrap())
     }
 
@@ -209,7 +207,8 @@ mod tests {
         let response = test_app(&config("http://localhost:5173/"))
             .oneshot(
                 Request::builder()
-                    .uri("/api/me")
+                    .method("POST")
+                    .uri("/api/getMe")
                     .header(header::ORIGIN, "http://unconfigured.example")
                     .body(Body::empty())
                     .unwrap(),
@@ -232,7 +231,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/me")
+                    .method("POST")
+                    .uri("/api/getMe")
                     .header(header::ORIGIN, "https://mindgrab.example")
                     .body(Body::empty())
                     .unwrap(),
@@ -255,7 +255,8 @@ mod tests {
         let rejected = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/me")
+                    .method("POST")
+                    .uri("/api/getMe")
                     .header(header::ORIGIN, "https://attacker.example")
                     .body(Body::empty())
                     .unwrap(),

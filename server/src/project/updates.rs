@@ -5,47 +5,18 @@ mod document;
 pub(crate) mod maintenance;
 mod wire;
 
-use std::sync::Arc;
-
-use axum::{
-    Json, Router,
-    body::to_bytes,
-    extract::{
-        Path, Query, Request, State,
-        rejection::{PathRejection, QueryRejection},
-    },
-    http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
-    routing::{get, put},
-};
-use axum_extra::extract::cookie::CookieJar;
-use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::project_user;
-use super::{ApiError, parse_new_project_id, parse_project_id, require_same_origin};
-use crate::auth::AppState;
+use super::ApiError;
 
 pub(crate) const MAX_UPDATE_BYTES: usize = 1_048_576;
 const MAX_DOCUMENT_BYTES: usize = 10_485_760;
-const MAX_PAGE_BYTES: usize = 2_097_152;
+pub(crate) const MAX_PAGE_BYTES: usize = 2_097_152;
 // Hard reconstruction budgets; maintenance triggers well below these limits.
 const MAX_TAIL_ROWS: i64 = 10_000;
-
-pub(super) fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/crdt/v1/projects/{project_id}/updates/{update_id}",
-            put(submit),
-        )
-        .route("/api/crdt/v1/projects/{project_id}/updates", get(replay))
-        .route("/api/crdt/v1/projects/{project_id}/status", get(status))
-        .route("/api/crdt/v1/projects/{project_id}/baseline", get(baseline))
-}
 
 #[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
@@ -68,14 +39,14 @@ pub(super) fn digest(bytes: &[u8]) -> String {
 }
 
 #[derive(sqlx::FromRow)]
-pub(super) struct ProjectState {
-    pub(super) schema_version: i16,
-    pub(super) protocol_version: i16,
-    pub(super) last_sequence: i64,
-    pub(super) validation: String,
+pub(crate) struct ProjectState {
+    pub(crate) schema_version: i16,
+    pub(crate) protocol_version: i16,
+    pub(crate) last_sequence: i64,
+    pub(crate) validation: String,
 }
 
-pub(super) async fn lock_project(
+pub(crate) async fn lock_project(
     connection: &mut PgConnection,
     id: Uuid,
     owner: i64,
@@ -213,143 +184,6 @@ pub(crate) async fn ingest(
             durable: true,
             validation: validation.into(),
         },
-    ))
-}
-
-async fn submit(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<(String, String)>, PathRejection>,
-    request: Request,
-) -> Result<Response, ApiError> {
-    require_same_origin(&state, &headers)?;
-    let owner = project_user(&state, &jar, &headers).await?;
-    let Path((project, update)) = path.map_err(|_| ApiError::InvalidProjectId)?;
-    let id = parse_project_id(&project)?;
-    let update_id = parse_new_project_id(&update)?;
-    if headers
-        .get("x-mindgrab-schema-version")
-        .and_then(|v| v.to_str().ok())
-        != Some("1")
-    {
-        return Err(ApiError::UnsupportedSchema);
-    }
-    if headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        != Some("application/octet-stream")
-    {
-        return Err(ApiError::InvalidRequest);
-    }
-    let bytes = to_bytes(request.into_body(), MAX_UPDATE_BYTES)
-        .await
-        .map_err(|_| ApiError::ResourceLimit)?;
-    let (created, receipt) = ingest(&state.pool, owner.id, id, update_id, bytes.to_vec()).await?;
-    Ok((
-        if created {
-            StatusCode::CREATED
-        } else {
-            StatusCode::OK
-        },
-        Json(receipt),
-    )
-        .into_response())
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplayQuery {
-    after: Option<String>,
-    limit: Option<u32>,
-}
-
-fn sequence(value: Option<&str>) -> Result<i64, ApiError> {
-    let value = value.unwrap_or("0");
-    value
-        .parse::<i64>()
-        .ok()
-        .filter(|n| *n >= 0 && n.to_string() == value)
-        .ok_or(ApiError::InvalidCursor)
-}
-
-async fn replay(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<String>, PathRejection>,
-    query: Result<Query<ReplayQuery>, QueryRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
-    let Query(query) = query.map_err(|_| ApiError::InvalidRequest)?;
-    let after = sequence(query.after.as_deref())?;
-    let limit = query.limit.unwrap_or(100);
-    if !(1..=100).contains(&limit) {
-        return Err(ApiError::InvalidRequest);
-    }
-    if super::owned_project(&state.pool, id, owner.id)
-        .await?
-        .is_none()
-    {
-        return Err(ApiError::NotFound);
-    }
-    let mut transaction = state.pool.begin().await?;
-    lock_project(&mut transaction, id, owner.id).await?;
-    let covered: i64 = sqlx::query_scalar(
-        "SELECT COALESCE((SELECT covered_sequence FROM crdt_checkpoint WHERE project_id = $1), 0)",
-    )
-    .bind(id)
-    .fetch_one(&mut *transaction)
-    .await?;
-    if after < covered {
-        return Err(ApiError::BaselineRequired);
-    }
-    // Select a bounded byte window in SQL so a page never allocates 100 MiB.
-    let rows: Vec<(i64, Uuid, String, Vec<u8>)> = sqlx::query_as(
-        "WITH page AS (SELECT sequence, update_id, sha256, octet_length(data) AS size FROM crdt_update WHERE project_id = $1 AND sequence > $2 ORDER BY sequence LIMIT $3), sized AS (SELECT *, SUM(size) OVER (ORDER BY sequence) AS total FROM page) SELECT u.sequence, u.update_id, u.sha256, u.data FROM sized p JOIN crdt_update u ON u.project_id = $1 AND u.sequence = p.sequence WHERE p.total <= $4 ORDER BY u.sequence")
-        .bind(id).bind(after).bind(i64::from(limit)).bind(MAX_PAGE_BYTES as i64).fetch_all(&mut *transaction).await?;
-    let next = rows.last().map_or(after, |row| row.0);
-    let has_more: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM crdt_update WHERE project_id = $1 AND sequence > $2)",
-    )
-    .bind(id)
-    .bind(next)
-    .fetch_one(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    let updates: Vec<_> = rows.into_iter().map(|(seq, update, sha256, bytes)| json!({"sequence": seq.to_string(), "updateId": update, "sha256": sha256, "encoding": "yjs-v1", "data": STANDARD.encode(bytes)})).collect();
-    Ok(Json(
-        json!({"updates": updates, "nextAfter": next.to_string(), "hasMore": has_more}),
-    ))
-}
-
-async fn status(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
-    let project: ProjectState = sqlx::query_as("SELECT schema_version, protocol_version, last_sequence, validation FROM crdt_project WHERE id = $1 AND owner_id = $2")
-        .bind(id).bind(owner.id).fetch_optional(&state.pool).await?.ok_or(ApiError::NotFound)?;
-    Ok(Json(
-        json!({"schemaVersion": project.schema_version, "lastSequence": project.last_sequence.to_string(), "validation": project.validation}),
-    ))
-}
-
-async fn baseline(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-    headers: HeaderMap,
-    path: Result<Path<String>, PathRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let owner = project_user(&state, &jar, &headers).await?;
-    let id = parse_project_id(&path.map_err(|_| ApiError::InvalidProjectId)?.0)?;
-    let baseline = synchronization_baseline(&state.pool, owner.id, id).await?;
-    Ok(Json(
-        json!({"schemaVersion": 1, "lastSequence": baseline.sequence.to_string(), "validation": baseline.validation, "encoding": "yjs-v1", "data": STANDARD.encode(baseline.bytes), "stateVector": STANDARD.encode(baseline.state_vector)}),
     ))
 }
 

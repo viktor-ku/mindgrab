@@ -94,7 +94,7 @@ async fn compaction_prunes_bytes_preserves_receipts_and_requires_stale_replay_to
     let update = new_id();
     let receipt = put(&f.state, &cookie, id, update, INITIAL).await.1;
     let (owner, _) = identity(&f.state.pool, id).await;
-    let before = get(&f.state, &cookie, id, "baseline").await.1;
+    let before = get(&f.state, &cookie, id, "getProjectBaseline").await.1;
     let metrics = compact(&f.state.pool, owner, id).await.unwrap();
     assert!(metrics.coverage);
     assert_eq!(metrics.pruned_rows, 1);
@@ -105,15 +105,29 @@ async fn compaction_prunes_bytes_preserves_receipts_and_requires_stale_replay_to
         409
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates?after=0").await.1["error"]["code"],
+        crate::project::updates::tests::rpc(
+            &f.state,
+            &cookie,
+            "getProjectUpdates",
+            json!({"projectId": id, "after": "0"})
+        )
+        .await
+        .1["error"]["code"],
         "baseline_required"
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "updates?after=1").await.1["updates"],
+        crate::project::updates::tests::rpc(
+            &f.state,
+            &cookie,
+            "getProjectUpdates",
+            json!({"projectId": id, "after": "1"})
+        )
+        .await
+        .1["updates"],
         json!([])
     );
     assert_eq!(
-        get(&f.state, &cookie, id, "baseline").await.1["stateVector"],
+        get(&f.state, &cookie, id, "getProjectBaseline").await.1["stateVector"],
         before["stateVector"]
     );
     assert_eq!(

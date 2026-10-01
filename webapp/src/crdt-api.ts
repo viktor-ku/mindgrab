@@ -79,8 +79,9 @@ export class CrdtApi {
     signal.throwIfAborted();
     const headers = new Headers(init?.headers);
     if (this.ownerId) headers.set("X-Mindgrab-Account", String(this.ownerId));
-    const response = await this.fetcher(this.endpoint(`/api/crdt/v1/${path}`), {
+    const response = await this.fetcher(this.endpoint(`/api/${path}`), {
       ...init,
+      method: "POST",
       headers,
       credentials: "include",
       cache: "no-store",
@@ -111,13 +112,20 @@ export class CrdtApi {
     return response.json();
   }
 
+  #json(method: string, args: unknown, signal: AbortSignal) {
+    return this.#request(method, signal, {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args),
+    });
+  }
+
   async register(id: string, signal: AbortSignal) {
     const result = record.parse(
-      await this.#request("projects", signal, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: id, schemaVersion: 1 }),
-      }),
+      await this.#json(
+        "createProject",
+        { projectId: id, schemaVersion: 1 },
+        signal,
+      ),
     );
     if (result.projectId !== id)
       throw new SyncError("Unexpected project registration.", "blocked");
@@ -129,13 +137,18 @@ export class CrdtApi {
     const seen = new Set<string>();
     let cursor: string | null = null;
     do {
-      const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
       const page = z
         .object({
           projects: z.array(record),
           nextCursor: z.string().nullable(),
         })
-        .parse(await this.#request(`projects?limit=100${query}`, signal));
+        .parse(
+          await this.#json(
+            "listProjects",
+            { limit: 100, ...(cursor ? { cursor } : {}) },
+            signal,
+          ),
+        );
       projects.push(...page.projects);
       cursor = page.nextCursor;
       if (cursor && seen.has(cursor))
@@ -147,7 +160,7 @@ export class CrdtApi {
 
   async baseline(id: string, signal: AbortSignal) {
     return baseline.parse(
-      await this.#request(`projects/${id}/baseline`, signal),
+      await this.#json("getProjectBaseline", { projectId: id }, signal),
     );
   }
 
@@ -158,7 +171,7 @@ export class CrdtApi {
         lastSequence: sequence,
         validation,
       })
-      .parse(await this.#request(`projects/${id}/status`, signal));
+      .parse(await this.#json("getProjectStatus", { projectId: id }, signal));
   }
 
   async submit(
@@ -169,14 +182,17 @@ export class CrdtApi {
   ) {
     const sha256 = await digest(bytes);
     const result = receipt.parse(
-      await this.#request(`projects/${id}/updates/${updateId}`, signal, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "X-Mindgrab-Schema-Version": "1",
+      await this.#request(
+        `submitProjectUpdate?${new URLSearchParams({ projectId: id, updateId })}`,
+        signal,
+        {
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Mindgrab-Schema-Version": "1",
+          },
+          body: bytes.slice().buffer,
         },
-        body: bytes.slice().buffer,
-      }),
+      ),
     );
     if (
       result.projectId !== id ||
