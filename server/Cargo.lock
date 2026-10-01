@@ -161,6 +161,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server-timing"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "338f3fb33617004e96949d44125cb4d28ff98764a1b810e4e5a70ffa076aa625"
+dependencies = [
+ "http",
+ "pin-project-lite",
+ "tower",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2097,6 +2108,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
+ "axum-server-timing",
  "base64 0.23.1",
  "dotenvy",
  "futures-util",

@@ -20,6 +20,7 @@ use axum::{
     routing::get,
 };
 use axum_extra::extract::cookie::CookieJar;
+use axum_server_timing::ServerTimingLayer;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -177,6 +178,8 @@ fn router(state: Arc<auth::AppState>) -> Router {
         .layer(sessions)
         .layer(middleware::from_fn(fresh_login_session))
         .layer(response_headers::private_headers())
+        // Wrap private routes and their rejecting layers; CORS stays outside.
+        .layer(ServerTimingLayer::new("request"))
         .route("/", get(|| async { "Mindgrab API" }))
 }
 
@@ -246,6 +249,21 @@ mod tests {
         }
     }
 
+    pub(crate) fn timing_duration(headers: &HeaderMap, name: &str) -> f64 {
+        let durations: Vec<f64> = headers
+            .get_all("server-timing")
+            .iter()
+            .flat_map(|value| value.to_str().unwrap().split(','))
+            .filter_map(|metric| {
+                let (metric_name, duration) = metric.trim().split_once(";dur=").unwrap();
+                (metric_name == name).then(|| duration.parse().unwrap())
+            })
+            .collect();
+        assert_eq!(durations.len(), 1, "expected one {name} metric");
+        assert!(durations[0].is_finite() && durations[0] >= 0.0);
+        durations[0]
+    }
+
     fn config(app_url: &str) -> Config {
         Config {
             database_url: String::new(),
@@ -287,6 +305,7 @@ mod tests {
             let response = send(&app, Request::builder().method(method).uri(path)).await;
             assert_eq!(response.status(), status, "{method} {path}");
             assert_private_headers(response.headers());
+            timing_duration(response.headers(), "request");
         }
         let invalid_upgrade = send(
             &app,
@@ -298,10 +317,12 @@ mod tests {
         assert_eq!(root.status(), StatusCode::OK);
         assert!(!root.headers().contains_key(header::CACHE_CONTROL));
         assert!(!root.headers().contains_key(header::REFERRER_POLICY));
+        assert!(!root.headers().contains_key("server-timing"));
         // Merged private routers also layer the default fallback, as before.
         let missing = send(&app, Request::get("/missing")).await;
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_private_headers(missing.headers());
+        timing_duration(missing.headers(), "request");
     }
 
     #[sqlx::test]
@@ -326,6 +347,7 @@ mod tests {
             assert_eq!(response.status(), status, "{method} {path}");
             assert_private_headers(response.headers());
             assert_headers(response.headers(), CORS_HEADERS);
+            timing_duration(response.headers(), "request");
             if path == "/api/startLogin" {
                 let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
                 for attribute in [
@@ -367,6 +389,7 @@ mod tests {
         );
         assert!(!preflight.headers().contains_key(header::CACHE_CONTROL));
         assert!(!preflight.headers().contains_key(header::REFERRER_POLICY));
+        assert!(!preflight.headers().contains_key("server-timing"));
     }
 
     #[tokio::test]
