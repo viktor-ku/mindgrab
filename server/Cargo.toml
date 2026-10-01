@@ -7,6 +7,7 @@ edition = "2024"
 async-trait = "=0.1.92"
 axum = { version = "=0.8.9", features = ["ws"] }
 axum-extra = { version = "=0.12.6", features = ["cookie"] }
+axum-server-timing = "=3.0.1"
 base64 = "=0.23.1"
 dotenvy = "=0.15.7"
 jsonwebtoken = { version = "=11.1.0", features = ["rust_crypto"] }
