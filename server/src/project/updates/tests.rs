@@ -36,6 +36,7 @@ async fn send(
     headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
     let mut request = Request::builder()
+        .extension(crate::rate_limits::test_peer())
         .method(method)
         .uri(path)
         .header(header::COOKIE, cookie);

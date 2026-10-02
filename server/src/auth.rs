@@ -36,7 +36,7 @@ pub struct AppState {
     pub workos: WorkOs,
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router(state: Arc<AppState>, limits: &crate::rate_limits::RateLimits) -> Router {
     Router::new()
         .route(
             "/api/auth/callback",
@@ -46,7 +46,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 AUTH_DATA,
                 AuthError::into_response,
             )
-            .route_layer(middleware::from_fn(fresh_login_session)),
+            .route_layer(middleware::from_fn(fresh_login_session))
+            .route_layer(crate::rate_limits::RateLimits::layer(&limits.login)),
         )
         .layer(private_headers())
         .with_state(state)

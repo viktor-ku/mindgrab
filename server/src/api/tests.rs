@@ -34,6 +34,7 @@ async fn public_methods_accept_only_post(pool: PgPool) {
                 .clone()
                 .oneshot(
                     Request::builder()
+                        .extension(crate::rate_limits::test_peer())
                         .method(method)
                         .uri(format!("/api/{function}"))
                         .body(Body::empty())
@@ -53,6 +54,7 @@ async fn public_methods_accept_only_post(pool: PgPool) {
             .clone()
             .oneshot(
                 Request::post(format!("/api/{function}"))
+                    .extension(crate::rate_limits::test_peer())
                     .header(header::ORIGIN, "http://localhost:5173")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from("{}"))
@@ -99,6 +101,7 @@ async fn json_rpc_arguments_are_required_and_strict(pool: PgPool) {
                 .clone()
                 .oneshot(
                     Request::post(format!("/api/{function}"))
+                        .extension(crate::rate_limits::test_peer())
                         .header(header::COOKIE, &cookie)
                         .header(header::ORIGIN, "http://localhost:5173")
                         .header(header::CONTENT_TYPE, "application/json")

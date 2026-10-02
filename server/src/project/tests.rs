@@ -30,6 +30,7 @@ async fn send(
     body: Option<Value>,
 ) -> Reply {
     let mut builder = axum::http::Request::builder()
+        .extension(crate::rate_limits::test_peer())
         .method(method)
         .uri(path)
         .header(header::COOKIE, cookies);
@@ -399,6 +400,7 @@ async fn account_expectations_reject_changed_cookies_before_reads_registration_o
         let response = crate::router(f.state.clone())
             .oneshot(
                 axum::http::Request::builder()
+                    .extension(crate::rate_limits::test_peer())
                     .method("POST")
                     .uri(path)
                     .header(header::COOKIE, &b)
@@ -419,6 +421,7 @@ async fn account_expectations_reject_changed_cookies_before_reads_registration_o
     let response = crate::router(f.state.clone())
         .oneshot(
             axum::http::Request::builder()
+                .extension(crate::rate_limits::test_peer())
                 .method("POST")
                 .uri(CREATE_PROJECT)
                 .header(header::COOKIE, b)

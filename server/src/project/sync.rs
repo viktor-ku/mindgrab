@@ -39,13 +39,20 @@ const MAX_FRAME: usize = updates::MAX_UPDATE_BYTES + 16;
 static CONNECTIONS: std::sync::LazyLock<Arc<Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(Semaphore::new(64)));
 
-pub(super) fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+pub(super) fn router(
+    state: Arc<AppState>,
+    limits: &crate::rate_limits::RateLimits,
+) -> Router<Arc<AppState>> {
     Router::new().route(
         "/sync/v1/{project_id}",
-        protect(get(upgrade), state.clone())
-            .route_layer(same_origin(state.config.origin(), || {
-                ApiError::InvalidOrigin.into_response()
-            })),
+        protect(
+            get(upgrade).route_layer(crate::rate_limits::RateLimits::layer(&limits.upgrades)),
+            state.clone(),
+        )
+        .route_layer(crate::rate_limits::RateLimits::layer(&limits.upgrade_peers))
+        .route_layer(same_origin(state.config.origin(), || {
+            ApiError::InvalidOrigin.into_response()
+        })),
     )
 }
 

@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod local_seed;
 mod project;
+mod rate_limits;
 mod request_validation;
 mod response_headers;
 mod workos;
@@ -146,18 +147,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         workos,
     });
-    let app = router(state).layer(cors);
+    let limits = rate_limits::RateLimits::default();
+    let app = router_with_limits(state, &limits).layer(cors);
+    limits.start_cleanup();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Mindgrab API listening on http://localhost:3000");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
+#[cfg(test)]
 fn router(state: Arc<auth::AppState>) -> Router {
+    router_with_limits(state, &rate_limits::RateLimits::default())
+}
+
+fn router_with_limits(state: Arc<auth::AppState>, limits: &rate_limits::RateLimits) -> Router {
     Router::new()
-        .merge(api::router(state.clone()))
-        .merge(auth::router(state.clone()))
-        .merge(project::router(state))
+        .merge(api::router(state.clone(), limits))
+        .merge(auth::router(state.clone(), limits))
+        .merge(project::router(state, limits))
         .layer(response_headers::private_headers())
         // Wrap private routes and their rejecting layers; CORS stays outside.
         .layer(ServerTimingLayer::new("request"))
@@ -182,7 +194,10 @@ fn cors_layer(config: &Config) -> Result<CorsLayer, axum::http::header::InvalidH
             HeaderName::from_static("x-mindgrab-schema-version"),
             HeaderName::from_static("x-mindgrab-account"),
         ])
-        .expose_headers([HeaderName::from_static("server-timing")]))
+        .expose_headers([
+            HeaderName::from_static("server-timing"),
+            header::RETRY_AFTER,
+        ]))
 }
 
 #[cfg(test)]
@@ -202,12 +217,17 @@ mod tests {
     const CORS_HEADERS: &[(&str, &str)] = &[
         ("access-control-allow-origin", ORIGIN),
         ("access-control-allow-credentials", "true"),
-        ("access-control-expose-headers", "server-timing"),
+        ("access-control-expose-headers", "server-timing,retry-after"),
     ];
 
     async fn send(app: &Router, request: Builder) -> Response {
         app.clone()
-            .oneshot(request.body(Body::empty()).unwrap())
+            .oneshot(
+                request
+                    .extension(rate_limits::test_peer())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap()
     }
