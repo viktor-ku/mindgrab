@@ -114,6 +114,7 @@ async fn request(
     origin: Option<&str>,
 ) -> Response {
     let mut builder = axum::http::Request::builder()
+        .extension(crate::rate_limits::test_peer())
         .method(method)
         .uri(path)
         .header(header::COOKIE, cookies);
@@ -240,6 +241,10 @@ async fn legacy_session_for(f: &Fixture, external_id: &str) -> String {
         .await
         .unwrap();
     format!("{LEGACY_SESSION_COOKIE}={token}")
+}
+
+pub(crate) fn provider_calls(f: &Fixture) -> usize {
+    f.mock.requests.lock().unwrap().len()
 }
 
 pub(crate) fn refresh_status(f: &Fixture, status: u16) {
@@ -802,7 +807,10 @@ async fn mutations_and_websocket_require_the_app_origin_before_authentication(po
             ("POST", "/api/submitProjectUpdate"),
             ("GET", "/sync/v1/10000000-0000-4000-8000-000000000000"),
         ] {
-            let mut request = axum::http::Request::builder().method(method).uri(path);
+            let mut request = axum::http::Request::builder()
+                .extension(crate::rate_limits::test_peer())
+                .method(method)
+                .uri(path);
             if path == "/api/submitProjectUpdate" {
                 request = request.header(
                     header::CONTENT_LENGTH,

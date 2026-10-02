@@ -39,6 +39,7 @@ class Server extends CrdtApi {
     { bytes: Uint8Array; receipt: Awaited<ReturnType<CrdtApi["submit"]>> }
   >();
   failAfterCommit = false;
+  rateLimited = false;
   registerGate?: Promise<void>;
   receiptGate?: Promise<void>;
   baselineGate?: Promise<void>;
@@ -68,6 +69,8 @@ class Server extends CrdtApi {
   }
   override async submit(id: string, updateId: string, bytes: Uint8Array) {
     this.submissions.push({ id: updateId, bytes: bytes.slice() });
+    if (this.rateLimited)
+      throw new SyncError("Too many requests.", "retry", "rate_limited");
     let saved = this.receipts.get(updateId);
     if (saved) expect(bytes).toEqual(saved.bytes);
     else {
@@ -181,21 +184,29 @@ test("edits during registration and awaiting a receipt remain pending; synced do
   expect(materializeProject(server.doc)).toEqual(materializeProject(doc));
 });
 
-test("lost receipt retries identical UUID/bytes even when server baseline already covers the batch", async () => {
+test("429 and lost receipts retry identical UUID/bytes without acknowledging later edits", async () => {
   const server = new Server();
   server.failAfterCommit = true;
+  server.rateLimited = true;
   const doc = seed();
   const { sync } = attach(doc, server);
   await sync.syncNow();
   expect(sync.status.status).toBe("retrying");
+  expect(server.receipts.size).toBe(0);
+  editNodeText(doc, ROOT, 0, 0, "After throttling ");
+  server.rateLimited = false;
+  await sync.syncNow();
+  expect(sync.status.status).toBe("retrying");
+  expect(server.submissions[1]).toEqual(server.submissions[0]);
   editNodeText(doc, ROOT, 0, 0, "After lost ack ");
   await sync.syncNow();
-  expect(server.submissions[1]).toEqual(server.submissions[0]);
+  expect(server.submissions[2]).toEqual(server.submissions[0]);
   expect(server.receipts.size).toBe(1);
   expect(sync.status.status).toBe("saving");
   await sync.syncNow();
   expect(sync.status.status).toBe("saved");
   expect(server.receipts.size).toBe(2);
+  expect(materializeProject(server.doc)).toEqual(materializeProject(doc));
 });
 
 test("reload recovery includes pure text deletes with equal vectors", async () => {

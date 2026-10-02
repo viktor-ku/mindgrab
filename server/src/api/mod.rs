@@ -43,7 +43,7 @@ pub(super) struct ProjectRequest {
     project_id: String,
 }
 
-pub(crate) fn router(state: Arc<AppState>) -> Router {
+pub(crate) fn router(state: Arc<AppState>, limits: &crate::rate_limits::RateLimits) -> Router {
     let auth_origin = same_origin(state.config.origin(), || {
         (StatusCode::FORBIDDEN, "Invalid request origin").into_response()
     });
@@ -64,7 +64,9 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
         .route("/getHealth", post(get_health::get_health))
         .route(
             "/startLogin",
-            post(start_login::start_login).route_layer(auth_origin.clone()),
+            post(start_login::start_login)
+                .route_layer(crate::rate_limits::RateLimits::layer(&limits.login))
+                .route_layer(auth_origin.clone()),
         )
         // An empty identification key lets explicit logout work during WorkOS
         // outages; AuthSession still flushes the provider-backed durable record.
@@ -96,7 +98,12 @@ pub(crate) fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/submitProjectUpdate",
-            project(submit_project_update::route()).route_layer(project_origin),
+            project(
+                submit_project_update::route()
+                    .route_layer(crate::rate_limits::RateLimits::layer(&limits.uploads)),
+            )
+            .route_layer(crate::rate_limits::RateLimits::layer(&limits.upload_peers))
+            .route_layer(project_origin),
         )
         .layer(private_headers());
     Router::new().nest("/api", methods).with_state(state)

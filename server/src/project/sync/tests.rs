@@ -24,10 +24,19 @@ impl Drop for Server {
     }
 }
 async fn server(state: Arc<AppState>) -> Server {
+    server_app(crate::router(state)).await
+}
+
+async fn server_app(app: axum::Router) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("ws://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
-        axum::serve(listener, crate::router(state)).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     Server { address, task }
 }
@@ -385,12 +394,14 @@ async fn browser_cloud_sync_recovers_offline_tabs_receipts_deletes_and_large_bat
     };
     let f = fixture(pool).await;
     let cookie = sign_in(&f).await;
-    let server = server(f.state.clone()).await;
+    // Exercise the existing recovery suite with real HTTP 429s as well.
+    let limits = crate::rate_limits::RateLimits::small(1, Duration::from_millis(200));
+    let server = server_app(crate::router_with_limits(f.state.clone(), &limits)).await;
     let owner: i64 = sqlx::query_scalar("SELECT id FROM users ORDER BY id LIMIT 1")
         .fetch_one(&f.state.pool)
         .await
         .unwrap();
-    let input = json!({"serverUrl": server.address, "cookie": cookie, "ownerId": owner});
+    let input = json!({"serverUrl": server.address, "cookie": cookie, "ownerId": owner, "expectRateLimits": true});
     let result = tokio::task::spawn_blocking(move || {
         let mut child = Command::new("bun")
             .args(["--bun", "tests/browser/cloud.integration.ts"])
@@ -419,6 +430,8 @@ async fn browser_cloud_sync_recovers_offline_tabs_receipts_deletes_and_large_bat
     .unwrap();
     assert_eq!(result["converged"], true);
     assert_eq!(result["nodes"], 29);
+    assert!(result["throttledSubmissions"].as_u64().unwrap() > 0);
+    assert!(result["retriedSubmissions"].as_u64().unwrap() > 0);
     let id: Uuid = result["projectId"].as_str().unwrap().parse().unwrap();
     let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
         .bind(id)

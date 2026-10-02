@@ -95,7 +95,12 @@ fn release_api_process() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         println!("release-api:http://{}", listener.local_addr().unwrap());
         std::io::stdout().flush().unwrap();
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 }
 
@@ -236,7 +241,12 @@ async fn release_stack_recovers_and_converges(pool: PgPool) {
         .route("/control", post(control))
         .with_state(rig.clone());
     let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     let postgres_version: String = sqlx::query_scalar("SELECT version()")
         .fetch_one(&rig.pool)

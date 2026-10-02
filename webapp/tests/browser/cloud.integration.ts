@@ -13,6 +13,7 @@ const config = JSON.parse(await Bun.stdin.text()) as {
   serverUrl: string;
   cookie: string;
   ownerId: number;
+  expectRateLimits?: boolean;
 };
 const origin = "http://localhost:5173";
 const ws = `${config.serverUrl}/sync/v1`;
@@ -31,6 +32,10 @@ const contexts: BrowserContext[] = [];
 let droppedReceipt = false;
 let submissions = 0;
 let catalogRequests = 0;
+let primeQuota = config.expectRateLimits === true;
+let throttledSubmissions = 0;
+let retriedSubmissions = 0;
+const rejected = new Map<string, string>();
 async function context(production = false) {
   const context = await browser.newContext();
   contexts.push(context);
@@ -51,6 +56,21 @@ async function context(production = false) {
       });
     } else if (path.startsWith("/api/")) {
       const request = route.request();
+      if (path === "/api/submitProjectUpdate" && primeQuota) {
+        primeQuota = false;
+        // Spend the test's single account token with invalid schema metadata.
+        // The real limiter runs before metadata/body/ingestion, so this writes
+        // nothing and the immediately following valid upload must get 429.
+        const probe = await route.fetch({
+          url: `${http}${new URL(request.url()).pathname}${new URL(request.url()).search}`,
+          headers: {
+            ...request.headers(),
+            origin,
+            "x-mindgrab-schema-version": "2",
+          },
+        });
+        expect(probe.status()).toBe(426);
+      }
       const response = await route.fetch({
         url: `${http}${new URL(request.url()).pathname}${new URL(request.url()).search}`,
         headers: { ...request.headers(), origin: origin },
@@ -65,7 +85,22 @@ async function context(production = false) {
         );
       if (path === "/api/submitProjectUpdate") {
         submissions++;
-        if (droppedReceipt) {
+        const updateId = new URL(request.url()).searchParams.get("updateId")!;
+        const sha256 = new Bun.CryptoHasher("sha256")
+          .update(request.postDataBuffer()!)
+          .digest("hex");
+        if (response.status() === 429) {
+          expect(response.headers()["retry-after"]).toBeDefined();
+          throttledSubmissions++;
+          if (rejected.has(updateId))
+            expect(sha256).toBe(rejected.get(updateId)!);
+          rejected.set(updateId, sha256);
+        } else if (response.ok() && rejected.has(updateId)) {
+          expect(sha256).toBe(rejected.get(updateId)!);
+          rejected.delete(updateId);
+          retriedSubmissions++;
+        }
+        if (droppedReceipt && response.ok()) {
           droppedReceipt = false;
           await route.abort("failed");
           return;
@@ -279,6 +314,8 @@ try {
       converged: true,
       projectId: id,
       submissions,
+      throttledSubmissions,
+      retriedSubmissions,
       nodes: Object.keys(content.nodes).length,
     }),
   );

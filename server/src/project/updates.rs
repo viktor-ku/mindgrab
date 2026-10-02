@@ -230,7 +230,7 @@ pub(crate) async fn synchronization_baseline(
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(crate) mod tests;
 
 /// Validated canonical content, absent while causal dependencies are unresolved.
 pub(super) async fn materialized(

@@ -25,6 +25,8 @@ tower-http = { version = "=0.7.1", features = ["cors", "limit", "set-header", "v
 tracing-subscriber = "=0.3.23"
 yrs = { version = "=0.28.0", features = [] }
 axum-login = "=0.18.0"
+tower_governor = { version = "=0.8.0", default-features = false, features = ["axum"] }
+governor = { version = "=0.10.4", default-features = false }
 
 [dev-dependencies]
 socket2 = "=0.6.5"

@@ -50,9 +50,9 @@ macro_rules! project_columns {
 
 pub(crate) use project_columns;
 
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router(state: Arc<AppState>, limits: &crate::rate_limits::RateLimits) -> Router {
     Router::new()
-        .merge(sync::router(state.clone()))
+        .merge(sync::router(state.clone(), limits))
         // Retired snapshot clients must still receive an explicit upgrade error.
         .route(
             "/api/projects",
