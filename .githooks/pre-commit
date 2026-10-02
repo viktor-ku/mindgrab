@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -d '' -t staged_files < <(git diff --cached --name-only --diff-filter=ACMR -z)
+if ((${#staged_files[@]} == 0)); then
+  exit 0
+fi
+
+# Refuse partially staged files so formatting and git add cannot pull unrelated
+# working-tree edits into the commit.
+for path in "${staged_files[@]}"; do
+  if ! git diff --quiet -- "$path"; then
+    printf 'Pre-commit: %q has unstaged changes. Stage or discard them before committing.\n' "$path" >&2
+    exit 1
+  fi
+done
+
+echo 'Pre-commit: linting webapp...'
+mise -C webapp exec -- bun --bun run lint
+
+echo 'Pre-commit: checking server...'
+mise -C server exec -- cargo check
+
+webapp_files=()
+rust_files=()
+for path in "${staged_files[@]}"; do
+  [[ -f "$path" ]] || continue
+
+  case "$path" in
+    webapp/*)
+      case "${path##*.}" in
+        css|graphql|html|js|json|jsonc|md|mdx|ts|tsx)
+          webapp_files+=("${path#webapp/}")
+          ;;
+      esac
+      ;;
+    server/*.rs|server/**/*.rs)
+      rust_files+=("${path#server/}")
+      ;;
+  esac
+done
+
+if ((${#webapp_files[@]} > 0)); then
+  echo 'Pre-commit: formatting staged webapp files...'
+  mise -C webapp exec -- bun --bun node_modules/.bin/biome format --write -- "${webapp_files[@]}"
+  git add -- "${webapp_files[@]/#/webapp/}"
+fi
+
+if ((${#rust_files[@]} > 0)); then
+  echo 'Pre-commit: formatting staged Rust files...'
+  mise -C server exec -- rustfmt --edition 2024 --config skip_children=true -- "${rust_files[@]}"
+  git add -- "${rust_files[@]/#/server/}"
+fi
