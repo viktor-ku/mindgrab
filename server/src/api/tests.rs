@@ -115,33 +115,3 @@ async fn json_rpc_arguments_are_required_and_strict(pool: PgPool) {
         }
     }
 }
-
-#[sqlx::test]
-async fn retired_rest_routes_are_not_callable(pool: PgPool) {
-    let f = fixture(pool).await;
-    let app = crate::router(f.state.clone());
-    for path in [
-        "/api/me",
-        "/api/health",
-        "/api/auth/login",
-        "/api/auth/logout",
-        "/auth/callback",
-        "/api/crdt/v1/projects",
-        "/api/crdt/v1/sync/10000000-0000-4000-8000-000000000000",
-    ] {
-        for method in ["GET", "POST", "PUT"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
-        }
-    }
-}

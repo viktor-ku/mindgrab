@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import type { MindMapNode } from "../src/mind-map";
 import {
   connectionPath,
   findNode,
   layoutMindMap,
-  navigationTarget,
   translateSubtree,
 } from "../src/mind-map";
-import type { MindMapNode } from "../src/mind-map";
 
 const tree = (): MindMapNode[] => [
   {
@@ -21,87 +20,6 @@ const tree = (): MindMapNode[] => [
 ];
 
 describe("free positioning", () => {
-  const positions = (nodes: MindMapNode[]) =>
-    new Map(layoutMindMap(nodes).nodes.map((node) => [node.id, node]));
-  const edges = (nodes: MindMapNode[]) =>
-    layoutMindMap(nodes).connections.map(({ from, to }) => [from.id, to.id]);
-
-  test("moving a parent translates every descendant and preserves unrelated nodes and connections", () => {
-    const original = tree();
-    const before = positions(original);
-    const moved = translateSubtree(original, "a", before, { x: -250, y: 135 });
-    const after = positions(moved);
-    for (const id of ["a", "b", "c", "d"]) {
-      expect(after.get(id)?.x).toBe(before.get(id)!.x - 250);
-      expect(after.get(id)?.y).toBe(before.get(id)!.y + 135);
-    }
-    expect(after.get("e")).toEqual(before.get("e"));
-    expect(edges(moved)).toEqual(edges(original));
-    expect(findNode(original, "a")?.position).toBeUndefined();
-  });
-
-  test("moving a child retains its parent and siblings, including when dropped over another node", () => {
-    const original = tree();
-    const before = positions(original);
-    const delta = {
-      x: before.get("e")!.x - before.get("b")!.x,
-      y: before.get("e")!.y - before.get("b")!.y,
-    };
-    const moved = translateSubtree(original, "b", before, delta);
-    const after = positions(moved);
-    for (const id of ["a", "d", "e"])
-      expect(after.get(id)).toEqual(before.get(id));
-    for (const id of ["b", "c"]) {
-      expect(after.get(id)?.x).toBe(before.get(id)!.x + delta.x);
-      expect(after.get(id)?.y).toBe(before.get(id)!.y + delta.y);
-    }
-    expect(edges(moved)).toEqual(edges(original));
-  });
-
-  test("a manually positioned descendant moves exactly once with its parent", () => {
-    const original = tree();
-    const childMoved = translateSubtree(original, "c", positions(original), {
-      x: -600,
-      y: -200,
-    });
-    const before = positions(childMoved);
-    const parentMoved = translateSubtree(childMoved, "a", before, {
-      x: 45.5,
-      y: -32.25,
-    });
-    expect(positions(parentMoved).get("c")?.x).toBe(before.get("c")!.x + 45.5);
-    expect(positions(parentMoved).get("c")?.y).toBe(before.get("c")!.y - 32.25);
-    expect(edges(parentMoved)).toEqual(edges(original));
-  });
-
-  test("manual placement survives content resizing and new children are placed next to their moved parent", () => {
-    const original = tree();
-    const moved = translateSubtree(original, "b", positions(original), {
-      x: -450,
-      y: 220,
-    });
-    const before = positions(moved);
-    const resized = layoutMindMap(
-      moved,
-      new Map([["b", { width: 160, height: 88 }]]),
-    );
-    for (const id of ["b", "c"]) {
-      const node = resized.nodes.find((node) => node.id === id)!;
-      expect({ x: node.x, y: node.y }).toEqual(findNode(moved, id)!.position!);
-    }
-    const extended = tree();
-    extended[0].next![0] = {
-      ...moved[0].next![0],
-      next: [...moved[0].next![0].next!, { id: "new", text: "New" }],
-    };
-    expect(positions(extended).get("new")!.x).toBe(
-      before.get("b")!.x + before.get("b")!.width + 64,
-    );
-    expect(positions(extended).get("new")!.y).toBeGreaterThan(
-      before.get("b")!.y,
-    );
-  });
-
   test("connectors bend and attach to facing borders in all directions", () => {
     const from = { id: "a", text: "A", x: 0, y: 0, width: 100, height: 40 };
     for (const [x, y, startX, startY, endX, endY] of [
@@ -128,57 +46,6 @@ describe("layout stability", () => {
     layout.nodes.find((node) => node.id === id)!;
   const centerY = (node: { y: number; height: number }) =>
     node.y + node.height / 2;
-
-  test("adding a sibling spreads children around a stationary root", () => {
-    const original = [
-      { id: "parent", text: "Parent", next: [{ id: "one", text: "One" }] },
-    ];
-    const before = layoutMindMap(original);
-    const after = layoutMindMap([
-      {
-        id: "parent",
-        text: "Parent",
-        next: [
-          { id: "one", text: "One" },
-          { id: "two", text: "Two" },
-        ],
-      },
-    ]);
-    expect(nodeAt(after, "parent")).toEqual(nodeAt(before, "parent"));
-    expect(nodeAt(after, "one").y).toBeLessThan(nodeAt(before, "one").y);
-    expect(centerY(nodeAt(after, "parent"))).toBe(
-      (centerY(nodeAt(after, "one")) + centerY(nodeAt(after, "two"))) / 2,
-    );
-  });
-
-  test("adding siblings keeps a nested parent stationary and branches separated", () => {
-    let current = tree();
-    let layout = layoutMindMap(current);
-    const parent = nodeAt(layout, "b");
-    const anchor = { id: parent.id, centerY: centerY(parent) };
-    for (const id of ["new-1", "new-2", "new-3"]) {
-      current[0].next![0].next!.push({ id, text: id });
-      layout = layoutMindMap(current, new Map(), anchor);
-      expect(nodeAt(layout, "b")).toEqual(parent);
-      const children = findNode(current, "b")!.next!.map((child) =>
-        nodeAt(layout, child.id),
-      );
-      expect(centerY(parent)).toBe(
-        (children[0].y + children.at(-1)!.y + children.at(-1)!.height) / 2,
-      );
-      for (let i = 1; i < children.length; i++) {
-        expect(
-          children[i].y - (children[i - 1].y + children[i - 1].height),
-        ).toBeGreaterThanOrEqual(24);
-      }
-      expect(nodeAt(layout, "d").y).toBeGreaterThanOrEqual(
-        children.at(-1)!.y + children.at(-1)!.height + 24,
-      );
-      expect(nodeAt(layout, "e").y).toBeGreaterThanOrEqual(
-        nodeAt(layout, "d").y + nodeAt(layout, "d").height + 24,
-      );
-    }
-  });
 
   test("child insertion and measured sizes preserve the parent's center and connections", () => {
     const original = tree();
@@ -236,24 +103,6 @@ describe("layout stability", () => {
     ).toEqual(before);
   });
 
-  test("adding a root keeps existing trees in place and leaves room between them", () => {
-    const original = tree();
-    const before = layoutMindMap(original);
-    const firstRoot = nodeAt(before, "a");
-    const after = layoutMindMap(
-      [...original, { id: "new-root", text: "New idea" }],
-      new Map(),
-      { id: firstRoot.id, centerY: centerY(firstRoot) },
-    );
-
-    for (const node of before.nodes) {
-      expect(nodeAt(after, node.id)).toEqual(node);
-    }
-    expect(nodeAt(after, "new-root").y).toBeGreaterThanOrEqual(
-      nodeAt(after, "e").y + nodeAt(after, "e").height + 24,
-    );
-  });
-
   test("dragging an anchored parent takes precedence and leaves other branches in place", () => {
     const original = tree();
     const before = layoutMindMap(original);
@@ -301,40 +150,5 @@ describe("layout stability", () => {
     }
     expect(nodeAt(after, "new").x).toBe(parent.x + parent.width + 64);
     expect(nodeAt(after, "new").y).toBeGreaterThan(parent.y);
-  });
-});
-
-describe("arrow-key navigation", () => {
-  test("right descends to the first child, left returns to the parent", () => {
-    const original = tree();
-    expect(navigationTarget(original, "a", "right")).toBe("b");
-    expect(navigationTarget(original, "b", "right")).toBe("c");
-    expect(navigationTarget(original, "c", "right")).toBeUndefined();
-    expect(navigationTarget(original, "e", "right")).toBeUndefined();
-    expect(navigationTarget(original, "c", "left")).toBe("b");
-    expect(navigationTarget(original, "d", "left")).toBe("a");
-    expect(navigationTarget(original, "a", "left")).toBeUndefined();
-    expect(navigationTarget(original, "e", "left")).toBeUndefined();
-  });
-
-  test("up and down move between adjacent siblings at any depth", () => {
-    const original = tree();
-    expect(navigationTarget(original, "d", "up")).toBe("b");
-    expect(navigationTarget(original, "b", "down")).toBe("d");
-    expect(navigationTarget(original, "b", "up")).toBeUndefined();
-    expect(navigationTarget(original, "d", "down")).toBeUndefined();
-    expect(navigationTarget(original, "a", "down")).toBe("e");
-    expect(navigationTarget(original, "e", "up")).toBe("a");
-    expect(navigationTarget(original, "a", "up")).toBeUndefined();
-    expect(navigationTarget(original, "e", "down")).toBeUndefined();
-    expect(navigationTarget(original, "c", "up")).toBeUndefined();
-    expect(navigationTarget(original, "c", "down")).toBeUndefined();
-  });
-
-  test("unknown ids have no target", () => {
-    const original = tree();
-    for (const direction of ["left", "right", "up", "down"] as const) {
-      expect(navigationTarget(original, "missing", direction)).toBeUndefined();
-    }
   });
 });

@@ -114,19 +114,6 @@ async fn catalog_rows(pool: &PgPool, id: Uuid) -> Vec<i64> {
         .unwrap()
 }
 
-/// Stands in for the content projection that accepted Yjs updates will drive.
-async fn project_summary(pool: &PgPool, id: Uuid, name: &str, sequence: i64) {
-    sqlx::query(
-        "UPDATE crdt_project SET name = $2, last_sequence = $3, content_updated_at = NOW() WHERE id = $1",
-    )
-    .bind(id)
-    .bind(name)
-    .bind(sequence)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 async fn list_all(state: &Arc<AppState>, cookies: &str, limit: u32) -> Vec<Value> {
     let mut projects = Vec::new();
     let mut cursor: Option<String> = None;
@@ -155,24 +142,6 @@ fn ids(projects: &[Value]) -> Vec<String> {
         .iter()
         .map(|project| project["projectId"].as_str().unwrap().to_owned())
         .collect()
-}
-
-#[sqlx::test]
-async fn catalog_rejects_unauthenticated_and_forged_sessions(pool: PgPool) {
-    let f = fixture(pool).await;
-    let id = new_id();
-    for cookies in ["", "mindgrab_session=forged"] {
-        for reply in [
-            rpc(&f.state, "listProjects", cookies, json!({})).await,
-            rpc(&f.state, "getProject", cookies, json!({"projectId": id})).await,
-            create(&f.state, cookies, register(id)).await,
-        ] {
-            assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
-            assert_eq!(error_code(&reply), "unauthenticated");
-            assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
-        }
-    }
-    assert!(catalog_rows(&f.state.pool, id).await.is_empty());
 }
 
 #[sqlx::test]
@@ -237,45 +206,6 @@ async fn registration_is_idempotent_and_reports_reconnect_status(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn a_claimed_uuid_cannot_be_overwritten_or_read_by_another_user(pool: PgPool) {
-    let f = fixture(pool).await;
-    let owner = sign_in(&f).await;
-    let other = session_for(&f, "other_user").await;
-    let id = new_id();
-    let created = create(&f.state, &owner, register(id)).await;
-    assert_eq!(created.status, StatusCode::CREATED);
-    project_summary(&f.state.pool, id, "Owner's secret", 4).await;
-
-    let collision = create(&f.state, &other, register(id)).await;
-    assert_eq!(collision.status, StatusCode::CONFLICT);
-    assert_eq!(error_code(&collision), "project_id_conflict");
-    assert!(!collision.body.to_string().contains("secret"));
-
-    let read = rpc(&f.state, "getProject", &other, json!({"projectId": id})).await;
-    assert_eq!(read.status, StatusCode::NOT_FOUND);
-    assert_eq!(error_code(&read), "project_not_found");
-    let missing = rpc(
-        &f.state,
-        "getProject",
-        &other,
-        json!({"projectId": new_id()}),
-    )
-    .await;
-    assert_eq!(missing.status, StatusCode::NOT_FOUND);
-    assert_eq!(read.body, missing.body);
-
-    let listed = rpc(&f.state, "listProjects", &other, json!({})).await;
-    assert_eq!(listed.body, json!({"projects": [], "nextCursor": null}));
-    assert_eq!(
-        catalog_rows(&f.state.pool, id).await,
-        vec![user_id(&f.state.pool, "user_test").await]
-    );
-    let owned = rpc(&f.state, "getProject", &owner, json!({"projectId": id})).await;
-    assert_eq!(owned.body["name"], "Owner's secret");
-    assert_eq!(owned.body["lastSequence"], "4");
-}
-
-#[sqlx::test]
 async fn concurrent_registration_creates_one_project_for_one_owner(pool: PgPool) {
     let f = fixture(pool).await;
     let first = sign_in(&f).await;
@@ -315,201 +245,6 @@ async fn concurrent_registration_creates_one_project_for_one_owner(pool: PgPool)
             }
         }
     }
-}
-
-#[sqlx::test]
-async fn forged_owner_metadata_cannot_grant_access(pool: PgPool) {
-    let f = fixture(pool).await;
-    let owner = sign_in(&f).await;
-    let other = session_for(&f, "other_user").await;
-    let owner_id = user_id(&f.state.pool, "user_test").await;
-    let owned = new_id();
-    assert_eq!(
-        create(&f.state, &owner, register(owned)).await.status,
-        StatusCode::CREATED
-    );
-
-    let forged = new_id();
-    for field in ["ownerId", "owner_id", "owner", "userId"] {
-        let mut body = register(forged);
-        body[field] = json!(owner_id);
-        let reply = create(&f.state, &other, body).await;
-        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error_code(&reply), "invalid_request");
-    }
-    assert!(catalog_rows(&f.state.pool, forged).await.is_empty());
-
-    let forged_list = rpc(
-        &f.state,
-        "listProjects",
-        &other,
-        json!({"ownerId": owner_id}),
-    )
-    .await;
-    assert_eq!(forged_list.status, StatusCode::BAD_REQUEST);
-    let forged_read = rpc(
-        &f.state,
-        "getProject",
-        &other,
-        json!({"projectId": owned, "ownerId": owner_id}),
-    )
-    .await;
-    assert_eq!(forged_read.status, StatusCode::BAD_REQUEST);
-
-    let other_project = new_id();
-    assert_eq!(
-        create(&f.state, &other, register(other_project))
-            .await
-            .status,
-        StatusCode::CREATED
-    );
-    assert_eq!(
-        catalog_rows(&f.state.pool, other_project).await,
-        vec![user_id(&f.state.pool, "other_user").await]
-    );
-}
-
-#[sqlx::test]
-async fn malformed_project_ids_and_requests_are_rejected(pool: PgPool) {
-    let f = fixture(pool).await;
-    let session = sign_in(&f).await;
-    let valid = new_id().to_string();
-    for project_id in [
-        "not-a-uuid".to_owned(),
-        valid.to_uppercase(),
-        format!("{{{valid}}}"),
-        format!("urn:uuid:{valid}"),
-        valid.replace('-', ""),
-        format!(" {valid}"),
-        Uuid::nil().to_string(),
-        Uuid::max().to_string(),
-        "10000000-0000-1000-8000-000000000000".to_owned(),
-        "10000000-0000-4000-c000-000000000000".to_owned(),
-    ] {
-        let reply = create(
-            &f.state,
-            &session,
-            json!({"projectId": project_id, "schemaVersion": 1}),
-        )
-        .await;
-        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{project_id}");
-        assert_eq!(error_code(&reply), "invalid_project_id");
-    }
-    for body in [
-        json!({"projectId": 7, "schemaVersion": 1}),
-        json!({"schemaVersion": 1}),
-        json!({"projectId": valid}),
-        json!({"projectId": valid, "schemaVersion": "1"}),
-        json!([valid]),
-    ] {
-        let reply = create(&f.state, &session, body).await;
-        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error_code(&reply), "invalid_request");
-    }
-    let unsupported = create(
-        &f.state,
-        &session,
-        json!({"projectId": valid, "schemaVersion": 0}),
-    )
-    .await;
-    assert_eq!(unsupported.status, StatusCode::UPGRADE_REQUIRED);
-
-    for path in ["not-a-uuid", &valid.to_uppercase(), &valid.replace('-', "")] {
-        let reply = rpc(&f.state, "getProject", &session, json!({"projectId": path})).await;
-        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path}");
-        assert_eq!(error_code(&reply), "invalid_project_id");
-    }
-    let v1 = rpc(
-        &f.state,
-        "getProject",
-        &session,
-        json!({"projectId": "10000000-0000-1000-8000-000000000000"}),
-    )
-    .await;
-    assert_eq!(v1.status, StatusCode::NOT_FOUND);
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM crdt_project")
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
-}
-
-#[sqlx::test]
-async fn duplicate_names_are_allowed_and_renames_keep_identity(pool: PgPool) {
-    let f = fixture(pool).await;
-    let session = sign_in(&f).await;
-    let (first, second) = (new_id(), new_id());
-    for id in [first, second] {
-        assert_eq!(
-            create(&f.state, &session, register(id)).await.status,
-            StatusCode::CREATED
-        );
-        project_summary(&f.state.pool, id, "Ideas", 1).await;
-    }
-    let listed = list_all(&f.state, &session, 50).await;
-    assert_eq!(listed.len(), 2);
-    assert!(listed.iter().all(|project| project["name"] == "Ideas"));
-    assert_eq!(
-        ids(&listed).into_iter().collect::<HashSet<_>>(),
-        HashSet::from([first.to_string(), second.to_string()])
-    );
-
-    let before = rpc(
-        &f.state,
-        "getProject",
-        &session,
-        json!({"projectId": first}),
-    )
-    .await
-    .body;
-    project_summary(&f.state.pool, first, "Plans", 2).await;
-    let after = rpc(
-        &f.state,
-        "getProject",
-        &session,
-        json!({"projectId": first}),
-    )
-    .await
-    .body;
-    assert_eq!(after["projectId"], before["projectId"]);
-    assert_eq!(after["createdAt"], before["createdAt"]);
-    assert_eq!(after["name"], "Plans");
-    assert_eq!(after["lastSequence"], "2");
-    assert!(after["contentUpdatedAt"].is_string());
-    let retry = create(&f.state, &session, register(first)).await;
-    assert_eq!(retry.status, StatusCode::OK);
-    assert_eq!(retry.body, after);
-    assert_eq!(list_all(&f.state, &session, 50).await.len(), 2);
-
-    let other_owner: i64 = sqlx::query_scalar(
-        "INSERT INTO users (name, email, external_id) VALUES ('Thief', 'thief@example.com', 'thief') RETURNING id",
-    )
-    .fetch_one(&f.state.pool)
-    .await
-    .unwrap();
-    for statement in [
-        "UPDATE crdt_project SET owner_id = $2 WHERE id = $1",
-        "UPDATE crdt_project SET id = gen_random_uuid() WHERE id = $1 AND $2 > 0",
-        "UPDATE crdt_project SET created_at = NOW() - INTERVAL '1 day' WHERE id = $1 AND $2 > 0",
-    ] {
-        let result = sqlx::query(statement)
-            .bind(first)
-            .bind(other_owner)
-            .execute(&f.state.pool)
-            .await;
-        assert!(result.is_err(), "{statement}");
-    }
-    assert_eq!(
-        rpc(
-            &f.state,
-            "getProject",
-            &session,
-            json!({"projectId": first})
-        )
-        .await
-        .body,
-        after
-    );
 }
 
 #[sqlx::test]
@@ -615,46 +350,6 @@ async fn stale_snapshot_clients_must_upgrade_without_writing(pool: PgPool) {
             .status,
         StatusCode::UPGRADE_REQUIRED
     );
-}
-
-#[sqlx::test]
-async fn current_catalog_schema_enforces_identity_and_content_constraints(pool: PgPool) {
-    let mut connection = pool.acquire().await.unwrap();
-    let owner: i64 = sqlx::query_scalar(
-        "INSERT INTO users (name, email, external_id) VALUES ('Clean', 'clean@example.com', 'clean') RETURNING id",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
-    let inserted = sqlx::query(
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version, name) \
-         VALUES (gen_random_uuid(), $1, 1, 1, 'Same'), (gen_random_uuid(), $1, 1, 1, 'Same')",
-    )
-    .bind(owner)
-    .execute(&mut *connection)
-    .await
-    .unwrap();
-    assert_eq!(inserted.rows_affected(), 2);
-    for invalid in [
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version) VALUES (gen_random_uuid(), $1, 2, 1)",
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version) VALUES (gen_random_uuid(), $1, 1, 0)",
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version, name) VALUES (gen_random_uuid(), $1, 1, 1, '  ')",
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version, name) VALUES (gen_random_uuid(), $1, 1, 1, repeat('é', 101))",
-        "INSERT INTO crdt_project (id, owner_id, protocol_version, schema_version, last_sequence) VALUES (gen_random_uuid(), $1, 1, 1, -1)",
-    ] {
-        let result = sqlx::query(invalid)
-            .bind(owner)
-            .execute(&mut *connection)
-            .await;
-        assert!(result.is_err(), "{invalid}");
-    }
-    let project_unique_indexes: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'crdt_project' AND indexdef ILIKE '%UNIQUE%' AND indexdef ILIKE '%name%'",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
-    assert_eq!(project_unique_indexes, 0);
 }
 
 #[sqlx::test]

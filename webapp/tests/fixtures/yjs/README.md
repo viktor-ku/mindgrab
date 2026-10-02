@@ -2,8 +2,9 @@
 
 Each `<scenario>.json` lists binary V1 update files in delivery order and expected
 materialized content/forest. JS creates these fixtures with fixed client IDs;
-Rust consumes exactly the checked-in bytes. Both single-transaction and separate
-transaction delivery are checked, then the result is applied back to JS.
+Rust consumes exactly the checked-in bytes. The server read-model suite sends
+them through the production ingestion path with forward/reversed delivery and
+duplicate submissions, then compares content and effective trees against JS.
 
 Regenerate explicitly with `mise run crdt:fixtures` and review changes. Do not
 regenerate automatically during tests or dependency upgrades. `../yjs-scenarios.ts`
@@ -21,21 +22,24 @@ encoding identity.
 - `repeated-insertion`: 24 insertions into the same gap, including collision
   re-spacing, then independent JS/Rust forest materialization.
 
-The test suite additionally exercises Rust-authored Unicode edits, state-vector
-and delete-only diffs, pending dependency recovery, and 32 deterministic seeds.
-The server storage suite additionally exercises Yrs #670/#673 causal gaps.
+The interoperability suite additionally exercises Rust-authored Unicode edits,
+state-vector and delete-only diffs, and pending dependency recovery. Randomized
+command convergence lives in the document suite's 24-seed scenario. The server
+storage suite exercises Yrs #670/#673 causal gaps, including both transaction
+modes for the insertion-hole regression.
 
 The fixtures live with the webapp tests and are also consumed by the server's
-storage and read-model suites. `../project-document.ts` builds deterministic
+read-model suite. `../project-document.ts` builds deterministic
 wire inputs using the shipped document model and the webapp's locked Yjs.
 
-`../../project-interop.test.ts` exchanges these updates with the server's
-`examples/yjs_interop.rs` worker, including Rust-authored UTF-16 edits,
-state-vector diffs, pending dependency recovery and seeded deliveries. Run it
+`../../project-interop.test.ts` exchanges generated updates with the server's
+`examples/yjs_interop.rs` worker for Rust-authored UTF-16 edits, state-vector
+diffs and pending dependency recovery. Run it
 with `mise run crdt:test`; the regular webapp tests also include it.
 
-The `../server-storage.ts`, `../server-maintenance.ts` and
-`../server-websocket.ts` helpers supply real Yjs replicas to the Rust/Postgres
-storage, checkpoint, backup and WebSocket tests. `mise run server:test` installs
+The `../server-storage.ts` and `../server-maintenance.ts` helpers supply real
+Yjs replicas to the Rust/Postgres storage, checkpoint and backup tests. Real
+Chromium providers exercise WebSockets in the cloud/release tasks.
+`mise run server:test` installs
 the webapp dependencies they share. `mise run crdt:check` uses the existing
 webapp and server checks; there is no separate test tooling package.

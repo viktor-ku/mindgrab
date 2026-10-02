@@ -1,5 +1,4 @@
 // Persistent real Yjs replicas/UndoManager driven by the Rust maintenance suite.
-import { Y } from "./project-document";
 import {
   addNode,
   createUndoManager,
@@ -8,6 +7,7 @@ import {
   ORIGIN,
   placeNode,
   present,
+  Y,
 } from "./project-document";
 import { base, capture, fork, ID, node, text } from "./yjs-scenarios";
 
@@ -66,29 +66,7 @@ function request(input: { command: string; checkpoint?: number[] }) {
     doc.destroy();
     return { initial };
   }
-  if (input.command === "benchmark") {
-    const doc = base();
-    for (let i = 10; i < 138; i++)
-      addNode(doc, ID(i), node("Idea 🌍 ".repeat(32)));
-    const initial = Y.encodeStateAsUpdate(doc);
-    const updates = capture(doc, () => {
-      for (let i = 0; i < 1_200; i++) {
-        const id = ID(10 + (i % 128));
-        doc.transact(() => {
-          if (i % 3 === 0) text(doc, id).insert(0, "edit ✨ ");
-          else if (i % 3 === 1) text(doc, id).delete(0, 2);
-          else placeNode(doc, id, i % 2 ? ID(1) : null, 0);
-        }, ORIGIN.local);
-      }
-    });
-    const result = {
-      initial: [...initial],
-      updates: updates.map((u) => [...u]),
-      expected: materialize(doc),
-    };
-    doc.destroy();
-    return result;
-  }
+
   throw Error("Unknown command");
 }
 

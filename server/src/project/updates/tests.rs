@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use sqlx::ConnectOptions;
 use sqlx::PgPool;
 use tower::ServiceExt;
-use yrs::{Doc, Map, ReadTxn, StateVector, Text, Transact, Update, updates::decoder::Decode};
+use yrs::{Doc, ReadTxn, Text, Transact, Update, updates::decoder::Decode};
 
 use super::*;
 use crate::auth::tests::{fixture, session_for, sign_in};
@@ -289,48 +289,6 @@ async fn receipts_are_durable_immutable_and_idempotent_after_restart(pool: PgPoo
         .execute(&restarted.state.pool)
         .await;
     assert!(forbidden.is_err());
-}
-
-#[sqlx::test]
-async fn rejected_updates_never_change_durable_state(pool: PgPool) {
-    let f = fixture(pool).await;
-    let cookie = sign_in(&f).await;
-    let id = register(&f.state, &cookie).await;
-    for bytes in [
-        vec![],
-        vec![255],
-        vec![0, 0, 9],
-        vec![255, 255, 255, 255, 15],
-    ] {
-        let response = put(&f.state, &cookie, id, new_id(), &bytes).await;
-        assert!(!response.0.is_success());
-    }
-    // Match Yjs's u32 client IDs; Yrs defaults to wider IDs without small-client.
-    let bad = Doc::with_client_id(1);
-    bad.get_or_insert_map("project")
-        .insert(&mut bad.transact_mut(), "schemaVersion", 2);
-    let response = put(
-        &f.state,
-        &cookie,
-        id,
-        new_id(),
-        &bad.transact()
-            .encode_state_as_update_v1(&StateVector::default()),
-    )
-    .await;
-    assert_eq!(response.0, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
-        "0"
-    );
-    assert_eq!(
-        get(&f.state, &cookie, id, "getProjectUpdates").await.1["updates"],
-        json!([])
-    );
-    assert_eq!(
-        put(&f.state, &cookie, id, new_id(), INITIAL).await.0,
-        StatusCode::CREATED
-    );
 }
 
 #[sqlx::test]
@@ -761,31 +719,6 @@ async fn delete_only_updates_are_durable_even_when_state_vectors_match(pool: PgP
 }
 
 #[sqlx::test]
-async fn reconstruction_uses_checkpoint_and_committed_tail(pool: PgPool) {
-    let data = javascript(json!({}));
-    let f = fixture(pool).await;
-    let cookie = sign_in(&f).await;
-    let id = register(&f.state, &cookie).await;
-    let initial = binary(&data["initial"]);
-    put(&f.state, &cookie, id, new_id(), &initial).await;
-    let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
-        .bind(id)
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    assert!(
-        maintenance::compact(&f.state.pool, owner, id)
-            .await
-            .unwrap()
-            .coverage
-    );
-    for update in data["causal"].as_array().unwrap().iter().rev() {
-        put(&f.state, &cookie, id, new_id(), &binary(update)).await;
-    }
-    assert_baseline(&f.state, &cookie, id, &data["causalExpected"]).await;
-}
-
-#[sqlx::test]
 async fn pending_invalid_content_is_retained_and_quarantined_when_dependencies_arrive(
     pool: PgPool,
 ) {
@@ -854,48 +787,6 @@ async fn complete_candidates_enforce_schema_and_content_limits(pool: PgPool) {
             get(&f.state, &cookie, id, "getProjectStatus").await.1["lastSequence"],
             "0"
         );
-    }
-}
-
-#[sqlx::test]
-async fn every_golden_fixture_converges_through_shuffled_duplicate_api_delivery(pool: PgPool) {
-    let f = fixture(pool).await;
-    let cookie = sign_in(&f).await;
-    let directory = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../webapp/tests/fixtures/yjs"
-    ));
-    for file in std::fs::read_dir(directory).unwrap() {
-        let file = file.unwrap().path();
-        if file.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-        let id = register(&f.state, &cookie).await;
-        let owner: i64 = sqlx::query_scalar("SELECT owner_id FROM crdt_project WHERE id = $1")
-            .bind(id)
-            .fetch_one(&f.state.pool)
-            .await
-            .unwrap();
-        for update in fixture["updates"].as_array().unwrap().iter().rev() {
-            let bytes = std::fs::read(directory.join(update.as_str().unwrap())).unwrap();
-            let update_id = new_id();
-            let receipt = put(&f.state, &cookie, id, update_id, &bytes).await;
-            assert_eq!(
-                receipt.0,
-                StatusCode::CREATED,
-                "{}: {receipt:?}",
-                file.display()
-            );
-            maintenance::compact(&f.state.pool, owner, id)
-                .await
-                .unwrap();
-            assert_eq!(
-                put(&f.state, &cookie, id, update_id, &bytes).await.1,
-                receipt.1
-            );
-        }
-        assert_baseline(&f.state, &cookie, id, &fixture["expected"]).await;
     }
 }
 

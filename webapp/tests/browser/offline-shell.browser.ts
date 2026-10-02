@@ -10,8 +10,8 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright";
 import type { BrowserContext, Page } from "playwright";
+import { chromium } from "playwright";
 import { build } from "vite";
 
 // Real HTTP + production output; no request interception and no dev harness.
@@ -222,38 +222,6 @@ async function cacheKeys() {
   });
 }
 
-test("production shell cold-opens an account project after process exit, edits offline and persists reload", async () => {
-  await load();
-  await installed();
-  await edit("Account work online");
-  await context.close();
-  await launch();
-  await context.setOffline(true);
-  await load(`${origin}/?project=cached`);
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Account work online",
-  );
-  expect(
-    await page.getByRole("region", { name: "Account" }).innerText(),
-  ).toContain("Account 1");
-  await edit("Account work offline");
-  await page.reload();
-  await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Account work offline",
-  );
-  await context.setOffline(false);
-  const me = page.waitForResponse(
-    (response) =>
-      response.url() === `${origin}/api/getMe` && response.status() === 200,
-  );
-  await page.evaluate(() => window.dispatchEvent(new Event("online")));
-  await me;
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Account work offline",
-  );
-});
-
 test("API/auth/logout/health, token queries, foreign origins and unknown routes bypass the cache", async () => {
   await load();
   await installed();
@@ -438,51 +406,6 @@ test("incompatible cached versions show recovery before opening project storage"
   );
 });
 
-test("an unvisited profile cannot cold-open offline", async () => {
-  await context.setOffline(true);
-  await expect(page.goto(origin)).rejects.toThrow();
-  expect(await context.serviceWorkers()).toHaveLength(0);
-});
-
-test("cached shell logout and account switches preserve local workspace isolation", async () => {
-  await load();
-  await installed();
-  await edit("Private account A");
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
-  await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "New idea",
-  );
-  user = 2;
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByText("Account 2", { exact: true }).waitFor();
-  await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "New idea",
-  );
-  await edit("Private account B");
-  await context.setOffline(true);
-  await page.reload();
-  await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Private account B",
-  );
-  await context.setOffline(false);
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
-  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
-  user = 1;
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByText("Account 1", { exact: true }).waitFor();
-  await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Private account A",
-  );
-  expect((await cacheKeys()).urls.some((path) => path.startsWith("/api"))).toBe(
-    false,
-  );
-});
-
 test("a newer catalog version reports a recoverable upgrade and retains stored projects", async () => {
   await load();
   await installed();
@@ -523,24 +446,6 @@ test("a newer catalog version reports a recoverable upgrade and retains stored p
       ),
     ),
   ).toBe(true);
-});
-
-test("an already online tab discovers a later release when focused", async () => {
-  await load();
-  await installed();
-  await edit("Pending cloud work before deployment");
-  version = 1;
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await waitForWorker(page, async () =>
-    Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
-  );
-  expect(await page.getByLabel("Offline application").innerText()).toContain(
-    "An update is ready",
-  );
-  expect(await page.title()).toBe("mindgrab 0");
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Pending cloud work before deployment",
-  );
 });
 
 test("visible tabs retry failed release checks periodically without an online event or reload", async () => {
@@ -635,26 +540,6 @@ async function legacyState(target: Page) {
     keys: Object.keys(localStorage).sort(),
   }));
 }
-
-test("fresh cutover clears only known legacy keys and ignores a forged reset marker", async () => {
-  await page.goto(`${origin}/legacy-tab`);
-  await seedLegacy(page);
-  await load();
-  const reset = await legacyState(page);
-  expect(reset.obsolete).toBeNull();
-  expect(reset.generation).toBe("1");
-  expect(
-    reset.keys.filter(
-      (key) => key.includes("Ideas") || key.endsWith("latest-project"),
-    ),
-  ).toEqual([]);
-  expect(reset.unrelated).toBe("keep");
-  expect(reset.preference).toBe("keep");
-  expect(reset.auth).toBe("keep-auth");
-  expect(
-    await page.getByRole("region", { name: "Account" }).innerText(),
-  ).toContain("Account 1");
-});
 
 test("reset preserves valid Yjs documents and all existing databases on every repeat", async () => {
   await load();

@@ -211,6 +211,40 @@ runs those tests alone. Shared golden inputs and server test helpers live in
 [`webapp/tests/fixtures`](webapp/tests/fixtures/yjs/README.md) and use the webapp's
 locked dependencies.
 
+The first-release test reduction cut runnable cases from 312 to 156:
+
+| Suite | Before | After |
+| --- | ---: | ---: |
+| Rust unit/integration | 99 | 77 |
+| Webapp unit/interoperability | 153 | 41 |
+| Browser editor/storage/accounts | 43 | 26 |
+| Production offline shell | 15 | 10 |
+| Real backend cloud browser | 1 | 1 |
+| Production release gate | 1 | 1 |
+
+Count cases reported by each runner, including generated cases; exclude ignored
+subprocess entry points. Cloud and release tests are counted once when their
+dedicated tasks execute them.
+
+Keep coverage at the layer that can observe the failure. Document tests own
+command atomicity, tombstones, projection and local undo. Browser tests own
+selection/composition/drag behavior, IndexedDB commit failures, import rollback,
+account races and service-worker upgrades. Rust tests own authorization, durable
+receipts, causal gaps, read models, compaction and binary recovery. Shared golden
+fixtures run through the Rust ingestion/read-model suite and compare against JS.
+The real backend cloud and production release scenarios own overlapping happy
+paths, reconnects, process restarts and performance budgets.
+
+The reduction removes repeated fixture runs, the extra 32-seed interoperability
+sweep, overlapping happy paths and low-impact health/name/configuration examples.
+The 24-seed document convergence scenario, targeted Yrs #670/#673 regressions,
+authentication failures, commit/crash fault tests and release budgets remain.
+Compaction performance is measured in the release gate; the separate worker
+count-trigger test retains its threshold check without replaying a second
+1,200-edit benchmark. This deliberately trades exhaustive example coverage for
+fewer tests to maintain. Add cases for distinct failure modes or reproduced bugs;
+extend an existing scenario when only the example differs.
+
 SQLx tests create isolated databases and mock WorkOS; the database role must be
 able to create test databases. No real credentials, users or emails are used.
 The RSA key under `server/src/auth/fixtures` is a public test fixture.

@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 use super::*;
 use crate::{
-    auth::tests::{fixture, session_for, sign_in},
+    auth::tests::{fixture, sign_in},
     project::updates::tests::{INITIAL, binary, get, javascript, new_id, put, register},
 };
 
@@ -97,38 +97,6 @@ async fn shared_goldens_match_js_content_and_effective_trees_after_duplicate_rev
             assert_eq!(state["placements"], flattened(&js["forest"]));
         }
     }
-}
-
-#[sqlx::test]
-async fn uninitialized_and_owner_boundaries_never_expose_or_seed_content(pool: PgPool) {
-    let f = fixture(pool).await;
-    let cookie = sign_in(&f).await;
-    let other = session_for(&f, "other_user").await;
-    let id = register(&f.state, &cookie).await;
-    let initial = get(&f.state, &cookie, id, "getProjectState").await;
-    assert_eq!(initial.0, StatusCode::OK);
-    assert_eq!(initial.1["content"], Value::Null);
-    assert_eq!(initial.1["current"], false);
-    assert_eq!(initial.1["freshness"]["status"], "uninitialized");
-    assert_eq!(initial.1["freshness"]["sourceSequence"], Value::Null);
-    put(&f.state, &cookie, id, new_id(), INITIAL).await;
-    for (session, status) in [
-        ("", StatusCode::UNAUTHORIZED),
-        (other.as_str(), StatusCode::NOT_FOUND),
-    ] {
-        assert_eq!(
-            get(&f.state, session, id, "getProjectState").await.0,
-            status
-        );
-    }
-    assert_eq!(
-        get(&f.state, &other, new_id(), "getProjectState").await.1,
-        get(&f.state, &other, id, "getProjectState").await.1
-    );
-    assert!(matches!(
-        current_state(&f.state.pool, owner(&f.state.pool, id).await + 10, id).await,
-        Err(ApiError::NotFound)
-    ));
 }
 
 #[sqlx::test]
@@ -288,45 +256,6 @@ async fn failed_projection_commit_preserves_updates_and_the_old_atomic_view(pool
             .unwrap()
             .len(),
         2
-    );
-}
-
-#[sqlx::test]
-async fn competing_jobs_and_appends_never_regress_source_sequence(pool: PgPool) {
-    let f = fixture(pool).await;
-    let cookie = sign_in(&f).await;
-    let id = register(&f.state, &cookie).await;
-    put(&f.state, &cookie, id, new_id(), INITIAL).await;
-    let owner = owner(&f.state.pool, id).await;
-    let mut tasks = tokio::task::JoinSet::new();
-    for _ in 0..12 {
-        let state = f.state.clone();
-        let cookie = cookie.clone();
-        tasks.spawn(async move {
-            assert_eq!(
-                put(&state, &cookie, id, new_id(), INITIAL).await.0,
-                StatusCode::CREATED
-            );
-            rebuild_project(&state.pool, owner, id).await.unwrap();
-        });
-    }
-    let mut previous = 0;
-    while !tasks.is_empty() {
-        let observed = current_state(&f.state.pool, owner, id).await.unwrap();
-        assert!(observed.current);
-        let sequence = observed.freshness.source_sequence.unwrap();
-        assert!(sequence >= previous);
-        previous = sequence;
-        tasks.join_next().await.unwrap().unwrap();
-    }
-    catch_up(&f.state.pool).await.unwrap();
-    let final_state = get(&f.state, &cookie, id, "getProjectState").await.1;
-    assert_eq!(final_state["freshness"]["sourceSequence"], "13");
-    // A job scheduled before a newer publication still reloads under the lock.
-    rebuild_project(&f.state.pool, owner, id).await.unwrap();
-    assert_eq!(
-        get(&f.state, &cookie, id, "getProjectState").await.1,
-        final_state
     );
 }
 

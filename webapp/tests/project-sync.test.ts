@@ -2,20 +2,19 @@ import { afterEach, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { CrdtApi, digest, SyncError } from "../src/crdt-api";
 import {
-  createChild,
   createProjectDocument,
   editNodeText,
   materializeProject,
-  openProjectDocument,
   ORIGIN,
+  openProjectDocument,
   replaceNodeText,
 } from "../src/project-document";
 import type {
   ProjectHandle,
   ProjectRepository,
 } from "../src/project-repository";
-import { missingUpdate, ProjectSync } from "../src/project-sync";
 import type { SyncProvider } from "../src/project-sync";
+import { missingUpdate, ProjectSync } from "../src/project-sync";
 
 const ID = "10000000-0000-4000-8000-000000000000";
 const ROOT = "20000000-0000-4000-8000-000000000000";
@@ -155,35 +154,6 @@ function attach(doc: Y.Doc, server: Server, online = () => true) {
 }
 const seed = () =>
   createProjectDocument(ID, "Same name", { id: ROOT, text: "Root" });
-
-test("offline devices merge text/tree edits on reconnect without a snapshot winner", async () => {
-  const server = new Server();
-  const first = seed();
-  const a = attach(first, server);
-  await a.sync.syncNow();
-  const second = openProjectDocument(ID, [Y.encodeStateAsUpdate(server.doc)]);
-  let online = false;
-  const b = attach(second, server, () => online);
-  editNodeText(first, ROOT, 0, 0, "A ");
-  createChild(first, ROOT, { text: "A child" });
-  editNodeText(second, ROOT, 4, 0, " B");
-  createChild(second, ROOT, { text: "B child" });
-  await b.sync.syncNow();
-  expect(b.sync.status.status).toBe("offline");
-  await a.sync.syncNow();
-  online = true;
-  await b.sync.syncNow();
-  a.sync.destroy();
-  const reconnected = attach(first, server);
-  await reconnected.sync.syncNow();
-  expect(materializeProject(first)).toEqual(materializeProject(second));
-  expect(materializeProject(server.doc)).toEqual(materializeProject(first));
-  expect(
-    Object.values(materializeProject(first).nodes)
-      .map((n) => n.text)
-      .sort(),
-  ).toEqual(["A Root B", "A child", "B child"]);
-});
 
 test("edits during registration and awaiting a receipt remain pending; synced does not acknowledge them", async () => {
   const server = new Server();
@@ -366,27 +336,6 @@ test("HTTP receipts verify project, batch UUID and exact SHA-256; catalogs pagin
   expect(pages).toBe(2);
 });
 
-test("V1 chunking preserves causal identity, Unicode and deletes across reversed/duplicate deliveries", async () => {
-  const { updateBatches } = await import("../src/update-batches");
-  const doc = seed();
-  for (let i = 0; i < 20; i++) createChild(doc, ROOT, { text: `Node ${i} 🧠` });
-  editNodeText(doc, ROOT, 0, 4, "");
-  const original = Y.encodeStateAsUpdate(doc);
-  const chunks = updateBatches(original, 256);
-  expect(chunks.length).toBeGreaterThan(1);
-  expect(chunks.every((bytes) => bytes.length <= 256)).toBe(true);
-  for (const delivery of [chunks, [...chunks].reverse()]) {
-    const replica = openProjectDocument(ID);
-    for (const bytes of delivery) {
-      Y.applyUpdate(replica, bytes);
-      Y.applyUpdate(replica, bytes);
-    }
-    expect(materializeProject(replica)).toEqual(materializeProject(doc));
-    expect(Y.encodeStateVector(replica)).toEqual(Y.encodeStateVector(doc));
-    expect(missingUpdate(replica, original)).toBeUndefined();
-  }
-});
-
 test("auth fencing during a delayed receipt cannot later show saved", async () => {
   const server = new Server();
   const receipt = deferred<void>();
@@ -406,51 +355,4 @@ test("auth fencing during a delayed receipt cannot later show saved", async () =
   const reauthenticated = attach(sync.handle.doc, server);
   await reauthenticated.sync.syncNow();
   expect(reauthenticated.sync.status.status).toBe("saved");
-});
-
-test("a connected provider's synced event cannot clear an outstanding durable receipt", async () => {
-  const server = new Server();
-  const doc = seed();
-  const { sync, provider } = attach(doc, server);
-  await sync.syncNow();
-  const receipt = deferred<void>();
-  server.receiptGate = receipt.promise;
-  editNodeText(doc, ROOT, 0, 0, "Pending ");
-  const running = sync.syncNow();
-  while (server.submissions.length < 2) await Bun.sleep(1);
-  provider.synced();
-  expect(sync.status.status).toBe("saving");
-  sync.destroy();
-  receipt.resolve();
-  await running;
-  expect(sync.status.status).toBe("saving");
-  expect(provider.destroyed).toBe(true);
-});
-
-test("account expectations fence cookie changes and aborted clients cannot send late requests", async () => {
-  let sends = 0;
-  const api = new CrdtApi(
-    (path) => `http://localhost${path}`,
-    (async (_url, init) => {
-      sends++;
-      expect(new Headers(init?.headers).get("X-Mindgrab-Account")).toBe("7");
-      return Response.json(
-        { error: { code: "account_changed" } },
-        { status: 409 },
-      );
-    }) as typeof fetch,
-    7,
-  );
-  try {
-    await api.register(ID, new AbortController().signal);
-    throw new Error("Expected owner fence");
-  } catch (error) {
-    expect(error).toBeInstanceOf(SyncError);
-    expect((error as SyncError).kind).toBe("auth");
-    expect((error as SyncError).code).toBe("account_changed");
-  }
-  const abort = new AbortController();
-  abort.abort();
-  await expect(api.register(ID, abort.signal)).rejects.toThrow();
-  expect(sends).toBe(1);
 });

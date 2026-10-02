@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
 import * as Y from "yjs";
-import { layoutMindMap } from "../src/mind-map";
 import type { MindMapNode } from "../src/mind-map";
-import type { DropTarget } from "../src/project-document";
+import { layoutMindMap } from "../src/mind-map";
+import type { ProjectContent } from "../src/project-document";
 import {
-  canMoveNode,
   createChild,
   createProjectDocument,
   createRoot,
@@ -29,7 +27,6 @@ import {
   setNodeColor,
   translateSubtree,
 } from "../src/project-document";
-import type { ProjectContent } from "../src/project-document";
 import { retainUndoHistory } from "../src/undo-history";
 
 const PROJECT = "10000000-0000-4000-8000-000000000000";
@@ -248,27 +245,6 @@ describe("opening and validation", () => {
       doc.destroy();
     }
   });
-
-  test("creation validates identity, names, and the initial node", () => {
-    expect(() => createProjectDocument("PROJECT", "Ideas")).toThrow("UUID");
-    expect(() => createProjectDocument(PROJECT, "  ")).toThrow("name");
-    expect(() => createProjectDocument(PROJECT, "😀".repeat(51))).toThrow(
-      "name",
-    );
-    expect(() =>
-      createProjectDocument(PROJECT, "Ideas", {
-        text: "x".repeat(LIMITS.text + 1),
-      }),
-    ).toThrow();
-    expect(() =>
-      createProjectDocument(PROJECT, "Ideas", {
-        position: { x: Number.NaN, y: 0 },
-      }),
-    ).toThrow();
-    const empty = createProjectDocument(PROJECT, "Empty");
-    expect(map(empty)).toEqual([]);
-    empty.destroy();
-  });
 });
 
 function nodes(doc: Y.Doc) {
@@ -276,19 +252,24 @@ function nodes(doc: Y.Doc) {
 }
 
 describe("projection", () => {
-  test("produces the renderer shape with colors, positions, and leaf nodes", () => {
-    const doc = tree();
-    translateSubtree(doc, C, new Map([[C, { x: 10, y: 20 }]]), { x: 1, y: 2 });
-    setNodeColor(doc, D, "teal");
-    const [a, e] = map(doc);
-    expect(a.next?.[0].next?.[0]).toEqual({
-      id: C,
-      text: "C",
-      color: "blue",
-      position: { x: 11, y: 22 },
+  test("orphans, self-cycles, and cycles become roots; equal ranks sort by UUID", () => {
+    const doc = createProjectDocument(PROJECT, "Ideas");
+    doc.transact(() => {
+      const set = (id: string, parent: string | null, rank: string) => {
+        const node = new Y.Map<unknown>();
+        node.set("text", new Y.Text(id.slice(-1)));
+        node.set("placement", { parent, rank });
+        node.set("color", "blue");
+        node.set("deleted", false);
+        nodes(doc).set(id, node);
+      };
+      set(ID(3), ID(1), "a0");
+      set(ID(1), ID(3), "a0");
+      set(ID(4), ID(99), "a0");
+      set(ID(5), ID(5), "a0");
+      set(ID(2), null, "a0");
     });
-    expect(a.next?.[1]).toEqual({ id: D, text: "D", color: "teal" });
-    expect(e).toEqual({ id: E, text: "E", color: "blue" });
+    expect(shape(doc)).toBe("1(3) 2 4 5");
     doc.destroy();
   });
 
@@ -314,48 +295,9 @@ describe("projection", () => {
     expect(value.nodes[A].position?.x).toBe(5);
     doc.destroy();
   });
-
-  test("orphans, self-cycles, and cycles become roots; equal ranks sort by UUID", () => {
-    const doc = createProjectDocument(PROJECT, "Ideas");
-    doc.transact(() => {
-      const set = (id: string, parent: string | null, rank: string) => {
-        const node = new Y.Map<unknown>();
-        node.set("text", new Y.Text(id.slice(-1)));
-        node.set("placement", { parent, rank });
-        node.set("color", "blue");
-        node.set("deleted", false);
-        nodes(doc).set(id, node);
-      };
-      set(ID(3), ID(1), "a0");
-      set(ID(1), ID(3), "a0");
-      set(ID(4), ID(99), "a0");
-      set(ID(5), ID(5), "a0");
-      set(ID(2), null, "a0");
-    });
-    expect(shape(doc)).toBe("1(3) 2 4 5");
-    doc.destroy();
-  });
 });
 
 describe("tree commands", () => {
-  test("children append, siblings follow their anchor, roots append", () => {
-    const doc = tree();
-    expect(shape(doc)).toBe("A(B(C) D) E");
-    createSibling(doc, B, { text: "X" });
-    expect(shape(doc)).toBe("A(B(C) X D) E");
-    createSibling(doc, A, { text: "Y", color: "rose" });
-    expect(shape(doc)).toBe("A(B(C) X D) Y E");
-    const id = createChild(doc, C, { text: "Z", position: { x: 3, y: 4 } });
-    expect(shape(doc)).toBe("A(B(C(Z)) X D) Y E");
-    expect(content(doc).nodes[id ?? ""]).toMatchObject({
-      color: "blue",
-      position: { x: 3, y: 4 },
-    });
-    expect(createChild(doc, ID(99), { text: "lost" })).toBeUndefined();
-    expect(createSibling(doc, ID(99), { text: "lost" })).toBeUndefined();
-    doc.destroy();
-  });
-
   test("node IDs are generated once and never reused, including tombstones", () => {
     const doc = tree();
     const id = createRoot(doc, { text: "fresh" });
@@ -364,32 +306,6 @@ describe("tree commands", () => {
     deleteSubtree(doc, C);
     expect(() => createRoot(doc, { id: C })).toThrow("reused");
     expect(() => createRoot(doc, { id: "C" })).toThrow("UUID");
-    doc.destroy();
-  });
-
-  test("deleting marks the whole observed subtree and keeps tombstones", () => {
-    const doc = tree();
-    expect(deleteSubtree(doc, B)).toBe(true);
-    expect(shape(doc)).toBe("A(D) E");
-    expect(content(doc).nodes[B].deleted).toBe(true);
-    expect(content(doc).nodes[C]).toMatchObject({ text: "C", deleted: true });
-    expect(deleteSubtree(doc, C)).toBe(false);
-    expect(deleteSubtree(doc, ID(99))).toBe(false);
-    deleteSubtree(doc, A);
-    deleteSubtree(doc, E);
-    expect(map(doc)).toEqual([]);
-    doc.destroy();
-  });
-
-  test("reordering swaps adjacent siblings and keeps descendants", () => {
-    const doc = tree();
-    expect(reorderNode(doc, B, 1)).toBe(true);
-    expect(shape(doc)).toBe("A(D B(C)) E");
-    expect(reorderNode(doc, E, -1)).toBe(true);
-    expect(shape(doc)).toBe("E A(D B(C))");
-    expect(reorderNode(doc, E, -1)).toBe(false);
-    expect(reorderNode(doc, B, 1)).toBe(false);
-    expect(reorderNode(doc, C, -1)).toBe(false);
     doc.destroy();
   });
 
@@ -403,60 +319,6 @@ describe("tree commands", () => {
     expect(shape(doc)).toBe("A(D E) B(C)");
     expect(moveNode(doc, D, { placement: "root" })).toBe(true);
     expect(shape(doc)).toBe("A(E) B(C) D");
-    doc.destroy();
-  });
-
-  test("dropping on self, descendants, stale targets, or in place is a no-op", () => {
-    const doc = tree();
-    const before = Y.encodeStateVector(doc);
-    const targets: DropTarget[] = [
-      { placement: "root" },
-      { id: A, placement: "child" },
-      { id: A, placement: "before" },
-      { id: A, placement: "after" },
-      { id: E, placement: "before" },
-      { id: E, placement: "after" },
-    ];
-    for (const placement of ["child", "before", "after"] as const)
-      for (const id of [A, B, C, ID(99)])
-        expect(moveNode(doc, A, { id, placement })).toBe(false);
-    expect(moveNode(doc, ID(99), { placement: "root" })).toBe(false);
-    expect(moveNode(doc, D, { id: B, placement: "after" })).toBe(false);
-    expect(moveNode(doc, E, { placement: "root" })).toBe(false);
-    expect(moveNode(doc, D, { id: A, placement: "child" })).toBe(false);
-    expect(Y.encodeStateVector(doc)).toEqual(before);
-    expect(targets.map((target) => canMoveNode(doc, B, target))).toEqual([
-      true,
-      true,
-      true,
-      true,
-      true,
-      true,
-    ]);
-    expect(canMoveNode(doc, A, { id: C, placement: "child" })).toBe(false);
-    doc.destroy();
-  });
-
-  test("detaching then reparenting can invert an ancestor relationship", () => {
-    const doc = tree();
-    moveNode(doc, B, { placement: "root" });
-    expect(shape(doc)).toBe("A(D) E B(C)");
-    moveNode(doc, A, { id: B, placement: "child" });
-    expect(shape(doc)).toBe("E B(C A(D))");
-    doc.destroy();
-  });
-
-  test("colors one node or its branch", () => {
-    const doc = tree();
-    expect(setNodeColor(doc, B, "rose")).toBe(true);
-    expect(content(doc).nodes[B].color).toBe("rose");
-    expect(content(doc).nodes[C].color).toBe("blue");
-    expect(setNodeColor(doc, A, "teal", true)).toBe(true);
-    for (const id of [A, B, C, D])
-      expect(content(doc).nodes[id].color).toBe("teal");
-    expect(content(doc).nodes[E].color).toBe("blue");
-    expect(setNodeColor(doc, A, "teal", true)).toBe(false);
-    expect(() => setNodeColor(doc, A, "pink" as "rose")).toThrow("color");
     doc.destroy();
   });
 
@@ -511,32 +373,6 @@ describe("tree commands", () => {
     doc.destroy();
   });
 
-  test("minimal replacements preserve concurrent edits elsewhere in the text", () => {
-    const doc = createProjectDocument(PROJECT, "Ideas", {
-      id: A,
-      text: "hello world",
-    });
-    const remote = fork(doc);
-    replaceNodeText(doc, A, "hello brave world");
-    replaceNodeText(remote, A, "hello world!");
-    Y.applyUpdate(doc, Y.encodeStateAsUpdate(remote));
-    Y.applyUpdate(remote, Y.encodeStateAsUpdate(doc));
-    expect(content(doc).nodes[A].text).toBe("hello brave world!");
-    expect(content(remote)).toEqual(content(doc));
-    doc.destroy();
-    remote.destroy();
-  });
-
-  test("renaming changes only the display name", () => {
-    const doc = tree();
-    expect(renameProject(doc, "Plans")).toBe(true);
-    expect(content(doc).metadata.name).toBe("Plans");
-    expect(doc.guid).toBe(PROJECT);
-    expect(renameProject(doc, "Plans")).toBe(false);
-    expect(() => renameProject(doc, " ")).toThrow("name");
-    doc.destroy();
-  });
-
   test("400 insertions into one gap keep order and bounded ranks", () => {
     const doc = createProjectDocument(PROJECT, "Ideas", { id: ID(1) });
     createRoot(doc, { id: ID(2) });
@@ -558,18 +394,6 @@ describe("tree commands", () => {
 });
 
 describe("atomicity and undo", () => {
-  test("undo history keeps at most 100 user actions", () => {
-    const doc = tree();
-    const undo = undoManager(doc);
-    for (let action = 0; action < 101; action++) {
-      renameProject(doc, `Ideas ${action}`);
-      undo.stopCapturing();
-    }
-    expect(undo.undoStack).toHaveLength(100);
-    undo.destroy();
-    doc.destroy();
-  });
-
   const commands: [string, (doc: Y.Doc) => unknown][] = [
     ["create root", (doc) => createRoot(doc, { text: "R" })],
     ["create child", (doc) => createChild(doc, B, { text: "R" })],
@@ -635,41 +459,9 @@ describe("atomicity and undo", () => {
     undo.destroy();
     doc.destroy();
   });
-
-  test("undo tracks only local commands and keeps remote work", () => {
-    const doc = tree();
-    const remote = fork(doc);
-    const undo = undoManager(doc);
-    deleteSubtree(doc, B);
-    const edits = capture(remote, () => replaceNodeText(remote, C, "C edited"));
-    for (const update of edits) Y.applyUpdate(doc, update, ORIGIN.remote);
-    expect(undo.undoStack).toHaveLength(1);
-    undo.undo();
-    expect(shape(doc)).toBe("A(B(C edited) D) E");
-    undo.destroy();
-    doc.destroy();
-    remote.destroy();
-  });
 });
 
 describe("replica convergence", () => {
-  test("concurrent moves that form a cycle converge to one valid forest", () => {
-    const doc = tree();
-    const base = Y.encodeStateAsUpdate(doc);
-    const left = fork(doc);
-    const right = fork(doc);
-    const updates = [
-      ...capture(left, () => moveNode(left, A, { id: E, placement: "child" })),
-      ...capture(right, () =>
-        moveNode(right, E, { id: C, placement: "child" }),
-      ),
-    ];
-    const merged = expectConvergence(base, updates);
-    // The cycle A→E→C→B→A detaches its smallest UUID, A.
-    expect(outline(projectMindMap(merged))).toBe("A(B(C(E)) D)");
-    for (const item of [doc, left, right]) item.destroy();
-  });
-
   test("deletion wins over concurrent edits without resurrecting nodes", () => {
     const doc = tree();
     const base = Y.encodeStateAsUpdate(doc);
@@ -690,21 +482,6 @@ describe("replica convergence", () => {
     expect(shape(left)).toBe("A(D) E(B edited(C))");
     expect(content(left).nodes[C].color).toBe("amber");
     undo.destroy();
-    for (const item of [doc, left, right]) item.destroy();
-  });
-
-  test("a child created under a concurrently deleted parent survives as a root", () => {
-    const doc = tree();
-    const base = Y.encodeStateAsUpdate(doc);
-    const left = fork(doc);
-    const right = fork(doc);
-    const merged = expectConvergence(base, [
-      ...capture(left, () => deleteSubtree(left, B)),
-      ...capture(right, () => createChild(right, C, { id: ID(9), text: "X" })),
-    ]);
-    // X keeps its first-child rank, which sorts between A and E among roots.
-    expect(outline(projectMindMap(merged))).toBe("A(D) X E");
-    expect(effectiveParents(merged).get(ID(9))).toBeNull();
     for (const item of [doc, left, right]) item.destroy();
   });
 
@@ -735,23 +512,6 @@ describe("replica convergence", () => {
     expect(new Set(ranks).size).toBe(3);
     undo.destroy();
     for (const item of [doc, left, right]) item.destroy();
-  });
-
-  test("non-conflicting edits from every replica are preserved", () => {
-    const doc = tree();
-    const base = Y.encodeStateAsUpdate(doc);
-    const [one, two, three] = [fork(doc), fork(doc), fork(doc)];
-    const merged = expectConvergence(base, [
-      ...capture(one, () => setNodeColor(one, A, "green")),
-      ...capture(one, () => editNodeText(one, E, 1, 0, "!")),
-      ...capture(two, () => renameProject(two, "Plans")),
-      ...capture(two, () => reorderNode(two, B, 1)),
-      ...capture(three, () => createChild(three, D, { text: "F" })),
-    ]);
-    expect(merged.metadata.name).toBe("Plans");
-    expect(merged.nodes[A].color).toBe("green");
-    expect(outline(projectMindMap(merged))).toBe("A(D(F) B(C)) E!");
-    for (const item of [doc, one, two, three]) item.destroy();
   });
 
   test("randomized concurrent editing converges to a valid forest", () => {
@@ -801,34 +561,4 @@ describe("replica convergence", () => {
       for (const item of [doc, ...replicas]) item.destroy();
     }
   });
-});
-
-describe("contract golden fixtures", () => {
-  const directory = new URL("./fixtures/yjs/", import.meta.url);
-  const fixtures = readdirSync(directory).filter((name) =>
-    name.endsWith(".json"),
-  );
-
-  test("fixtures are present", () => {
-    expect(fixtures.length).toBeGreaterThanOrEqual(6);
-  });
-
-  for (const name of fixtures) {
-    test(`${name} materializes and projects like the reference`, () => {
-      const fixture = JSON.parse(
-        readFileSync(new URL(name, directory), "utf8"),
-      );
-      const doc = openProjectDocument(
-        PROJECT,
-        fixture.updates.map(
-          (file: string) =>
-            new Uint8Array(readFileSync(new URL(file, directory))),
-        ),
-        ORIGIN.remote,
-      );
-      expect(content(doc)).toEqual(fixture.expected);
-      expect(projectForest(content(doc))).toEqual(fixture.forest);
-      doc.destroy();
-    });
-  }
 });

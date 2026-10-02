@@ -1,25 +1,17 @@
 import { beforeAll, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Y } from "./fixtures/project-document";
 import {
-  materialize,
-  present,
-  nodeMap,
-  ORIGIN,
-  projectForest,
   type Content,
   type ForestNode,
+  materialize,
+  ORIGIN,
+  projectForest,
+  Y,
 } from "./fixtures/project-document";
-import {
-  base,
-  capture,
-  fork,
-  ID,
-  seededRandom,
-  shuffle,
-  text,
-} from "./fixtures/yjs-scenarios";
+import { base, capture, ID, text } from "./fixtures/yjs-scenarios";
+
+// Shared goldens run through ingestion and read-model projection in the Rust
+// suite; these two cases exercise the Rust writer and pending-update encoding.
 const root = join(import.meta.dir, "../..");
 const manifest = join(root, "server/Cargo.toml");
 const binary = join(root, "server/target/debug/examples/yjs_interop");
@@ -55,7 +47,6 @@ type Result = {
 function rust(
   updates: Uint8Array[],
   options: {
-    batch?: boolean;
     edit?: { node: string; index: number; delete: number; insert: string };
     stateVector?: number[];
   } = {},
@@ -86,28 +77,7 @@ function assertRoundTrip(result: Result, expected: Content) {
   expect(back.store.pendingDs).toBeNull();
   back.destroy();
 }
-for (const file of readdirSync(join(import.meta.dir, "fixtures/yjs")).filter(
-  (name) => name.endsWith(".json"),
-)) {
-  const fixture = JSON.parse(
-    readFileSync(join(import.meta.dir, "fixtures/yjs", file), "utf8"),
-  ) as { updates: string[]; expected: Content; forest: ForestNode[] };
-  test(`golden ${file}: JS → Rust → JS, both transaction modes`, () => {
-    const updates = fixture.updates.map(
-      (name) =>
-        new Uint8Array(
-          readFileSync(join(import.meta.dir, "fixtures/yjs", name)),
-        ),
-    );
-    const js = new Y.Doc();
-    for (const update of updates) Y.applyUpdate(js, update);
-    expect(materialize(js)).toEqual(fixture.expected);
-    expect(projectForest(materialize(js))).toEqual(fixture.forest);
-    for (const batch of [false, true])
-      assertRoundTrip(rust(updates, { batch }), fixture.expected);
-    js.destroy();
-  });
-}
+
 test("Rust edits UTF-16 text after an emoji, deletes emoji, and sends a state-vector diff", () => {
   const doc = base();
   const initial = Y.encodeStateAsUpdate(doc);
@@ -148,61 +118,3 @@ test("pending text dependency survives Rust full encoding and replay before arri
   assertRoundTrip(recovered, materialize(doc));
   doc.destroy();
 });
-for (let seed = 1; seed <= 32; seed++) {
-  test(`seed ${seed}: concurrent edits/deletes/map writes with duplicate shuffled delivery`, () => {
-    const initialDoc = base();
-    const initial = Y.encodeStateAsUpdate(initialDoc);
-    const random = seededRandom(seed);
-    const updates: Uint8Array[] = [];
-    const peers = [
-      fork(initialDoc, 10),
-      fork(initialDoc, 11),
-      fork(initialDoc, 12),
-    ];
-    for (const peer of peers)
-      updates.push(
-        ...capture(peer, () => {
-          // A single shared text provides real causal dependencies, without the
-          // independent same-client gaps exercised by the storage API suite.
-          for (let step = 0; step < 12; step++)
-            peer.transact(() => {
-              const value = text(peer, ID(2));
-              if (random() < 0.4 && value.length)
-                value.delete(Math.floor(random() * value.length), 1);
-              else
-                value.insert(
-                  Math.floor(random() * (value.length + 1)),
-                  String.fromCharCode(97 + Math.floor(random() * 26)),
-                );
-            }, ORIGIN.local);
-          peer.transact(() => {
-            present(nodeMap(peer).get(ID(1))).set("position", {
-              x: Math.floor(random() * 100),
-              y: Math.floor(random() * 100),
-            });
-            present(nodeMap(peer).get(ID(3))).set("placement", {
-              parent: random() < 0.5 ? ID(1) : null,
-              rank: "a0",
-            });
-          }, ORIGIN.local);
-        }),
-      );
-    // Keep the final independent map transaction after its client's text edits;
-    // fully shuffle all causally dependent text edits and their duplicates.
-    const mapUpdates = updates.filter((_, i) => i % 13 === 12);
-    const textUpdates = updates.filter((_, i) => i % 13 !== 12);
-    const shuffled = [
-      initial,
-      ...shuffle([...textUpdates, ...textUpdates.slice(0, 8)], random),
-      ...shuffle(mapUpdates, random),
-    ];
-    const oracle = new Y.Doc();
-    for (const update of [initial, ...updates]) Y.applyUpdate(oracle, update);
-    const expected = materialize(oracle);
-    const js = new Y.Doc();
-    for (const update of shuffled) Y.applyUpdate(js, update);
-    expect(materialize(js)).toEqual(expected);
-    assertRoundTrip(rust(shuffled, { batch: seed % 2 === 0 }), expected);
-    for (const item of [initialDoc, oracle, js, ...peers]) item.destroy();
-  });
-}

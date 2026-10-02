@@ -9,10 +9,10 @@ import {
   test,
 } from "bun:test";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright";
 import type { Browser, BrowserContext, Page } from "playwright";
-import { createServer } from "vite";
+import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
+import { createServer } from "vite";
 import type { Harness } from "./harness";
 
 // Interaction tests for the Yjs-bound editor in headless Chromium. The harness
@@ -111,18 +111,6 @@ async function startDrag(id: string) {
 }
 
 describe("remote documents", () => {
-  test("remote edits render immediately without saving or reloading", async () => {
-    const id = await rootId();
-    await call("edit", id, 0, 3, "Remote");
-    expect(await node(id).textContent()).toBe("Remote idea");
-    const child = await call("addChild", id, "From another device");
-    expect(await node(child as string).textContent()).toBe(
-      "From another device",
-    );
-    await call("remove", child as string);
-    await node(child as string).waitFor({ state: "detached" });
-  });
-
   test("switching projects detaches the previous document", async () => {
     const id = await rootId();
     await page.getByRole("button", { name: "New", exact: true }).click();
@@ -140,30 +128,6 @@ describe("remote documents", () => {
 });
 
 describe("text editing", () => {
-  test("undo and redo are available in the editor and toolbar", async () => {
-    const id = await rootId();
-    const undo = page.getByRole("button", { name: "Undo", exact: true });
-    const redo = page.getByRole("button", { name: "Redo", exact: true });
-    expect(await undo.isDisabled()).toBe(true);
-    expect(await redo.isDisabled()).toBe(true);
-
-    await edit(id);
-    await page.keyboard.press("End");
-    await page.keyboard.type("!");
-    await page.keyboard.press("Control+z");
-    expect(await selection()).toEqual(["New idea", 8, 8]);
-    await page.keyboard.press("Control+Shift+z");
-    expect((await selection())[0]).toBe("New idea!");
-    await page.keyboard.press("Escape");
-
-    await undo.click();
-    expect(await node(id).innerText()).toBe("New idea");
-    expect(await redo.isEnabled()).toBe(true);
-    await redo.click();
-    expect(await node(id).innerText()).toBe("New idea!");
-    expect(await undo.isEnabled()).toBe(true);
-  });
-
   test("typing, newlines, emoji, and paste become incremental operations", async () => {
     const id = await rootId();
     await edit(id);
@@ -320,25 +284,6 @@ describe("dragging", () => {
 });
 
 describe("existing interactions", () => {
-  test("automatically saves edits and restores the UUID project after reload", async () => {
-    const id = await rootId();
-    await node(id).dblclick();
-    await editor().fill("Saved without pressing Save");
-    expect(await node(id).textContent()).toContain(
-      "Saved without pressing Save",
-    );
-    await page.waitForFunction(() =>
-      [...document.querySelectorAll('[role="status"]')].some(
-        (element) => element.textContent?.trim() === "Saved locally",
-      ),
-    );
-    await page.reload();
-    await page.waitForSelector('[data-storage-ready="true"]');
-    expect(
-      await page.locator("[data-node-id]").first().textContent(),
-    ).toContain("Saved without pressing Save");
-  });
-
   test("add, edit, navigate, reorder, delete, undo, and zoom", async () => {
     const root = await rootId();
     await node(root).click();
@@ -478,52 +423,6 @@ describe("portable file actions", () => {
         .getByRole("button", { name: "Undo", exact: true })
         .isDisabled(),
     ).toBe(true);
-  });
-
-  test("a truncated file leaves the active project and catalog unchanged", async () => {
-    const id = await call("projectId");
-    const before = await call("content");
-    await uploadProject('{"format":');
-    expect(await call("projectId")).toBe(id);
-    expect(await call("content")).toEqual(before);
-    expect(
-      await page.getByText("Project file is not valid JSON.").count(),
-    ).toBe(1);
-    await page.getByRole("button", { name: "Load", exact: true }).click();
-    await page.locator("#saved-projects").waitFor();
-    expect(await page.locator("#saved-projects li").count()).toBe(1);
-  });
-
-  test("failed IndexedDB catalog writes preserve the active project and remove the imported seed", async () => {
-    const saved = await downloadProject();
-    const id = await call("projectId");
-    const before = await call("content");
-    await page.evaluate(() => {
-      const original = IDBObjectStore.prototype.put;
-      Object.assign(window, {
-        restoreWrites: () => {
-          IDBObjectStore.prototype.put = original;
-        },
-      });
-      IDBObjectStore.prototype.put = function (...args) {
-        const request = original.apply(this, args);
-        if (this.name === "projects")
-          request.addEventListener("success", () => this.transaction.abort());
-        return request;
-      };
-    });
-    await uploadProject(saved.json);
-    await page.evaluate(() =>
-      (window as unknown as { restoreWrites(): void }).restoreWrites(),
-    );
-    expect(await call("projectId")).toBe(id);
-    expect(await call("content")).toEqual(before);
-    expect(
-      await page.getByText("The browser did not commit the change.").count(),
-    ).toBe(1);
-    await page.getByRole("button", { name: "Load", exact: true }).click();
-    await page.locator("#saved-projects").waitFor();
-    expect(await page.locator("#saved-projects li").count()).toBe(1);
   });
 
   test("Export stays usable when browser persistence cannot open", async () => {

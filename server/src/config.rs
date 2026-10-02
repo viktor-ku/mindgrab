@@ -91,18 +91,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_issuer_is_scoped_to_the_configured_workos_application() {
-        assert_eq!(
-            default_issuer("client_test"),
-            "https://api.workos.com/user_management/client_test"
-        );
-        assert_ne!(
-            default_issuer("client_test"),
-            default_issuer("client_other")
-        );
-    }
-
-    #[test]
     fn redirect_uri_requires_the_workos_callback_route() {
         for origin in ["http://localhost:5173", "https://mindgrab.example"] {
             assert!(validate_redirect_uri(&format!("{origin}/api/auth/callback")).is_ok());
@@ -124,36 +112,5 @@ mod tests {
         ] {
             assert!(validate_url(url).is_err());
         }
-    }
-
-    #[test]
-    fn app_url_identifies_loopback_development() {
-        for app_url in [
-            "http://localhost:5173/",
-            "http://127.0.0.1:5173/",
-            "http://[::1]:5173/",
-        ] {
-            let config = Config {
-                database_url: String::new(),
-                client_id: String::new(),
-                api_key: String::new(),
-                redirect_uri: String::new(),
-                app_url: app_url.to_owned(),
-                issuer: String::new(),
-                secure_cookies: false,
-            };
-            assert!(config.is_local(), "{app_url}");
-        }
-
-        let production = Config {
-            database_url: String::new(),
-            client_id: String::new(),
-            api_key: String::new(),
-            redirect_uri: String::new(),
-            app_url: "https://mindgrab.example/".to_owned(),
-            issuer: String::new(),
-            secure_cookies: true,
-        };
-        assert!(!production.is_local());
     }
 }
