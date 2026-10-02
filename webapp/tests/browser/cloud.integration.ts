@@ -3,6 +3,10 @@
 import { chromium } from "playwright";
 import type { BrowserContext, Page } from "playwright";
 import { expect } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { build as buildWebapp } from "vite";
 import type { CloudHarness } from "./cloud-harness";
 declare const mg: CloudHarness;
 const config = JSON.parse(await Bun.stdin.text()) as {
@@ -13,6 +17,8 @@ const config = JSON.parse(await Bun.stdin.text()) as {
 const origin = "http://localhost:5173";
 const ws = `${config.serverUrl}/sync/v1`;
 const http = config.serverUrl.replace("ws:", "http:");
+const directory = await mkdtemp(join(tmpdir(), "mindgrab-cloud-"));
+const outDir = join(directory, "dist");
 const build = await Bun.build({
   entrypoints: [`${import.meta.dir}/cloud-harness.ts`],
   target: "browser",
@@ -68,9 +74,7 @@ async function context(production = false) {
       if (path === "/api/listProjects") catalogRequests++;
       await route.fulfill({ response });
     } else if (production) {
-      const file = Bun.file(
-        `${import.meta.dir}/../../dist${path === "/" ? "/index.html" : path}`,
-      );
+      const file = Bun.file(`${outDir}${path === "/" ? "/index.html" : path}`);
       await route.fulfill({
         contentType: file.type,
         body: Buffer.from(await file.arrayBuffer()),
@@ -228,6 +232,20 @@ try {
   // The shipped production UI uses the same real HTTP endpoints and fixture
   // account. Sockets are covered above; close this UI's socket to exercise HTTP
   // durability when live propagation is temporarily unavailable.
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    await buildWebapp({
+      root: join(import.meta.dir, "../.."),
+      logLevel: "silent",
+      envDir: false,
+      define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
+      build: { outDir, emptyOutDir: true },
+    });
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+  }
   const uiContext = await context(true);
   await uiContext.routeWebSocket("ws://localhost:5173/sync/v1/**", (socket) =>
     socket.close(),
@@ -270,4 +288,5 @@ try {
     await context.close();
   }
   await browser.close();
+  await rm(directory, { recursive: true, force: true });
 }

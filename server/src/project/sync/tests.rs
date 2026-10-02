@@ -762,7 +762,7 @@ async fn schema_change_fences_an_already_connected_client(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "Run mise run webapp:test:cloud; requires built webapp and Chromium"]
+#[ignore = "Run mise run webapp:test:cloud; requires Chromium"]
 async fn browser_cloud_sync_recovers_offline_tabs_receipts_deletes_and_large_batches(pool: PgPool) {
     use std::{
         io::Write,

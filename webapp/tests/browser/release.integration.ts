@@ -320,7 +320,8 @@ try {
     await build({
       root: join(import.meta.dir, "../.."),
       logLevel: "silent",
-      envFile: false,
+      envDir: false,
+      define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
       plugins: [
         {
           name: "release-observation",

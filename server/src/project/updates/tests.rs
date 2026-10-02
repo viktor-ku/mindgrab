@@ -305,7 +305,8 @@ async fn rejected_updates_never_change_durable_state(pool: PgPool) {
         let response = put(&f.state, &cookie, id, new_id(), &bytes).await;
         assert!(!response.0.is_success());
     }
-    let bad = Doc::new();
+    // Match Yjs's u32 client IDs; Yrs defaults to wider IDs without small-client.
+    let bad = Doc::with_client_id(1);
     bad.get_or_insert_map("project")
         .insert(&mut bad.transact_mut(), "schemaVersion", 2);
     let response = put(

@@ -42,7 +42,7 @@ run = "bun --bun install --frozen-lockfile"
 
 [tasks."webapp:test:cloud"]
 description = "Test browser cloud sync against isolated Rust/Postgres endpoints"
-depends = ["webapp:install", "webapp:build"]
+depends = ["webapp:install"]
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test browser_cloud_sync_recovers -- --ignored"
 
 [tasks."webapp:dev"]

@@ -9,12 +9,13 @@ use axum::{
     routing::{MethodRouter, get},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+// Match axum-login's session types even when the direct dependency is newer.
+use axum_login::tower_sessions::{self, Expiry, SessionManagerLayer};
 use axum_login::{AuthManagerLayerBuilder, AuthUser, AuthnBackend};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
-use tower_sessions::{Expiry, SessionManagerLayer};
 
 use crate::{
     config::Config,

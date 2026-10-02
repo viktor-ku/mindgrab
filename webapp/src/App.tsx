@@ -65,7 +65,7 @@ import type {
   NodePosition,
   NodeSize,
 } from "./mind-map";
-import { backendEndpoint } from "./backend";
+import { backendDeployment } from "./backend";
 import { CloudWorkspace } from "./project-sync";
 import type { CloudStatus } from "./project-sync";
 
@@ -247,7 +247,7 @@ interface ContextMenuState {
 }
 
 export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
-  const deployment = new URL(backendEndpoint("/")).origin;
+  const deployment = backendDeployment();
   const auth = new AuthSession(deployment);
   const [account, setAccount] = createSignal(auth.state);
   let activeUserId = auth.state.user?.id;

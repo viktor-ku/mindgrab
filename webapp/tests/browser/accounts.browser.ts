@@ -188,6 +188,7 @@ beforeAll(async () => {
     root,
     configFile: `${root}/vite.config.ts`,
     cacheDir: "node_modules/.vite-account-tests",
+    define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
     logLevel: "error",
     server: { port: 5197, strictPort: false },
     optimizeDeps: { entries: ["tests/browser/accounts-harness.html"] },

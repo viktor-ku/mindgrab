@@ -1,10 +1,10 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, types::Json};
-use tower_sessions::{
+use axum_login::tower_sessions::{
     ExpiredDeletion, SessionStore,
     session::{Id, Record},
     session_store::{self, Error},
 };
+use sqlx::{PgPool, types::Json};
 
 use super::{AUTH_DATA, token_hash};
 

@@ -44,6 +44,7 @@ beforeAll(async () => {
       root: webapp,
       configFile: join(webapp, "vite.config.ts"),
       logLevel: "error",
+      define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
       plugins: [
         {
           name: "release-fixture",

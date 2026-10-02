@@ -34,6 +34,8 @@ durable Rust/Axum/Postgres synchronization and WorkOS AuthKit login.
    Open **http://localhost:5173**. Use this hostname for matching callback/cookie
    origins. Vite forwards `/api`, `/auth` and `/sync` (including WebSocket upgrades) to the backend
    configured in `webapp/.env` (locally port 3000). Restart after changing it.
+   Browser requests stay on the Vite origin so authentication cookies and redirects
+   use the proxy; the configured backend origin still identifies local storage.
    Vite refuses to switch ports when 5173 is occupied.
 
 For agent sign-in, use the [local sign-in skill](.agents/skills/mindgrab-local-signin/SKILL.md).

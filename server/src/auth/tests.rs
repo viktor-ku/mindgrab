@@ -2,6 +2,10 @@ use super::*;
 use axum::body::{Body, to_bytes};
 use axum::http::header;
 use axum::routing::post;
+use axum_login::tower_sessions::{
+    ExpiredDeletion, SessionStore,
+    session::{Id, Record},
+};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
 use std::sync::{
@@ -9,10 +13,6 @@ use std::sync::{
     atomic::{AtomicU16, AtomicUsize, Ordering},
 };
 use tower::ServiceExt;
-use tower_sessions::{
-    ExpiredDeletion, SessionStore,
-    session::{Id, Record},
-};
 
 // This key is generated solely for tests and is never used by the application.
 const TEST_KEY: &[u8] = include_bytes!("fixtures/test-private.pem");

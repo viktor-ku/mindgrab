@@ -10,11 +10,11 @@ mod workos;
 use std::{sync::Arc, time::Duration};
 
 use axum::{Router, http::HeaderName, http::HeaderValue, http::header, routing::get};
+use axum_login::tower_sessions::ExpiredDeletion;
 use axum_server_timing::ServerTimingLayer;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
-use tower_sessions::ExpiredDeletion;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
