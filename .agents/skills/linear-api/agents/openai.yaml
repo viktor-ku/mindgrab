@@ -1,0 +1,3 @@
+interface:
+  display_name: "Linear API"
+  short_description: "Plan Linear tasks with matching branches and worktrees"
