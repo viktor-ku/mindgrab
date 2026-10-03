@@ -23,6 +23,39 @@ to the callback origin. `DATABASE_URL` defaults to
 `postgres://postgres@localhost:5432/mindgrab`; `PORT` defaults to 3000.
 Use HTTPS callback/app URLs outside loopback. Vite proxies `/api` and `/sync`.
 
+### Worktree development
+
+T3's worktree setup command is `bun tooling/worktree-bootstrap.ts`, run from the
+repository root. It needs only Bun and Git, so it can run before dependency
+installation. You can also invoke it with `mise run worktree:bootstrap`.
+
+The script creates an ignored root `mise.local.toml` containing `WEBAPP_PORT`,
+backend `PORT`, `POSTGRES_PORT`, `DATABASE_URL`, `VITE_BACKEND_URL`,
+`COMPOSE_PROJECT_NAME`, `WORKOS_REDIRECT_URI`, and `APP_URL`. Each worktree gets
+three available ports and its own Compose project, Postgres container, and named
+volume. Reruns preserve those settings and any custom mise configuration. Port
+allocation checks other worktrees' saved settings as well as listening sockets;
+simultaneous bootstraps in the same repository are serialized.
+
+When available, the main checkout's `.env` supplies shared credentials through
+mise's dotenv directive. A worktree's existing `.env` overrides shared values;
+the generated port and URL settings override both. Credentials are referenced,
+not copied. Missing dotenv files are skipped and can be added later. If neither
+file exists, provide `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` in the worktree's
+`.env`, or configure them
+directly in `mise.local.toml`. Ensure WorkOS allows the generated callback URL.
+
+Use the same `mise run db`, `mise run backend:dev`, and `mise run webapp:dev`
+commands as above. Every task inherits the worktree environment. For other
+commands, use `mise exec -- <command>` or an activated mise shell; a plain shell
+does not automatically read `mise.local.toml`. To stop this worktree's database,
+run `mise exec -- docker compose down`. Its named volume is retained for reuse.
+
+Postgres 18 stores data under `/var/lib/postgresql/18/docker`; Compose mounts the
+named volume at `/var/lib/postgresql`. Existing containers created with the old
+`/var/lib/postgresql/data` mount used a separate anonymous volume for actual data.
+Export any needed data from those containers before recreating them.
+
 Startup applies `backend/migrations/` under a database advisory lock. Existing
 `_sqlx_migrations` records are adopted only when their SHA-384 checksums match the
 unchanged SQL files. Existing users, sessions, project updates, checkpoints,

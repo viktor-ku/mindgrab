@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [tailwindcss(), solid(), offlineShell()],
     server: {
-      port: 5173,
+      port: Number(process.env.WEBAPP_PORT ?? "5173"),
       strictPort: true,
       proxy: {
         "/api": {
