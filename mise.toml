@@ -10,10 +10,6 @@ run = "docker compose up -d postgres"
 description = "Run the API server"
 run = "mise -C server exec -- cargo run"
 
-[tasks."server:reset-legacy-projects"]
-description = "Discard ONLY obsolete snapshot tables; retain Yjs projects and authentication"
-run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- reset-legacy-projects"
-
 [tasks."server:rebuild-read-models"]
 description = "Rebuild Yjs inspection indexes from canonical binary storage"
 run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- rebuild-read-models"

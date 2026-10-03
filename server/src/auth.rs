@@ -26,7 +26,6 @@ use crate::{
 pub(crate) mod store;
 
 pub(crate) const SESSION_COOKIE: &str = "mindgrab_session_v2";
-pub(crate) const LEGACY_SESSION_COOKIE: &str = "mindgrab_session";
 pub(crate) const AUTH_DATA: &str = "axum-login.data";
 pub(crate) const STATE_COOKIE: &str = "mindgrab_login";
 
@@ -102,7 +101,7 @@ impl AuthnBackend for Backend {
     }
 
     async fn get_user(&self, session: &SessionKey) -> Result<Option<User>, AuthError> {
-        optional_user(self.validate(session, false).await)
+        optional_user(self.validate(session).await)
     }
 }
 
@@ -163,21 +162,8 @@ async fn fresh_login_session(mut request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-pub(crate) async fn identified_user(
-    auth: &AuthSession,
-    jar: &CookieJar,
-) -> Result<User, AuthError> {
-    if let Some(user) = &auth.user {
-        return Ok(user.clone());
-    }
-    // Old tabs retain their credential until rotation, with no downgrade when
-    // the new cookie is also present. Do not seed or rewrite old session records.
-    if jar.get(SESSION_COOKIE).is_none()
-        && let Some(hash) = browser_credential(jar)
-    {
-        return auth.backend.validate(&SessionKey(hash), true).await;
-    }
-    Err(AuthError::Unauthorized)
+pub(crate) fn identified_user(auth: &AuthSession) -> Result<User, AuthError> {
+    auth.user.clone().ok_or(AuthError::Unauthorized)
 }
 
 impl From<axum_login::Error<Backend>> for AuthError {
@@ -216,11 +202,8 @@ impl From<tower_sessions::session::Error> for AuthError {
     }
 }
 
-// Prefer the new credential even if invalid: never fall back to older authority
-// when both cookies are present. Legacy tabs can keep using their issued cookie.
 pub(crate) fn browser_credential(jar: &CookieJar) -> Option<String> {
     jar.get(SESSION_COOKIE)
-        .or_else(|| jar.get(LEGACY_SESSION_COOKIE))
         .map(|cookie| token_hash(cookie.value()))
 }
 
@@ -272,11 +255,7 @@ async fn callback(
             })
             .await?
             .ok_or(AuthError::Unauthorized)?;
-        let previous: Vec<_> = [SESSION_COOKIE, LEGACY_SESSION_COOKIE]
-            .into_iter()
-            .filter_map(|name| jar.get(name))
-            .map(|cookie| token_hash(cookie.value()))
-            .collect();
+        let previous: Vec<_> = browser_credential(&jar).into_iter().collect();
         auth.login(&user).await?;
         auth.session
             .insert(store::PROVIDER, &user.session.0)
@@ -289,11 +268,7 @@ async fn callback(
     .await;
     let jar = clear_cookie(jar, &state.config, STATE_COOKIE);
     match result {
-        Ok(()) => (
-            clear_cookie(jar, &state.config, LEGACY_SESSION_COOKIE),
-            Redirect::to(&state.config.app_url),
-        )
-            .into_response(),
+        Ok(()) => (jar, Redirect::to(&state.config.app_url)).into_response(),
         Err(error) => {
             // Avoid a second creation attempt by response middleware after a
             // failed explicit save. Previous credentials remain untouched.
@@ -404,13 +379,13 @@ struct ProviderSession {
 }
 
 impl Backend {
-    async fn validate(&self, key: &SessionKey, legacy: bool) -> Result<User, AuthError> {
+    async fn validate(&self, key: &SessionKey) -> Result<User, AuthError> {
         let state = &self.0;
         let hash = &key.0;
         let mut tx = state.pool.begin().await?;
         // Lock the exact provider/local session so refresh rotation is serialized.
-        let session: Option<ProviderSession> = sqlx::query_as("SELECT user_id, workos_session_id, access_token, refresh_token FROM auth_sessions WHERE token_hash = $1 AND (NOT $2 OR browser_hash IS NULL) AND expires_at > NOW() FOR UPDATE")
-            .bind(hash).bind(legacy).fetch_optional(&mut *tx).await?;
+        let session: Option<ProviderSession> = sqlx::query_as("SELECT user_id, workos_session_id, access_token, refresh_token FROM auth_sessions WHERE token_hash = $1 AND expires_at > NOW() FOR UPDATE")
+            .bind(hash).fetch_optional(&mut *tx).await?;
         let session = session.ok_or(AuthError::Unauthorized)?;
         let result = validate_session(state, &mut tx, hash, session).await;
         if matches!(result, Err(AuthError::Unauthorized)) {

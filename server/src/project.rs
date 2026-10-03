@@ -3,7 +3,6 @@
 //! The owner always comes from the authenticated session. Catalog records hold
 //! identity and rebuildable summaries only, never document bodies.
 
-pub(crate) mod cutover;
 mod projection;
 pub(crate) mod read_model;
 #[cfg(test)]
@@ -19,9 +18,8 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{MethodRouter, get},
+    routing::MethodRouter,
 };
-use axum_extra::extract::cookie::CookieJar;
 use serde::{Serialize, Serializer};
 use serde_json::json;
 use sqlx::PgPool;
@@ -53,11 +51,6 @@ pub(crate) use project_columns;
 pub fn router(state: Arc<AppState>, limits: &crate::rate_limits::RateLimits) -> Router {
     Router::new()
         .merge(sync::router(state.clone(), limits))
-        // Retired snapshot clients must still receive an explicit upgrade error.
-        .route(
-            "/api/projects",
-            get(cutover::upgrade_required).put(cutover::upgrade_required),
-        )
         .layer(private_headers())
         .with_state(state)
 }
@@ -247,12 +240,11 @@ pub(crate) fn protect(
 
 async fn require_user(
     auth: AuthSession,
-    jar: CookieJar,
     headers: HeaderMap,
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let user = auth::identified_user(&auth, &jar).await?;
+    let user = auth::identified_user(&auth)?;
     if let Some(expected) = headers.get("x-mindgrab-account") {
         require_account(
             &user,

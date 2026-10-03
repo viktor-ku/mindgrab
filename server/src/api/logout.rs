@@ -7,10 +7,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 
 use crate::{
-    auth::{
-        AppState, AuthSession, LEGACY_SESSION_COOKIE, STATE_COOKIE, browser_credential,
-        clear_cookie, token_hash,
-    },
+    auth::{AppState, AuthSession, STATE_COOKIE, browser_credential, clear_cookie, token_hash},
     workos::AuthError,
 };
 
@@ -22,7 +19,7 @@ pub(super) async fn logout(
     let mut destination = state.config.app_url.clone();
     if let Some(hash) = browser_credential(&jar) {
         let sid: Option<String> = sqlx::query_scalar(
-            "DELETE FROM auth_sessions WHERE browser_hash = $1 OR (browser_hash IS NULL AND token_hash = $1) RETURNING workos_session_id",
+            "DELETE FROM auth_sessions WHERE browser_hash = $1 RETURNING workos_session_id",
         )
         .bind(hash)
         .fetch_optional(&state.pool)
@@ -41,10 +38,6 @@ pub(super) async fn logout(
             .execute(&state.pool)
             .await?;
     }
-    let jar = clear_cookie(
-        clear_cookie(jar, &state.config, LEGACY_SESSION_COOKIE),
-        &state.config,
-        STATE_COOKIE,
-    );
+    let jar = clear_cookie(jar, &state.config, STATE_COOKIE);
     Ok((jar, Redirect::to(&destination)).into_response())
 }
