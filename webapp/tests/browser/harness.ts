@@ -1,3 +1,5 @@
+import { QueryClientProvider } from "@tanstack/solid-query";
+import { queryClient } from "../../src/query-client";
 import { createComponent, render } from "solid-js/web";
 import * as Y from "yjs";
 import { App } from "../../src/App";
@@ -99,4 +101,13 @@ declare global {
 window.fetch = async () => new Response(null, { status: 401 });
 window.harness = harness;
 const root = document.getElementById("root") as HTMLElement;
-render(() => createComponent(App, { onDocument: link }), root);
+render(
+  () =>
+    createComponent(QueryClientProvider, {
+      client: queryClient,
+      get children() {
+        return createComponent(App, { onDocument: link });
+      },
+    }),
+  root,
+);

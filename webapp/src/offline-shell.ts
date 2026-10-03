@@ -1,3 +1,5 @@
+import { QueryObserver } from "@tanstack/solid-query";
+import { queryClient } from "./query-client";
 import { createSignal } from "solid-js";
 import { SHELL_COMPATIBILITY } from "./offline-contract";
 
@@ -39,7 +41,6 @@ const register = () =>
 // retry periodically. Never activate or reload a running editor here.
 function monitorUpdates() {
   const observed = new WeakSet<ServiceWorkerRegistration>();
-  let checking: Promise<void> | undefined;
   const observe = (registration: ServiceWorkerRegistration) => {
     if (observed.has(registration)) return;
     observed.add(registration);
@@ -59,30 +60,30 @@ function monitorUpdates() {
     watch();
     void navigator.serviceWorker.ready.then(report);
   };
-  const check = () => {
-    if (checking || !navigator.onLine) return;
-    checking = (async () => {
-      try {
-        const existing = await navigator.serviceWorker.getRegistration("/");
-        const registration = existing ?? (await register());
-        observe(registration);
-        if (existing) await registration.update();
-      } catch {
-        // Retain the installed shell and keep retrying; a failed check must not
-        // hide a ready update or interrupt local editing.
-      }
-    })().finally(() => {
-      checking = undefined;
-    });
+  const options = {
+    queryKey: ["offline-shell", "updates"] as const,
+    queryFn: async () => {
+      const existing = await navigator.serviceWorker.getRegistration("/");
+      const registration = existing ?? (await register());
+      observe(registration);
+      if (existing) await registration.update();
+      return null;
+    },
+    networkMode: "online" as const,
+    refetchInterval: UPDATE_INTERVAL_MS,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   };
+  const observer = new QueryObserver(queryClient, options);
+  // This observer lives for the page lifetime, like the service worker listeners.
+  observer.subscribe(() => {});
+  const check = () => {
+    if (navigator.onLine) void observer.refetch({ cancelRefetch: false });
+  };
+  // Reachability events are hints; an online event can arrive while the
+  // Query online manager already considers this browser online.
   window.addEventListener("online", check);
   window.addEventListener("focus", check);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") check();
-  });
-  setInterval(() => {
-    if (document.visibilityState === "visible") check();
-  }, UPDATE_INTERVAL_MS);
   return { observe, check };
 }
 

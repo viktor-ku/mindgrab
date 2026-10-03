@@ -1,3 +1,5 @@
+import { QueryObserver } from "@tanstack/solid-query";
+import type { QueryClient } from "@tanstack/solid-query";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { backendEndpoint } from "./backend";
@@ -410,28 +412,52 @@ export class CloudWorkspace {
   readonly #onCatalog: () => void;
   #active?: ProjectSync;
   #background?: ProjectSync;
-  #running = false;
-  #timer?: ReturnType<typeof setTimeout>;
-  #attempt = 0;
+  readonly #queryKey: readonly string[];
+  readonly #observer: QueryObserver<null, Error, null, null, readonly string[]>;
+  readonly #stopQuery: () => void;
   #authPaused = false;
 
   constructor(
     repository: ProjectRepository,
     onStatus: (status: CloudStatus | undefined) => void,
     onCatalog: () => void,
-    api = new CrdtApi(
-      undefined,
-      undefined,
-      Number(repository.scope.namespace.replace("account-", "")),
-    ),
+    api?: CrdtApi,
+    queryClient?: QueryClient,
   ) {
     this.repository = repository;
-    this.api = api;
+    this.api =
+      api ??
+      new CrdtApi(
+        undefined,
+        undefined,
+        Number(repository.scope.namespace.replace("account-", "")),
+        queryClient,
+      );
     this.#onStatus = onStatus;
     this.#onCatalog = onCatalog;
+    this.#queryKey = [
+      "cloud-workspace",
+      repository.names.catalog,
+      crypto.randomUUID(),
+    ];
+    this.#observer = new QueryObserver(this.api.queryClient, {
+      queryKey: this.#queryKey,
+      queryFn: () => this.#refresh(),
+      networkMode: "online",
+      refetchInterval: 30_000,
+      refetchIntervalInBackground: true,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      retry: (_count, error) =>
+        !this.#abort.signal.aborted &&
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: (attempt) =>
+        Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)),
+      gcTime: 0,
+    });
+    this.#stopQuery = this.#observer.subscribe(() => {});
     globalThis.window?.addEventListener("online", this.#wake);
     globalThis.window?.addEventListener("focus", this.#wake);
-    this.#schedule(0);
   }
   activate(handle: ProjectHandle) {
     if (this.#abort.signal.aborted || this.#authPaused) return;
@@ -456,19 +482,11 @@ export class CloudWorkspace {
     this.#wake();
   }
   #wake = () => {
-    if (this.#authPaused) return;
-    this.#attempt = 0;
-    this.#schedule(0);
+    if (this.#authPaused || this.#abort.signal.aborted) return;
+    void this.#observer.refetch({ cancelRefetch: false });
   };
-  #schedule(ms: number) {
-    if (this.#abort.signal.aborted || this.#authPaused) return;
-    clearTimeout(this.#timer);
-    this.#timer = setTimeout(() => void this.#refresh(), ms);
-  }
-  async #refresh() {
-    if (this.#running || this.#abort.signal.aborted) return;
-    this.#running = true;
-    let delay = 30_000;
+  async #refresh(): Promise<null> {
+    if (this.#abort.signal.aborted || this.#authPaused) return null;
     const signal = this.#abort.signal;
     try {
       await discoverProjects(this.repository, this.api, signal);
@@ -498,29 +516,35 @@ export class CloudWorkspace {
           await handle.close();
         }
       }
-      this.#attempt = 0;
     } catch (error) {
-      if (signal.aborted) return;
+      if (signal.aborted) return null;
       if (error instanceof SyncError && error.kind === "auth") {
         this.#pauseForAuth(error.message);
       }
-      delay = Math.min(30_000, 1000 * 2 ** Math.min(this.#attempt++, 5));
-    } finally {
-      this.#running = false;
-      this.#schedule(delay);
+      throw error;
     }
+    return null;
   }
   #pauseForAuth(message: string) {
     if (this.#authPaused || this.#abort.signal.aborted) return;
     this.#authPaused = true;
-    clearTimeout(this.#timer);
+    this.#observer.setOptions({ ...this.#observer.options, enabled: false });
     this.#active?.pauseForAuth(message);
     this.#background?.pauseForAuth(message);
     this.#onStatus({ status: "auth", message });
   }
   destroy() {
     this.#abort.abort();
-    clearTimeout(this.#timer);
+    this.#stopQuery();
+    this.#observer.destroy();
+    void this.api.queryClient.cancelQueries({
+      queryKey: this.#queryKey,
+      exact: true,
+    });
+    this.api.queryClient.removeQueries({
+      queryKey: this.#queryKey,
+      exact: true,
+    });
     this.#active?.destroy();
     this.#background?.destroy();
     globalThis.window?.removeEventListener("online", this.#wake);

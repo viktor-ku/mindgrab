@@ -1,11 +1,17 @@
-import { getRouteApi, Link, useRouter } from "@tanstack/solid-router";
+import { createQuery } from "@tanstack/solid-query";
+import { getRouteApi, Link } from "@tanstack/solid-router";
 import type { JSX } from "solid-js";
-import { createSignal, onCleanup, onMount, Show } from "solid-js";
-import { formatLatency, overallStatus } from "./health";
+import { onCleanup, onMount, Show } from "solid-js";
+import {
+  formatLatency,
+  overallStatus,
+  healthQueryOptions,
+  HEALTH_REFRESH_MS,
+} from "./health";
 import type { ComponentHealth, ComponentState, Overall } from "./health";
 
 const routeApi = getRouteApi("/checkhealth");
-const REFRESH_MS = 15_000;
+const REFRESH_MS = HEALTH_REFRESH_MS;
 
 type DotTone = ComponentState | "degraded";
 
@@ -136,34 +142,15 @@ export function CheckHealthPending() {
 }
 
 export function CheckHealth() {
-  const report = routeApi.useLoaderData();
-  const router = useRouter();
-  const [refreshing, setRefreshing] = createSignal(false);
+  const initialReport = routeApi.useLoaderData();
+  const query = createQuery(() => ({
+    ...healthQueryOptions(),
+    initialData: initialReport(),
+  }));
+  const report = () => query.data;
   const overall = () => overallTone[overallStatus(report())];
-
-  async function refresh() {
-    if (refreshing()) return;
-    setRefreshing(true);
-    try {
-      await router.invalidate();
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  onMount(() => {
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void refresh();
-    }, REFRESH_MS);
-    const onVisible = () => {
-      if (!document.hidden) void refresh();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    onCleanup(() => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    });
-  });
+  const refreshing = () => query.isFetching;
+  const refresh = () => query.refetch({ cancelRefetch: false });
 
   return (
     <StatusLayout>

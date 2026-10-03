@@ -6,7 +6,8 @@ import {
 } from "@tanstack/solid-router";
 import { App } from "./App.tsx";
 import { CheckHealth, CheckHealthPending } from "./CheckHealth.tsx";
-import { checkHealth } from "./health";
+import { healthQueryOptions } from "./health";
+import { queryClient } from "./query-client";
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -19,7 +20,7 @@ const indexRoute = createRoute({
 const checkHealthRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/checkhealth",
-  loader: () => checkHealth(),
+  loader: () => queryClient.ensureQueryData(healthQueryOptions()),
   staleTime: 0,
   gcTime: 0,
   pendingMs: 150,

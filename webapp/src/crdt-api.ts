@@ -1,3 +1,9 @@
+import type { QueryClient } from "@tanstack/solid-query";
+import {
+  createQueryClient,
+  executeMutation,
+  fetchScopedQuery,
+} from "./query-client";
 import { z } from "zod";
 import { backendEndpoint } from "./backend";
 
@@ -65,14 +71,92 @@ export class CrdtApi {
   readonly endpoint: typeof backendEndpoint;
   readonly fetcher: typeof fetch;
   readonly ownerId?: number;
+  readonly queryClient: QueryClient;
+  readonly #lifetimes = new WeakMap<AbortSignal, string>();
   constructor(
     endpoint = backendEndpoint,
     fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
     ownerId?: number,
+    queryClient = createQueryClient(),
   ) {
     this.endpoint = endpoint;
     this.fetcher = fetcher;
     this.ownerId = ownerId;
+    this.queryClient = queryClient;
+  }
+
+  #key(signal: AbortSignal, operation: string, id?: string) {
+    let lifetime = this.#lifetimes.get(signal);
+    if (!lifetime) {
+      lifetime = crypto.randomUUID();
+      this.#lifetimes.set(signal, lifetime);
+    }
+    return [
+      "cloud",
+      this.endpoint("/"),
+      this.ownerId ?? null,
+      lifetime,
+      operation,
+      id ?? null,
+    ] as const;
+  }
+
+  #read<T>(
+    operation: string,
+    signal: AbortSignal,
+    read: (signal: AbortSignal) => Promise<T>,
+    id?: string,
+  ) {
+    return fetchScopedQuery(
+      this.queryClient,
+      this.#key(signal, operation, id),
+      signal,
+      read,
+    );
+  }
+
+  register(id: string, signal: AbortSignal) {
+    return executeMutation(
+      this.queryClient,
+      {
+        mutationKey: this.#key(signal, "register", id),
+        mutationFn: () => this.#register(id, signal),
+      },
+      undefined,
+    );
+  }
+
+  list(signal: AbortSignal) {
+    return this.#read("catalog", signal, (signal) => this.#list(signal));
+  }
+
+  baseline(id: string, signal: AbortSignal) {
+    return this.#read(
+      "baseline",
+      signal,
+      (signal) => this.#baseline(id, signal),
+      id,
+    );
+  }
+
+  status(id: string, signal: AbortSignal) {
+    return this.#read(
+      "status",
+      signal,
+      (signal) => this.#status(id, signal),
+      id,
+    );
+  }
+
+  submit(id: string, updateId: string, bytes: Uint8Array, signal: AbortSignal) {
+    return executeMutation(
+      this.queryClient,
+      {
+        mutationKey: [...this.#key(signal, "submit", id), updateId],
+        mutationFn: () => this.#submit(id, updateId, bytes, signal),
+      },
+      undefined,
+    );
   }
 
   async #request(path: string, signal: AbortSignal, init?: RequestInit) {
@@ -119,7 +203,7 @@ export class CrdtApi {
     });
   }
 
-  async register(id: string, signal: AbortSignal) {
+  async #register(id: string, signal: AbortSignal) {
     const result = record.parse(
       await this.#json(
         "createProject",
@@ -132,7 +216,7 @@ export class CrdtApi {
     return result;
   }
 
-  async list(signal: AbortSignal) {
+  async #list(signal: AbortSignal) {
     const projects: CloudProject[] = [];
     const seen = new Set<string>();
     let cursor: string | null = null;
@@ -158,13 +242,13 @@ export class CrdtApi {
     return projects;
   }
 
-  async baseline(id: string, signal: AbortSignal) {
+  async #baseline(id: string, signal: AbortSignal) {
     return baseline.parse(
       await this.#json("getProjectBaseline", { projectId: id }, signal),
     );
   }
 
-  async status(id: string, signal: AbortSignal) {
+  async #status(id: string, signal: AbortSignal) {
     return z
       .object({
         schemaVersion: z.literal(1),
@@ -174,7 +258,7 @@ export class CrdtApi {
       .parse(await this.#json("getProjectStatus", { projectId: id }, signal));
   }
 
-  async submit(
+  async #submit(
     id: string,
     updateId: string,
     bytes: Uint8Array,
