@@ -23,7 +23,9 @@ import {
   layoutMindMap,
   navigationTarget,
   NODE_MIN_HEIGHT,
+  nodeDetails,
   translateSubtree as translatePreview,
+  visibleMindMap,
 } from "./mind-map";
 import {
   createChild,
@@ -178,6 +180,9 @@ function Node(props: {
   selected: boolean;
   writing: boolean;
   dragging: boolean;
+  descendants: number;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
   onSize: (size: NodeSize) => void;
   onSelect: () => void;
   onWrite: () => void;
@@ -204,43 +209,78 @@ function Node(props: {
     // biome-ignore lint/a11y/noStaticElementInteractions: The wrapper handles pointer dragging and bubbled clicks from its button.
     <div
       ref={container}
-      class={`border rounded-sm shadow-sm/10 cursor-pointer px-2.5 py-0.75 select-none absolute grid items-center box-border w-max max-w-40 leading-6 ${color().nodeClass}`}
+      class={`cursor-pointer select-none absolute w-max max-w-40 leading-6 rounded-sm ${color().nodeClass}`}
       classList={{
-        "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200":
-          props.selected,
         "z-10": props.dragging,
       }}
       data-no-pan
       data-node-id={props.id}
       data-selected={props.selected}
+      data-collapsed={props.collapsed}
       onPointerDown={props.onPointerDown}
       onClick={props.onSelect}
       onDblClick={props.onWrite}
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
-        "min-height": `${NODE_MIN_HEIGHT}px`,
       }}
-      title="Click to select · Double-click to write · Drag to move"
+      title={`Click to select · Double-click to write · Drag to move${props.descendants ? " · G to collapse or expand children" : ""}`}
     >
-      <Show
-        when={props.writing}
-        fallback={
-          <button
-            type="button"
-            aria-pressed={props.selected}
-            class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer"
-          >
-            {props.text || "New idea"}
-          </button>
-        }
-      >
-        <NodeEditor
-          doc={props.doc}
-          id={props.id}
-          onFinish={props.onFinish}
-          onSelectionChange={props.onSelectionChange}
+      <Show when={props.collapsed}>
+        <span
+          aria-hidden="true"
+          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-sm border pointer-events-none ${color().nodeClass}`}
+        />
+        <span
+          aria-hidden="true"
+          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-sm border pointer-events-none ${color().nodeClass}`}
         />
       </Show>
+      <div
+        class={`relative border rounded-sm shadow-sm/10 px-2.5 py-0.75 grid items-center box-border ${color().nodeClass}`}
+        classList={{
+          "grid-cols-[minmax(0,1fr)_auto] gap-x-2": props.collapsed,
+          "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200":
+            props.selected,
+        }}
+        style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
+      >
+        <Show
+          when={props.writing}
+          fallback={
+            <button
+              type="button"
+              aria-pressed={props.selected}
+              aria-expanded={props.descendants ? !props.collapsed : undefined}
+              aria-keyshortcuts={props.descendants ? "g" : undefined}
+              class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer"
+            >
+              {props.text || "New idea"}
+            </button>
+          }
+        >
+          <NodeEditor
+            doc={props.doc}
+            id={props.id}
+            onFinish={props.onFinish}
+            onSelectionChange={props.onSelectionChange}
+          />
+        </Show>
+        <Show when={props.collapsed}>
+          <button
+            type="button"
+            class="rounded px-1.5 text-[10px] leading-4 font-medium whitespace-nowrap cursor-pointer bg-white/35 hover:bg-white/60 focus-visible:outline-2"
+            aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
+            title="Expand children (G)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onToggleCollapse();
+            }}
+          >
+            +{props.descendants} {props.descendants === 1 ? "idea" : "ideas"}
+          </button>
+        </Show>
+      </div>
     </div>
   );
 }
@@ -766,6 +806,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   onCleanup(clearSaveStatus);
   const [selectedId, setSelectedId] = createSignal<string>();
+  const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
+  const details = createMemo(() => nodeDetails(forest()));
+  const visibleForest = createMemo(() =>
+    visibleMindMap(forest(), collapsedIds()),
+  );
   const [colorScope, setColorScope] = createSignal<"node" | "branch">("node");
   const [writing, setWriting] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<
@@ -781,7 +826,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     if (sizeFrame !== undefined) return;
     sizeFrame = requestAnimationFrame(() => {
       sizeFrame = undefined;
-      const live = visibleIds();
+      const live = details();
       setNodeSizes((current) => {
         let next = current;
         for (const [id, size] of measuredSizes) {
@@ -810,16 +855,27 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   const [drag, setDrag] = createSignal<{ id: string; delta: NodePosition }>();
   const draggingId = () => drag()?.id;
   const baseLayout = createMemo(() =>
-    layoutMindMap(forest(), nodeSizes(), layoutAnchor()),
+    layoutMindMap(visibleForest(), nodeSizes(), layoutAnchor()),
   );
-  const basePositions = createMemo(
-    () => new Map(baseLayout().nodes.map((node) => [node.id, node])),
-  );
+  const basePositions = createMemo(() => {
+    // Hidden descendants must also move when their folded parent is dragged.
+    const full = collapsedIds().size
+      ? layoutMindMap(forest(), nodeSizes(), layoutAnchor()).nodes
+      : [];
+    return new Map(
+      [...full, ...baseLayout().nodes].map((node) => [node.id, node]),
+    );
+  });
   const layout = createMemo(() => {
     const preview = drag();
     if (!preview) return baseLayout();
     return layoutMindMap(
-      translatePreview(forest(), preview.id, basePositions(), preview.delta),
+      translatePreview(
+        visibleForest(),
+        preview.id,
+        basePositions(),
+        preview.delta,
+      ),
       nodeSizes(),
       layoutAnchor(),
     );
@@ -835,7 +891,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         visit(node.next ?? []);
       }
     };
-    visit(forest());
+    visit(visibleForest());
     return ids;
   });
   const selectedNode = createMemo(() => {
@@ -889,7 +945,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   // Nodes can disappear through remote edits or undo, including the one being
   // edited; local state that refers to them is released.
   createEffect(() => {
-    const ids = visibleIds();
+    const ids = details();
     const id = selectedId();
     if (id && !ids.has(id))
       untrack(() => {
@@ -897,6 +953,16 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         setSelectedId(undefined);
         setColorScope("node");
       });
+    // Undo or a remote reparenting can select a node inside a folded branch.
+    if (id && ids.has(id) && !visibleIds().has(id))
+      untrack(() => revealNode(id));
+    setCollapsedIds((current) =>
+      [...current].every((key) => (ids.get(key)?.descendants ?? 0) > 0)
+        ? current
+        : new Set(
+            [...current].filter((key) => (ids.get(key)?.descendants ?? 0) > 0),
+          ),
+    );
     setNodeSizes((current) =>
       [...current.keys()].every((key) => ids.has(key))
         ? current
@@ -925,6 +991,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     batch(() => {
       setProjectNameDraft(undefined);
       setSelectedId(undefined);
+      setCollapsedIds(new Set<string>());
       setColorScope("node");
       setNodeSizes(new Map());
       setLayoutAnchor(undefined);
@@ -1222,6 +1289,32 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     setSelectedId(id);
   }
 
+  function revealNode(id: string) {
+    const next = new Set(collapsedIds());
+    for (
+      let parent = details().get(id)?.parent;
+      parent;
+      parent = details().get(parent)?.parent
+    )
+      next.delete(parent);
+    if (next.size !== collapsedIds().size) setCollapsedIds(next);
+  }
+
+  function toggleCollapse(id: string) {
+    if (!details().get(id)?.descendants) return;
+    cancelPointer();
+    const node = positionedNodes().get(id);
+    batch(() => {
+      if (node) setLayoutAnchor({ id, centerY: node.y + node.height / 2 });
+      setCollapsedIds((current) => {
+        const next = new Set(current);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      });
+    });
+    canvas.focus({ preventScroll: true });
+  }
+
   // One editing session is one undo step.
   function finishWriting() {
     if (!writing()) return;
@@ -1233,6 +1326,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   function write(id: string) {
     if (writing() && selectedId() === id) return;
     finishWriting();
+    revealNode(id);
     if (selectedId() !== id) setColorScope("node");
     setSelectedId(id);
     session().undo.stopCapturing();
@@ -1489,6 +1583,15 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         return;
       const arrow = ARROW_DIRECTIONS.get(e.key);
       if (
+        e.key.toLowerCase() === "g" &&
+        !e.repeat &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey
+      ) {
+        e.preventDefault();
+        toggleCollapse(selectedId() as string);
+      } else if (
         !e.shiftKey &&
         !e.ctrlKey &&
         !e.altKey &&
@@ -1524,7 +1627,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         !e.metaKey
       ) {
         e.preventDefault();
-        const target = navigationTarget(forest(), selectedId()!, arrow);
+        const target = navigationTarget(visibleForest(), selectedId()!, arrow);
         if (target) {
           setColorScope("node");
           setSelectedId(target);
@@ -1999,6 +2102,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
                 selected={selectedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
+                descendants={details().get(id)?.descendants ?? 0}
+                collapsed={collapsedIds().has(id)}
+                onToggleCollapse={() => {
+                  select(id);
+                  toggleCollapse(id);
+                }}
                 onSize={(size) => measureNode(id, size)}
                 onSelect={() => select(id)}
                 onWrite={() => write(id)}
