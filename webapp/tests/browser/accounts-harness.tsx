@@ -1,3 +1,5 @@
+import { QueryClientProvider } from "@tanstack/solid-query";
+import { queryClient } from "../../src/query-client";
 import { render } from "solid-js/web";
 import * as Y from "yjs";
 import { App } from "../../src/App";
@@ -198,12 +200,14 @@ declare global {
 window.accountHarness = accountHarness;
 render(
   () => (
-    <App
-      onDocument={(doc) => {
-        if (current) retired.push(current);
-        current = doc;
-      }}
-    />
+    <QueryClientProvider client={queryClient}>
+      <App
+        onDocument={(doc) => {
+          if (current) retired.push(current);
+          current = doc;
+        }}
+      />
+    </QueryClientProvider>
   ),
   document.getElementById("root") as HTMLElement,
 );

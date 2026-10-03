@@ -1,4 +1,10 @@
 import {
+  createMutation,
+  createQuery,
+  useQueryClient,
+} from "@tanstack/solid-query";
+import { catalogKey } from "./query-client";
+import {
   batch,
   createEffect,
   createMemo,
@@ -40,7 +46,7 @@ import {
   accountNamespace,
   ANONYMOUS_NAMESPACE,
 } from "./project-repository";
-import type { CatalogEntry, ProjectHandle } from "./project-repository";
+import type { ProjectHandle } from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
@@ -58,7 +64,7 @@ import { AccountControls } from "./AccountControls";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
 import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
-import { SyncError } from "./crdt-api";
+import { CrdtApi, SyncError } from "./crdt-api";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -248,7 +254,8 @@ interface ContextMenuState {
 
 export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   const deployment = backendDeployment();
-  const auth = new AuthSession(deployment);
+  const queryClient = useQueryClient();
+  const auth = new AuthSession(deployment, queryClient);
   const [account, setAccount] = createSignal(auth.state);
   let activeUserId = auth.state.user?.id;
   let repository = new ProjectRepository({
@@ -257,6 +264,35 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       ? accountNamespace(activeUserId)
       : ANONYMOUS_NAMESPACE,
   });
+  const [workspace, setWorkspace] = createSignal(repository);
+  const catalog = createQuery(() => {
+    const owner = workspace();
+    return {
+      queryKey: catalogKey(owner.names.catalog),
+      queryFn: () => owner.list(),
+      structuralSharing: false,
+    };
+  });
+  const savedProjects = () => catalog.data ?? [];
+  const claims = createQuery(() => ({
+    queryKey: ["anonymous-claims", deployment, account().user?.id ?? null],
+    enabled: account().status === "authenticated",
+    queryFn: async () => {
+      const userId = account().user?.id;
+      if (!userId) return [];
+      const source = new ProjectRepository({
+        deployment,
+        namespace: ANONYMOUS_NAMESPACE,
+      });
+      try {
+        return await claimCandidates(source, userId);
+      } finally {
+        await source.close();
+      }
+    },
+  }));
+  const claimCount = () =>
+    account().status === "authenticated" ? (claims.data?.length ?? 0) : 0;
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopDurability: (() => void) | undefined;
@@ -271,10 +307,86 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     handle: ProjectHandle;
   }>();
   const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
-  const [claimCount, setClaimCount] = createSignal(0);
-  const [claiming, setClaiming] = createSignal(false);
   const [claimMessage, setClaimMessage] = createSignal("");
   const [recoveryPending, setRecoveryPending] = createSignal(false);
+
+  const initializeMutation = createMutation(() => ({
+    mutationKey: ["workspace", "initialize"],
+    mutationFn: performInitializeWorkspace,
+  }));
+  const initializeWorkspace = () => initializeMutation.mutateAsync();
+  const accountMutation = createMutation(() => ({
+    mutationKey: ["workspace", "account"],
+    mutationFn: performAccountChanged,
+  }));
+  const accountChanged = (state: SessionState) =>
+    accountMutation.mutateAsync(state);
+  const claimMutation = createMutation(() => ({
+    mutationKey: ["workspace", "claim"],
+    mutationFn: performAddAnonymousProjects,
+  }));
+  const claiming = () => claimMutation.isPending;
+  const addAnonymousProjects = () => {
+    if (!claiming()) claimMutation.mutate();
+  };
+  const openMutation = createMutation(() => ({
+    mutationKey: ["project", "open"],
+    mutationFn: performOpenProject,
+  }));
+  const openProject = (id: string) => openMutation.mutateAsync(id);
+  const createMutationState = createMutation(() => ({
+    mutationKey: ["project", "create"],
+    mutationFn: performCreateNewProject,
+  }));
+  const createNewProject = () => {
+    if (!createMutationState.isPending) createMutationState.mutate();
+  };
+  const saveMutation = createMutation(() => ({
+    mutationKey: ["project", "save"],
+    mutationFn: performSave,
+  }));
+  const save = () => {
+    if (!saveMutation.isPending) saveMutation.mutate();
+  };
+  const recoveryMutation = createMutation(() => ({
+    mutationKey: ["workspace", "recover"],
+    mutationFn: performRetryLocalSaving,
+  }));
+  const retryLocalSaving = () => recoveryMutation.mutateAsync();
+  const loadMutation = createMutation(() => ({
+    mutationKey: ["project", "load-menu"],
+    mutationFn: performOpenLoad,
+  }));
+  const openLoad = () => {
+    if (!loadMutation.isPending) loadMutation.mutate();
+  };
+  const exportMutation = createMutation(() => ({
+    mutationKey: ["project", "export"],
+    mutationFn: performExportCurrentProject,
+  }));
+  const exportCurrentProject = () => {
+    if (!fileBusy()) exportMutation.mutate();
+  };
+  const importMutation = createMutation(() => ({
+    mutationKey: ["project", "import"],
+    mutationFn: performImportProjectFromFile,
+  }));
+  const importProjectFromFile = () => {
+    if (!fileBusy()) importMutation.mutate();
+  };
+  const viewportMutation = createMutation(() => ({
+    mutationKey: ["project", "viewport"],
+    scope: { id: "viewport" },
+    mutationFn: ({
+      owner,
+      id,
+      value,
+    }: {
+      owner: ProjectRepository;
+      id: string;
+      value: ViewportPreference;
+    }) => owner.setPreference(`project/${id}/view`, value),
+  }));
 
   function startCloud() {
     if (
@@ -298,13 +410,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         }
       },
       () => {
-        void owner
-          .list()
-          .then((entries) => {
-            if (repository === owner && !disposed) setSavedProjects(entries);
-          })
-          .catch(() => {});
+        void queryClient.invalidateQueries({
+          queryKey: catalogKey(owner.names.catalog),
+        });
       },
+      undefined,
+      queryClient,
     );
     if (activeHandle && handleRepository === owner)
       cloud.activate(activeHandle);
@@ -360,7 +471,12 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     });
     if (previous && previous !== handle) await previous.close();
     try {
-      const preference = await owner.preference(`project/${handle.id}/view`);
+      const preference = await queryClient.fetchQuery({
+        queryKey: ["project-view", owner.names.catalog, handle.id],
+        queryFn: async () =>
+          (await owner.preference(`project/${handle.id}/view`)) ?? null,
+        gcTime: 0,
+      });
       if (request !== activation || disposed || owner !== repository) return;
       if (preference && typeof preference === "object") {
         const view = preference as ViewportPreference;
@@ -390,7 +506,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     );
   }
 
-  async function initializeWorkspace() {
+  async function performInitializeWorkspace() {
     await auth.hydrate();
     if (disposed) return;
     if (auth.state.user?.id !== activeUserId) await accountChanged(auth.state);
@@ -403,16 +519,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   }
 
   function watchCatalog(owner: ProjectRepository) {
-    const refresh = () => {
-      void owner
-        .list()
-        .then((entries) => {
-          if (repository === owner && !disposed) setSavedProjects(entries);
-        })
-        .catch(() => {});
-    };
-    stopCatalog = owner.onCatalogChange(refresh);
-    refresh();
+    stopCatalog = owner.onCatalogChange(() => {
+      void queryClient.invalidateQueries({
+        queryKey: catalogKey(owner.names.catalog),
+      });
+    });
+    void queryClient.invalidateQueries({
+      queryKey: catalogKey(owner.names.catalog),
+    });
   }
 
   async function retireWorkspace(
@@ -433,24 +547,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     await owner.close();
   }
 
-  async function refreshClaims(owner = repository) {
-    const userId = activeUserId;
-    if (!userId || auth.state.status !== "authenticated") return;
-    const anonymous = new ProjectRepository({
-      deployment,
-      namespace: ANONYMOUS_NAMESPACE,
+  function refreshClaims(owner = repository) {
+    if (owner !== repository || disposed) return Promise.resolve();
+    return queryClient.invalidateQueries({
+      queryKey: ["anonymous-claims", deployment],
     });
-    try {
-      const entries = await claimCandidates(anonymous, userId);
-      if (owner === repository && !disposed) setClaimCount(entries.length);
-    } catch {
-      // An unavailable anonymous catalog must not hide cached account content.
-    } finally {
-      await anonymous.close();
-    }
   }
 
-  async function accountChanged(state: SessionState) {
+  async function performAccountChanged(state: SessionState) {
     if (disposed) return;
     setAccount(state);
     const nextUserId = state.user?.id;
@@ -459,8 +563,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       cloud = undefined;
       claimAbort?.abort();
       claimAbort = undefined;
-      setClaiming(false);
-      setClaimCount(0);
       setCloudStatus(
         state.status === "expired"
           ? { status: "auth", message: state.message ?? "Sign in again." }
@@ -487,13 +589,19 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         ? accountNamespace(nextUserId)
         : ANONYMOUS_NAMESPACE,
     });
+    void queryClient.cancelQueries({
+      queryKey: catalogKey(previousRepository.names.catalog),
+    });
+    queryClient.removeQueries({
+      queryKey: catalogKey(previousRepository.names.catalog),
+    });
     repository = nextRepository;
+    setWorkspace(nextRepository);
     handleRepository = nextRepository;
     activeHandle = undefined;
     resetProjectUi();
     setDoc(ephemeralDocument());
     setStorageReady(false);
-    setSavedProjects([]);
     setStorageMessage("");
     setClaimMessage("");
     watchCatalog(nextRepository);
@@ -512,9 +620,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  async function addAnonymousProjects() {
-    if (claiming() || auth.state.status !== "authenticated" || !activeUserId)
-      return;
+  async function performAddAnonymousProjects() {
+    if (auth.state.status !== "authenticated" || !activeUserId) return;
     const owner = repository;
     const userId = activeUserId;
     const abort = new AbortController();
@@ -523,7 +630,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       deployment,
       namespace: ANONYMOUS_NAMESPACE,
     });
-    setClaiming(true);
     setClaimMessage("");
     try {
       const ids = await claimAnonymousProjects(
@@ -531,6 +637,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         owner,
         userId,
         abort.signal,
+        new CrdtApi(undefined, undefined, userId, queryClient),
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
       setClaimMessage(
@@ -549,11 +656,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         auth.expire();
         void auth.check();
       }
+      throw error;
     } finally {
       await source.close();
       if (claimAbort === abort) {
         claimAbort = undefined;
-        setClaiming(false);
       }
     }
   }
@@ -650,9 +757,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
 
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
-  const [savedProjects, setSavedProjects] = createSignal<CatalogEntry[]>([]);
   const [showLoad, setShowLoad] = createSignal(false);
-  const [fileBusy, setFileBusy] = createSignal(false);
+  const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
   function clearSaveStatus() {
     setSaveStatus("");
@@ -775,9 +881,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     window.clearTimeout(viewSaveTimer);
     viewSaveTimer = window.setTimeout(() => {
       if (repository !== owner || activeHandle !== handle) return;
-      void owner
-        .setPreference(`project/${handle.id}/view`, value)
-        .catch(() => {});
+      viewportMutation.mutate({ owner, id: handle.id, value });
     }, 200);
   });
   onCleanup(() => window.clearTimeout(viewSaveTimer));
@@ -832,7 +936,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
-  async function openProject(id: string) {
+  async function performOpenProject(id: string) {
     const target = repository;
     try {
       await activeHandle?.flush();
@@ -850,14 +954,18 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage(
         error instanceof Error ? error.message : "Could not open this project.",
       );
+      throw error;
     }
   }
 
-  async function createNewProject() {
+  async function performCreateNewProject() {
     const target = repository;
     try {
       await activeHandle?.flush();
-      const projects = await target.list();
+      const projects = await queryClient.fetchQuery({
+        queryKey: catalogKey(target.names.catalog),
+        queryFn: () => target.list(),
+      });
       const name = generateProjectName(projects.map((project) => project.name));
       const handle = await target.create({
         name,
@@ -871,6 +979,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage(
         error instanceof Error ? error.message : "Could not create a project.",
       );
+      throw error;
     }
   }
 
@@ -885,7 +994,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  async function save() {
+  async function performSave() {
     finishWriting();
     finishProjectName();
     if (!activeHandle) {
@@ -907,10 +1016,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       setStorageMessage(
         error instanceof Error ? error.message : "Could not save this project.",
       );
+      throw error;
     }
   }
 
-  async function retryLocalSaving() {
+  async function performRetryLocalSaving() {
     if (!activeHandle) await initializeWorkspace();
     for (const recovery of [...parked]) {
       await recovery.handle.flush();
@@ -979,33 +1089,35 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     }
   }
 
-  async function openLoad() {
+  async function performOpenLoad() {
     clearSaveStatus();
     finishWriting();
     const owner = repository;
     try {
       cloud?.retry();
-      const entries = await owner.list();
+      await queryClient.fetchQuery({
+        queryKey: catalogKey(owner.names.catalog),
+        queryFn: () => owner.list(),
+      });
       if (repository !== owner || disposed) return;
-      setSavedProjects(entries);
       setStorageMessage("");
       setShowLoad(true);
-    } catch {
+    } catch (error) {
       if (repository !== owner || disposed) return;
       setStorageMessage(
         "Could not list projects. Browser storage is unavailable.",
       );
+      throw error;
     }
   }
 
   function load(id: string) {
-    void openProject(id);
+    openMutation.mutate(id);
   }
 
-  async function exportCurrentProject() {
+  async function performExportCurrentProject() {
     finishWriting();
     finishProjectName();
-    setFileBusy(true);
     try {
       const name = view().name();
       const json = exportProjectDocument(session().doc, {
@@ -1021,15 +1133,13 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             ? error.message
             : "Could not export this project.",
         );
+        throw error;
       }
-    } finally {
-      setFileBusy(false);
     }
   }
 
-  async function importProjectFromFile() {
+  async function performImportProjectFromFile() {
     finishWriting();
-    setFileBusy(true);
     const owner = repository;
     try {
       const file = await readProjectFile();
@@ -1070,9 +1180,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             ? error.message
             : "Could not import this project file.",
         );
+        throw error;
       }
-    } finally {
-      setFileBusy(false);
     }
   }
 
@@ -1319,6 +1428,16 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       auth.destroy();
       cloud?.destroy();
       stopCatalog?.();
+      void queryClient.cancelQueries({
+        queryKey: catalogKey(repository.names.catalog),
+      });
+      queryClient.removeQueries({
+        queryKey: catalogKey(repository.names.catalog),
+      });
+      void queryClient.cancelQueries({
+        queryKey: ["anonymous-claims", deployment],
+      });
+      queryClient.removeQueries({ queryKey: ["anonymous-claims", deployment] });
       stopDurability?.();
       void repository.close();
       for (const recovery of parked) void recovery.repository.close();

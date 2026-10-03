@@ -1,3 +1,4 @@
+import { createMutation } from "@tanstack/solid-query";
 import { createSignal, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
 import type { SessionState } from "./auth-session";
@@ -12,7 +13,14 @@ export function AccountControls(props: {
   onClaim: () => void;
 }) {
   const [message, setMessage] = createSignal("");
-  const [navigating, setNavigating] = createSignal(false);
+  const navigation = createMutation(() => ({
+    mutationKey: ["account", "navigation"],
+    mutationFn: performNavigation,
+  }));
+  const navigating = () => navigation.isPending;
+  const navigate = (action: "login" | "logout") => {
+    if (!navigating()) navigation.mutate(action);
+  };
   onMount(() => {
     const url = new URL(window.location.href);
     if (!url.searchParams.has("auth_error")) return;
@@ -25,9 +33,7 @@ export function AccountControls(props: {
     window.history.replaceState(window.history.state, "", url);
   });
 
-  async function navigate(action: "login" | "logout") {
-    if (navigating()) return;
-    setNavigating(true);
+  async function performNavigation(action: "login" | "logout") {
     setMessage("");
     try {
       if (!(await props.beforeNavigate(action))) return;
@@ -44,8 +50,6 @@ export function AccountControls(props: {
       setMessage(
         "Could not save the account change in this browser. Free up browser storage and retry.",
       );
-    } finally {
-      setNavigating(false);
     }
   }
 

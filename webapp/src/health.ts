@@ -1,4 +1,5 @@
-import { backendEndpoint } from "./backend";
+import { queryOptions } from "@tanstack/solid-query";
+import { backendDeployment, backendEndpoint } from "./backend";
 
 export type ComponentState = "up" | "down" | "unknown";
 
@@ -55,6 +56,7 @@ export function serverTimingMs(header: string | null, name: string): number {
 
 export async function checkHealth(
   deps: HealthDeps = defaultDeps,
+  signal?: AbortSignal,
 ): Promise<HealthReport> {
   const started = deps.now();
   const unreachable = (): HealthReport => ({
@@ -67,7 +69,10 @@ export async function checkHealth(
       method: "POST",
       cache: "no-store",
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        ...(signal ? [signal] : []),
+      ]),
     });
     const roundTrip = deps.now() - started;
     if (response.status !== 200 && response.status !== 503) {
@@ -102,3 +107,14 @@ export function formatLatency(ms: number | undefined): string {
   if (ms < 1) return "<1 ms";
   return `${Math.round(ms)} ms`;
 }
+
+export const HEALTH_REFRESH_MS = 15_000;
+export const healthQueryOptions = () =>
+  queryOptions({
+    queryKey: ["health", backendDeployment()],
+    queryFn: ({ signal }) => checkHealth(defaultDeps, signal),
+    staleTime: HEALTH_REFRESH_MS,
+    refetchInterval: HEALTH_REFRESH_MS,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: true,
+  });

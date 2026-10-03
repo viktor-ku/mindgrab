@@ -1,3 +1,6 @@
+import { QueryObserver } from "@tanstack/solid-query";
+import type { QueryClient } from "@tanstack/solid-query";
+import { createQueryClient, executeMutation } from "./query-client";
 import { z } from "zod";
 import { readAuthRecord, writeAuthRecord } from "./auth-record";
 import { backendEndpoint } from "./backend";
@@ -40,15 +43,25 @@ export class AuthSession {
   #record: SessionRecord;
   #state: SessionState;
   #channel?: BroadcastChannel;
-  #request?: { abort: AbortController; promise: Promise<void> };
+  readonly #client: QueryClient;
+  readonly #queryKey: readonly string[];
+  #observer?: QueryObserver<
+    SessionState,
+    Error,
+    SessionState,
+    SessionState,
+    readonly string[]
+  >;
+  #stopQuery?: () => void;
   #epoch = 0;
-  #timer?: ReturnType<typeof setInterval>;
   #started = false;
   #disposed = false;
   #hydration?: Promise<void>;
 
-  constructor(deployment: string) {
+  constructor(deployment: string, client = createQueryClient()) {
     this.key = authStorageKey(deployment);
+    this.#client = client;
+    this.#queryKey = ["account", deployment, crypto.randomUUID()];
     this.#record = this.#read() ?? {
       revision: crypto.randomUUID(),
       signedOut: false,
@@ -118,12 +131,12 @@ export class AuthSession {
   #emit(state: SessionState) {
     if (this.#disposed) return;
     this.#state = state;
+    this.#observer?.setOptions(this.#queryOptions());
     for (const listener of this.#listeners) listener(state);
   }
   #invalidate() {
     this.#epoch++;
-    this.#request?.abort.abort();
-    this.#request = undefined;
+    void this.#client.cancelQueries({ queryKey: this.#queryKey, exact: true });
   }
   async #publish(record: SessionRecord) {
     // Publish the fence immediately, but acknowledge navigation/account checking
@@ -179,14 +192,28 @@ export class AuthSession {
     const stored = this.#read();
     if (stored && stored.revision !== this.#record.revision)
       this.#receive(stored);
-    if (this.#request) {
-      // The in-flight response may describe the cookie before this focus/online
-      // event. Coalesce a fresh check after it instead of dropping the event.
-      void this.#request.promise.then(() => {
+    if (
+      this.#client.getQueryState(this.#queryKey)?.fetchStatus === "fetching"
+    ) {
+      // Focus/online can change the cookie during a request. Check again after
+      // that request settles, while Query deduplicates concurrent refreshes.
+      void this.check().then(() => {
         if (!this.#disposed && !this.#record.navigating) void this.check();
       });
     } else void this.check();
   };
+  #queryOptions() {
+    return {
+      queryKey: this.#queryKey,
+      queryFn: ({ signal }: { signal: AbortSignal }) => this.#check(signal),
+      enabled: !this.#disposed && !this.#record.signedOut,
+      refetchInterval: 30_000,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      gcTime: 0,
+    };
+  }
+
   start() {
     if (this.#started || this.#disposed) return;
     this.#started = true;
@@ -197,69 +224,67 @@ export class AuthSession {
     window.addEventListener("storage", this.#storage);
     window.addEventListener("focus", this.#refresh);
     window.addEventListener("online", this.#refresh);
-    this.#timer = setInterval(this.#refresh, 30_000);
-    void this.check();
+    this.#observer = new QueryObserver(this.#client, this.#queryOptions());
+    this.#stopQuery = this.#observer.subscribe(() => {});
   }
   check(): Promise<void> {
     if (this.#disposed || this.#record.signedOut) return Promise.resolve();
-    if (this.#request) return this.#request.promise;
+    return this.#client.fetchQuery(this.#queryOptions()).then(
+      () => {},
+      () => {},
+    );
+  }
+  async #check(signal: AbortSignal): Promise<SessionState> {
     const epoch = this.#epoch;
     const revision = this.#record.revision;
-    const abort = new AbortController();
     const alive = () =>
-      !this.#disposed && epoch === this.#epoch && !abort.signal.aborted;
-    const promise = (async () => {
-      try {
-        const response = await fetch(backendEndpoint("/api/getMe"), {
-          method: "POST",
-          credentials: "include",
-          cache: "no-store",
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(15_000)]),
-        });
-        const current = response.ok
-          ? userSchema.parse(await response.json())
-          : undefined;
-        if (!alive()) return;
-        const stored = this.#read();
-        if (stored && stored.revision !== revision) {
-          this.#receive(stored);
-          return;
-        }
-        if (response.status === 401) {
-          this.expire();
-          return;
-        }
-        if (!response.ok) throw new Error("Account check unavailable");
-        if (
-          this.#record.navigating ||
-          JSON.stringify(current) !== JSON.stringify(this.#record.user)
-        ) {
-          const published = await this.#publish({
-            revision: crypto.randomUUID(),
-            user: current,
-            signedOut: false,
-            navigating: false,
-          });
-          if (!published || !alive()) return;
-        }
-        this.#emit({ user: current, status: "authenticated" });
-      } catch {
-        if (alive())
-          this.#emit({
-            user: this.#record.user,
-            status:
-              this.#state.status === "expired" ? "expired" : "unavailable",
-            message:
-              this.#state.status === "expired"
-                ? "Sign in again to resume cloud saving. Your local work is retained."
-                : "Account check unavailable. Your local work is still available.",
-          });
-      } finally {
-        if (epoch === this.#epoch) this.#request = undefined;
+      !this.#disposed && epoch === this.#epoch && !signal.aborted;
+    try {
+      const response = await fetch(backendEndpoint("/api/getMe"), {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+        signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+      });
+      const current = response.ok
+        ? userSchema.parse(await response.json())
+        : undefined;
+      if (!alive()) return this.#state;
+      const stored = this.#read();
+      if (stored && stored.revision !== revision) {
+        this.#receive(stored);
+        return this.#state;
       }
-    })();
-    this.#request = { abort, promise };
-    return promise;
+      if (response.status === 401) {
+        this.expire();
+        return this.#state;
+      }
+      if (!response.ok) throw new Error("Account check unavailable");
+      if (
+        this.#record.navigating ||
+        JSON.stringify(current) !== JSON.stringify(this.#record.user)
+      ) {
+        const published = await this.#publish({
+          revision: crypto.randomUUID(),
+          user: current,
+          signedOut: false,
+          navigating: false,
+        });
+        if (!published || !alive()) return this.#state;
+      }
+      this.#emit({ user: current, status: "authenticated" });
+    } catch {
+      if (alive())
+        this.#emit({
+          user: this.#record.user,
+          status: this.#state.status === "expired" ? "expired" : "unavailable",
+          message:
+            this.#state.status === "expired"
+              ? "Sign in again to resume cloud saving. Your local work is retained."
+              : "Account check unavailable. Your local work is still available.",
+        });
+    }
+    return this.#state;
   }
   expire() {
     this.#invalidate();
@@ -273,7 +298,17 @@ export class AuthSession {
     });
   }
   // Call only after the editor has awaited local persistence.
-  async prepareNavigation(action: "login" | "logout") {
+  prepareNavigation(action: "login" | "logout") {
+    return executeMutation(
+      this.#client,
+      {
+        mutationKey: [...this.#queryKey, "navigation"],
+        mutationFn: () => this.#prepareNavigation(action),
+      },
+      undefined,
+    );
+  }
+  async #prepareNavigation(action: "login" | "logout") {
     await this.hydrate();
     const published = await this.#publish({
       revision: crypto.randomUUID(),
@@ -291,7 +326,9 @@ export class AuthSession {
   destroy() {
     this.#disposed = true;
     this.#invalidate();
-    clearInterval(this.#timer);
+    this.#stopQuery?.();
+    this.#observer?.destroy();
+    this.#client.removeQueries({ queryKey: this.#queryKey, exact: true });
     this.#channel?.close();
     this.#listeners.clear();
     window.removeEventListener("storage", this.#storage);
