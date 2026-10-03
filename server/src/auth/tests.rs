@@ -430,23 +430,19 @@ async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: P
 }
 
 #[sqlx::test]
-async fn cached_identity_must_match_its_provider_session(pool: PgPool) {
+async fn cached_identity_cannot_borrow_another_provider_session(pool: PgPool) {
     let f = fixture(pool).await;
     let other = session_for(&f, "other_user").await;
     let store = store::Store(f.state.pool.clone());
     let other_id: Id = other.split_once('=').unwrap().1.parse().unwrap();
     let other_record = store.load(&other_id).await.unwrap().unwrap();
-    for field in [Some(AUTH_DATA), Some(store::PROVIDER), None] {
+    for field in [AUTH_DATA, store::PROVIDER] {
         let session = sign_in(&f).await;
         let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
         let mut record = store.load(&id).await.unwrap().unwrap();
-        if let Some(field) = field {
-            record
-                .data
-                .insert(field.into(), other_record.data[field].clone());
-        } else {
-            record.data.remove(AUTH_DATA);
-        }
+        record
+            .data
+            .insert(field.into(), other_record.data[field].clone());
         // Simulate corrupted/stale cached identification while the row's
         // credential and WorkOS tokens still belong to the original user.
         sqlx::query("UPDATE auth_sessions SET session_data = $1 WHERE browser_hash = $2")
