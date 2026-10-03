@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* The palette lives outside the webapp's automatically scanned sources. */
+@source "../../shared/src/node-colors.ts";
 
 .map-control {
   border-radius: 0.375rem;
