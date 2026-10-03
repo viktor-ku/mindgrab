@@ -1,3 +1,6 @@
+[tools]
+bun = "1.4.2"
+
 [tasks.golive]
 description = "Make origin/live reference current local main"
 run = "git push --force-with-lease origin main:live"
@@ -6,95 +9,86 @@ run = "git push --force-with-lease origin main:live"
 description = "Start local Postgres"
 run = "docker compose up -d postgres"
 
-[tasks."server:dev"]
-description = "Run the API server"
-run = "mise -C server exec -- cargo run"
-
-[tasks."server:rebuild-read-models"]
-description = "Rebuild Yjs inspection indexes from canonical binary storage"
-run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo run -- rebuild-read-models"
-
-[tasks."server:test"]
-description = "Run server tests against local Postgres"
-depends = ["webapp:install"]
-run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test"
-
-[tasks."server:fmt"]
-description = "Check Rust formatting"
-run = "mise -C server exec -- cargo fmt --check"
-
-[tasks."server:clippy"]
-description = "Lint the server with warnings as errors"
-run = "mise -C server exec -- cargo clippy --all-targets -- -D warnings"
-
-[tasks."server:check"]
-description = "Run server formatting, lint, and tests"
-depends = ["server:fmt", "server:clippy", "server:test"]
-
-[tasks."webapp:install"]
-description = "Install locked webapp dependencies"
-dir = "webapp"
+[tasks.install]
+description = "Install locked workspace dependencies"
 run = "bun --bun install --frozen-lockfile"
 
-[tasks."webapp:test:cloud"]
-description = "Test browser cloud sync against isolated Rust/Postgres endpoints"
-depends = ["webapp:install"]
-run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test browser_cloud_sync_recovers -- --ignored"
+[tasks."backend:dev"]
+description = "Run the Bun backend with hot reload"
+depends = ["install"]
+dir = "backend"
+run = "bun --bun run dev"
+
+[tasks."backend:rebuild-read-models"]
+description = "Rebuild inspection indexes from canonical Yjs storage"
+depends = ["install"]
+dir = "backend"
+run = "bun --bun src/main.ts rebuild-read-models"
+
+[tasks."backend:test"]
+description = "Run backend tests against isolated local Postgres databases"
+depends = ["install"]
+dir = "backend"
+run = "bun --bun run test"
+
+[tasks."backend:check"]
+description = "Check backend and shared code formatting, lint and types"
+depends = ["install"]
+dir = "backend"
+run = "bun --bun run check"
 
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun run dev"
 
 [tasks."webapp:test"]
 description = "Run webapp tests"
-depends = ["webapp:install"]
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun test --conditions browser"
 
 [tasks."webapp:test:browser"]
 description = "Run webapp interaction tests in headless Chromium"
+depends = ["install"]
 dir = "webapp"
-run = "bun --bun test ./tests/browser/editor.browser.ts ./tests/browser/project-repository.browser.ts ./tests/browser/accounts.browser.ts"
+run = "bun --bun run test:browser"
 
 [tasks."webapp:test:offline"]
-description = "Verify production shell caching, cold offline reopen, and safe upgrades"
+description = "Verify production shell caching, cold offline reopen and safe upgrades"
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun run test:offline"
 
 [tasks."webapp:build"]
 description = "Build the webapp"
-depends = ["webapp:install"]
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun run build"
 
 [tasks."webapp:check"]
-description = "Run webapp lint, formatting, and type checks"
-depends = ["webapp:install"]
+description = "Run webapp lint, formatting and type checks"
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun run check"
 
-[tasks."test:release"]
-description = "Verify the production local-first stack, faults, recovery, and release budgets"
-depends = ["webapp:install"]
-run = "DATABASE_URL=${DATABASE_URL:-postgres://postgres@localhost:5432/mindgrab} mise -C server exec -- cargo test release_stack_recovers_and_converges -- --ignored --nocapture"
-
 [tasks.check]
-description = "Run all server and webapp checks"
-depends = ["server:check", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:cloud", "webapp:test:offline", "webapp:build", "test:release"]
+description = "Run backend, shared document and webapp checks"
+depends = ["backend:check", "backend:test", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:offline", "webapp:build"]
 
 [tasks."crdt:test"]
-description = "Run Yjs/Yrs interoperability tests in the webapp test suite"
-depends = ["webapp:install"]
+description = "Run client/backend Yjs interoperability tests"
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun test --conditions browser tests/project-interop.test.ts"
 
 [tasks."crdt:check"]
-description = "Check interoperability fixtures and the server's Rust worker"
-depends = ["webapp:check", "server:fmt", "server:clippy"]
+description = "Check shared document and interoperability code"
+depends = ["webapp:check", "backend:check"]
 
 [tasks."crdt:fixtures"]
 description = "Regenerate reviewed Yjs binary and JSON golden fixtures"
-depends = ["webapp:install"]
+depends = ["install"]
 dir = "webapp"
 run = "bun --bun tests/fixtures/generate-yjs.ts"

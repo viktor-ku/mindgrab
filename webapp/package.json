@@ -12,7 +12,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "lint:ts": "tsc -b && tsc -p tsconfig.release.json && tsc -p tsconfig.interop.json",
+    "lint:ts": "tsc -b && tsc -p tsconfig.interop.json",
     "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts",
     "test:offline": "bun test ./tests/browser/offline-shell.browser.ts"
   },
@@ -25,12 +25,14 @@
     "y-indexeddb": "9.0.12",
     "y-websocket": "3.1.0",
     "yjs": "13.6.33",
-    "zod": "^4"
+    "zod": "^4",
+    "@mindgrab/document": "workspace:*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@tailwindcss/vite": "=4.3.3",
     "@types/bun": "=1.4.2",
+    "@types/node": "25.5.0",
     "playwright": "1.62.0",
     "tailwindcss": "=4.3.3",
     "typescript": "=7.0.2",

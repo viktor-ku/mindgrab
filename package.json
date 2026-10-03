@@ -1,0 +1,13 @@
+{
+  "name": "mindgrab-workspace",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "shared",
+    "webapp"
+  ],
+  "scripts": {
+    "check": "mise run check"
+  }
+}

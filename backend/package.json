@@ -1,0 +1,30 @@
+{
+  "name": "@mindgrab/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --bun --watch src/main.ts",
+    "start": "bun --bun src/main.ts",
+    "test": "bun --bun test tests",
+    "lint": "biome lint . ../shared",
+    "format": "biome format --write . ../shared",
+    "format:check": "biome format . ../shared",
+    "lint:ts": "tsc --noEmit",
+    "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts"
+  },
+  "dependencies": {
+    "@mindgrab/document": "workspace:*",
+    "hono": "4.13.12",
+    "jose": "6.2.12",
+    "lib0": "0.2.119",
+    "y-protocols": "1.0.6",
+    "yjs": "13.6.33",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
+  }
+}
