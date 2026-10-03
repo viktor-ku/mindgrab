@@ -13,6 +13,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
+import { NODE_COLORS } from "../shared/src/node-colors";
 import type { Harness } from "./harness";
 
 // Interaction tests for the Yjs-bound editor in headless Chromium. The harness
@@ -216,6 +217,75 @@ describe("text editing", () => {
     await page.keyboard.type("zz");
     expect(await call("ids")).toEqual([root]);
     expect(await call("deleted", child)).toBe(true);
+  });
+});
+
+describe("node colors", () => {
+  const background = (id: string) =>
+    node(id).evaluate((el) => getComputedStyle(el).backgroundColor);
+
+  test("the default fill and every palette swatch render with a background", async () => {
+    const root = await rootId();
+    expect((await call("content")).nodes[root].color).toBe("blue");
+    expect(await background(root)).not.toBe("rgba(0, 0, 0, 0)");
+    await node(root).click();
+    const fills = new Set<string>();
+    for (const color of NODE_COLORS) {
+      const choice = page.getByRole("button", {
+        name: new RegExp(`^${color.label}(, selected)?$`),
+      });
+      const swatch = await choice
+        .locator("span")
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+      expect(swatch).not.toBe("rgba(0, 0, 0, 0)");
+      await choice.click();
+      expect(await background(root)).toBe(swatch);
+      expect((await call("content")).nodes[root].color).toBe(color.value);
+      fills.add(swatch);
+    }
+    expect(fills.size).toBe(NODE_COLORS.length);
+  });
+
+  test("node and branch scopes recolor the intended nodes and undo together", async () => {
+    const root = await rootId();
+    const child = await call("addChild", root, "Child");
+    if (!child) throw new Error("Child was not created.");
+    const grandchild = await call("addChild", child, "Grandchild");
+    const sibling = await call("addChild", root, "Sibling");
+    if (!grandchild || !sibling) throw new Error("Branch was not created.");
+    await node(child).click();
+    const originalFill = await background(child);
+    await page.getByRole("button", { name: "Rose", exact: true }).click();
+    const roseFill = await background(child);
+    expect(roseFill).not.toBe(originalFill);
+    for (const id of [root, grandchild, sibling]) {
+      expect((await call("content")).nodes[id].color).toBe("blue");
+      expect(await background(id)).toBe(originalFill);
+    }
+
+    await page.getByText("This branch", { exact: true }).click();
+    expect(
+      await page.getByRole("radio", { name: "This branch" }).isChecked(),
+    ).toBe(true);
+    const updates = await call("localUpdates");
+    await page.getByRole("button", { name: "Violet", exact: true }).click();
+    expect(await call("localUpdates")).toBe(updates + 1);
+    const violetFill = await background(child);
+    expect(violetFill).not.toBe(roseFill);
+    for (const id of [child, grandchild]) {
+      expect((await call("content")).nodes[id].color).toBe("violet");
+      expect(await background(id)).toBe(violetFill);
+    }
+    for (const id of [root, sibling]) {
+      expect((await call("content")).nodes[id].color).toBe("blue");
+      expect(await background(id)).toBe(originalFill);
+    }
+
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    expect((await call("content")).nodes[child].color).toBe("rose");
+    expect(await background(child)).toBe(roseFill);
+    expect((await call("content")).nodes[grandchild].color).toBe("blue");
+    expect(await background(grandchild)).toBe(originalFill);
   });
 });
 
