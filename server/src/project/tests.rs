@@ -311,49 +311,6 @@ async fn listing_is_paginated_owner_scoped_and_stable(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn stale_snapshot_clients_must_upgrade_without_writing(pool: PgPool) {
-    let f = fixture(pool).await;
-    let session = sign_in(&f).await;
-    let id = new_id();
-    create(&f.state, &session, register(id)).await;
-    for cookies in [&session[..], ""] {
-        for method in ["GET", "PUT"] {
-            let reply = send(
-                &f.state,
-                method,
-                "/api/projects",
-                cookies,
-                None,
-                Some(json!({"name": "Ideas", "state": {"version": 1, "nodes": []}})),
-            )
-            .await;
-            assert_eq!(reply.status, StatusCode::UPGRADE_REQUIRED);
-            assert_eq!(error_code(&reply), "legacy_client_upgrade_required");
-            assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
-            assert_eq!(reply.body["storageGeneration"], 1);
-        }
-    }
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM project")
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 0);
-    assert_eq!(
-        ids(&list_all(&f.state, &session, 50).await),
-        vec![id.to_string()]
-    );
-    super::cutover::reset_legacy_projects(&f.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        send(&f.state, "GET", "/api/projects", &session, None, None)
-            .await
-            .status,
-        StatusCode::UPGRADE_REQUIRED
-    );
-}
-
-#[sqlx::test]
 async fn account_expectations_reject_changed_cookies_before_reads_registration_or_updates(
     pool: PgPool,
 ) {

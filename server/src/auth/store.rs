@@ -57,10 +57,13 @@ impl SessionStore for Store {
             .execute(&mut *tx).await.map_err(unavailable)?.rows_affected();
         active(rows)?;
         // Rotation and the new local credential commit together. A failed create
-        // leaves the previous browser session usable, including legacy cookies.
-        sqlx::query("DELETE FROM auth_sessions WHERE (token_hash = ANY($1) OR browser_hash = ANY($1)) AND token_hash <> $2")
-            .bind(previous).bind(provider(record)?)
-            .execute(&mut *tx).await.map_err(unavailable)?;
+        // leaves the previous browser session usable.
+        sqlx::query("DELETE FROM auth_sessions WHERE browser_hash = ANY($1) AND token_hash <> $2")
+            .bind(previous)
+            .bind(provider(record)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
         tx.commit().await.map_err(unavailable)?;
         record.data.remove(REPLACE);
         Ok(())
@@ -77,18 +80,16 @@ impl SessionStore for Store {
     async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
         let row = sqlx::query_as::<_, (String, Json<serde_json::Map<String, serde_json::Value>>, _)>("SELECT token_hash, session_data, expires_at FROM auth_sessions WHERE browser_hash = $1 AND expires_at > NOW()")
             .bind(token_hash(&id.to_string())).fetch_optional(&self.0).await.map_err(unavailable)?;
-        let Some((provider, Json(mut data), expiry_date)) = row else {
+        let Some((provider, Json(data), expiry_date)) = row else {
             return Ok(None);
         };
         let identity = serde_json::json!({"user_id": provider, "auth_hash": provider.as_bytes()});
         // Bind cached identity to this row, never another user's provider session.
-        // Older tower records get an in-memory projection without a storage write.
         if data.get(PROVIDER).and_then(|v| v.as_str()) != Some(provider.as_str())
-            || data.get(AUTH_DATA).is_some_and(|value| value != &identity)
+            || data.get(AUTH_DATA) != Some(&identity)
         {
             return Ok(None);
         }
-        data.entry(AUTH_DATA).or_insert(identity);
         Ok(Some(Record {
             id: *id,
             data: data.into_iter().collect(),

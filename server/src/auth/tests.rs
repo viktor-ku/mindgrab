@@ -200,16 +200,7 @@ pub(crate) async fn sign_in(f: &Fixture) -> String {
 
 /// Inserts another WorkOS user with a valid session and returns its cookie.
 pub(crate) async fn session_for(f: &Fixture, external_id: &str) -> String {
-    let legacy = legacy_session_for(f, external_id).await;
-    let mut record = Record {
-        id: Id::default(),
-        data: [(
-            store::PROVIDER.into(),
-            json!(token_hash(legacy.split_once('=').unwrap().1)),
-        )]
-        .into(),
-        expiry_date: time::OffsetDateTime::now_utc() + time::Duration::days(30),
-    };
+    let mut record = provider_record(f, external_id).await;
     store::Store(f.state.pool.clone())
         .create(&mut record)
         .await
@@ -217,7 +208,7 @@ pub(crate) async fn session_for(f: &Fixture, external_id: &str) -> String {
     format!("{SESSION_COOKIE}={}", record.id)
 }
 
-async fn legacy_session_for(f: &Fixture, external_id: &str) -> String {
+async fn provider_record(f: &Fixture, external_id: &str) -> Record {
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO users (name, email, external_id) VALUES ('Other', $1, $2) RETURNING id",
     )
@@ -240,7 +231,19 @@ async fn legacy_session_for(f: &Fixture, external_id: &str) -> String {
         .execute(&f.state.pool)
         .await
         .unwrap();
-    format!("{LEGACY_SESSION_COOKIE}={token}")
+    let provider = token_hash(&token);
+    Record {
+        id: Id::default(),
+        data: [
+            (store::PROVIDER.into(), json!(provider)),
+            (
+                AUTH_DATA.into(),
+                json!({"user_id": provider, "auth_hash": provider.as_bytes()}),
+            ),
+        ]
+        .into(),
+        expiry_date: time::OffsetDateTime::now_utc() + time::Duration::days(30),
+    }
 }
 
 pub(crate) fn provider_calls(f: &Fixture) -> usize {
@@ -272,7 +275,7 @@ pub(crate) async fn expire_access_token(f: &Fixture) {
 #[sqlx::test]
 async fn anonymous_and_forged_sessions_are_rejected(pool: PgPool) {
     let f = fixture(pool).await;
-    for cookies in ["", "mindgrab_session=forged", "mindgrab_session_v2=forged"] {
+    for cookies in ["", "mindgrab_session_v2=forged"] {
         let response = request(&f, "POST", "/api/getMe", cookies, None).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
@@ -386,96 +389,15 @@ async fn local_storage_failure_preserves_previous_authority_without_login_succes
 }
 
 #[sqlx::test]
-async fn legacy_credentials_survive_and_rotate_without_downgrade_fallback(pool: PgPool) {
-    let f = fixture(pool).await;
-    let legacy = legacy_session_for(&f, "legacy_user").await;
-    let response = request(&f, "POST", "/api/getMe", &legacy, None).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(!response.headers().contains_key(header::SET_COOKIE));
-    assert_eq!(
-        request(
-            &f,
-            "POST",
-            "/api/getMe",
-            &format!("{legacy}; {SESSION_COOKIE}=forged"),
-            None
-        )
-        .await
-        .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let (nonce, callback) = start_login(&f).await;
-    let response = request(&f, "GET", &callback, &format!("{nonce}; {legacy}"), None).await;
-    let current = response_cookie(&response, SESSION_COOKIE);
-    assert_eq!(session_count(&f).await, 1);
-    assert_eq!(
-        response_cookie(&response, LEGACY_SESSION_COOKIE),
-        format!("{LEGACY_SESSION_COOKIE}=")
-    );
-    assert_eq!(
-        request(&f, "POST", "/api/getMe", &legacy, None)
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(
-        request(&f, "POST", "/api/getMe", &current, None)
-            .await
-            .status(),
-        StatusCode::OK
-    );
-    // Pre-axum-login tower records remain readable without a migration/write.
-    sqlx::query("UPDATE auth_sessions SET session_data = session_data - $1")
-        .bind(AUTH_DATA)
-        .execute(&f.state.pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        request(&f, "POST", "/api/getMe", &current, None)
-            .await
-            .status(),
-        StatusCode::OK
-    );
-    let persisted: bool = sqlx::query_scalar("SELECT session_data ? $1 FROM auth_sessions")
-        .bind(AUTH_DATA)
-        .fetch_one(&f.state.pool)
-        .await
-        .unwrap();
-    assert!(!persisted);
-    let legacy = legacy_session_for(&f, "legacy_logout").await;
-    request(
-        &f,
-        "POST",
-        "/api/logout",
-        &legacy,
-        Some("http://localhost:5173"),
-    )
-    .await;
-    assert_eq!(
-        request(&f, "POST", "/api/getMe", &legacy, None)
-            .await
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-}
-
-#[sqlx::test]
 async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: PgPool) {
     let f = fixture(pool).await;
     let session = sign_in(&f).await;
     let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
     let store = store::Store(f.state.pool.clone());
     let original = store.load(&id).await.unwrap().unwrap();
-    let legacy = legacy_session_for(&f, "collision").await;
-    let mut record = Record {
-        id,
-        data: [(
-            store::PROVIDER.into(),
-            json!(token_hash(legacy.split_once('=').unwrap().1)),
-        )]
-        .into(),
-        expiry_date: original.expiry_date,
-    };
+    let mut record = provider_record(&f, "collision").await;
+    record.id = id;
+    record.expiry_date = original.expiry_date;
     assert!(store.create(&mut record).await.is_err());
     assert_eq!(store.load(&id).await.unwrap().unwrap(), original);
     record.id = Id::default();
@@ -508,19 +430,23 @@ async fn store_collisions_and_expiry_cannot_replace_or_restore_authority(pool: P
 }
 
 #[sqlx::test]
-async fn cached_identity_cannot_borrow_another_provider_session(pool: PgPool) {
+async fn cached_identity_must_match_its_provider_session(pool: PgPool) {
     let f = fixture(pool).await;
     let other = session_for(&f, "other_user").await;
     let store = store::Store(f.state.pool.clone());
     let other_id: Id = other.split_once('=').unwrap().1.parse().unwrap();
     let other_record = store.load(&other_id).await.unwrap().unwrap();
-    for field in [AUTH_DATA, store::PROVIDER] {
+    for field in [Some(AUTH_DATA), Some(store::PROVIDER), None] {
         let session = sign_in(&f).await;
         let id: Id = session.split_once('=').unwrap().1.parse().unwrap();
         let mut record = store.load(&id).await.unwrap().unwrap();
-        record
-            .data
-            .insert(field.into(), other_record.data[field].clone());
+        if let Some(field) = field {
+            record
+                .data
+                .insert(field.into(), other_record.data[field].clone());
+        } else {
+            record.data.remove(AUTH_DATA);
+        }
         // Simulate corrupted/stale cached identification while the row's
         // credential and WorkOS tokens still belong to the original user.
         sqlx::query("UPDATE auth_sessions SET session_data = $1 WHERE browser_hash = $2")

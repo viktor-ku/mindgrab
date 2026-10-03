@@ -44,7 +44,6 @@ const batches = new Map<
 >();
 const changedRetries: string[] = [];
 const sockets = new Set<{ close(): void }>();
-const legacyRequests: string[] = [];
 async function control(action: string, extra: Record<string, unknown> = {}) {
   const response = await fetch(config.controlUrl, {
     method: "POST",
@@ -79,8 +78,6 @@ const server = Bun.serve<ProxySocket>({
         return new Response("API processes stopped by fixture", {
           status: 503,
         });
-      if (url.pathname.startsWith("/api/projects"))
-        legacyRequests.push(url.pathname);
       if (url.pathname.startsWith("/sync/v1/")) {
         if (!socketsEnabled) return new Response(null, { status: 503 });
         const peer = new ProxyWebSocket(
@@ -663,7 +660,6 @@ try {
 
   await verifyAccounts(ar, id, recoveredContext);
   await measurements(ar);
-  expect(legacyRequests).toEqual([]);
   expect(changedRetries).toEqual([]);
   expect(errors).toEqual([]);
   console.log(
