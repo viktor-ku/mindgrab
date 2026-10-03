@@ -9,6 +9,14 @@ run = "git push --force-with-lease origin main:live"
 description = "Start local Postgres"
 run = "docker compose up -d postgres"
 
+[tasks."worktree:bootstrap"]
+description = "Create persistent local environment settings for this worktree"
+run = "bun tooling/worktree-bootstrap.ts"
+
+[tasks."tooling:test"]
+description = "Verify worktree bootstrap isolation and configuration"
+run = "bun --bun test tooling"
+
 [tasks.install]
 description = "Install locked workspace dependencies"
 run = "bun --bun install --frozen-lockfile"
@@ -89,7 +97,7 @@ run = "bun --bun run check"
 
 [tasks.check]
 description = "Run backend, shared document, webapp and e2e checks"
-depends = ["backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build"]
+depends = ["tooling:test", "backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build"]
 
 [tasks."crdt:test"]
 description = "Run client/backend Yjs interoperability tests"
