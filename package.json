@@ -5,7 +5,8 @@
   "workspaces": [
     "backend",
     "shared",
-    "webapp"
+    "webapp",
+    "e2e"
   ],
   "scripts": {
     "check": "mise run check"

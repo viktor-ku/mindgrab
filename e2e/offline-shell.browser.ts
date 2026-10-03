@@ -17,7 +17,7 @@ import { build } from "vite";
 // Real HTTP + production output; no request interception and no dev harness.
 // A persistent profile also proves reopen after the browser process exits.
 setDefaultTimeout(45_000);
-const webapp = join(import.meta.dir, "../..");
+const webapp = join(import.meta.dir, "../webapp");
 let directory: string;
 let profile: string;
 let builds: string[];

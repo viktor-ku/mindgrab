@@ -18,7 +18,7 @@ import type { Harness } from "./harness";
 // Interaction tests for the Yjs-bound editor in headless Chromium. The harness
 // page mounts the app with a linked in-process replica acting as another device.
 setDefaultTimeout(30_000);
-const webapp = fileURLToPath(new URL("../..", import.meta.url));
+const webapp = fileURLToPath(new URL("../webapp", import.meta.url));
 let server: ViteDevServer;
 let browser: Browser;
 let context: BrowserContext;
@@ -30,8 +30,12 @@ beforeAll(async () => {
     configFile: `${webapp}/vite.config.ts`,
     cacheDir: "node_modules/.vite-browser-tests",
     logLevel: "error",
-    server: { port: 5199, strictPort: false },
-    optimizeDeps: { entries: ["tests/browser/harness.html"] },
+    server: {
+      port: 5199,
+      strictPort: false,
+      fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] },
+    },
+    optimizeDeps: { entries: [`${import.meta.dir}/harness.html`] },
   });
   await server.listen();
   browser = await chromium.launch();
@@ -51,7 +55,7 @@ beforeEach(async () => {
   const errors: Error[] = [];
   page.on("pageerror", (error) => errors.push(error));
   const url = server.resolvedUrls?.local[0] ?? "http://localhost:5199/";
-  await page.goto(new URL("tests/browser/harness.html", url).href);
+  await page.goto(new URL(`/@fs/${import.meta.dir}/harness.html`, url).href);
   await page.waitForSelector('[data-storage-ready="true"]');
   await page.waitForSelector("[data-node-id]");
   (page as unknown as { errors: Error[] }).errors = errors;

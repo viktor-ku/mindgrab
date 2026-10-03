@@ -19,12 +19,18 @@ done
 
 webapp_files=()
 backend_files=()
+e2e_files=()
 for path in "${staged_files[@]}"; do
   [[ -f "$path" ]] || continue
   case "$path" in
     webapp/*)
       case "${path##*.}" in
         css|graphql|html|js|json|jsonc|md|mdx|ts|tsx) webapp_files+=("${path#webapp/}") ;;
+      esac
+      ;;
+    e2e/*)
+      case "${path##*.}" in
+        css|graphql|html|js|json|jsonc|md|mdx|ts|tsx) e2e_files+=("${path#e2e/}") ;;
       esac
       ;;
     backend/*|shared/*)
@@ -39,9 +45,14 @@ if ((${#webapp_files[@]} > 0)); then
   mise -C webapp exec -- bun --bun node_modules/.bin/biome format --write -- "${webapp_files[@]}"
   git add -- "${webapp_files[@]/#/webapp/}"
 fi
+if ((${#e2e_files[@]} > 0)); then
+  mise -C e2e exec -- bun --bun node_modules/.bin/biome format --write -- "${e2e_files[@]}"
+  git add -- "${e2e_files[@]/#/e2e/}"
+fi
 if ((${#backend_files[@]} > 0)); then
   mise -C backend exec -- bun --bun node_modules/.bin/biome format --write -- "${backend_files[@]}"
   git add -- "${backend_files[@]/#..\//}"
 fi
 mise run backend:check
 mise run webapp:check
+mise run e2e:check

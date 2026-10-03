@@ -1,13 +1,16 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
-import { queryClient } from "../../src/query-client";
+import { queryClient } from "../webapp/src/query-client";
 import { render } from "solid-js/web";
 import * as Y from "yjs";
-import { App } from "../../src/App";
-import { AuthSession, authStorageKey } from "../../src/auth-session";
-import { claimAnonymousProjects } from "../../src/anonymous-claims";
-import { ProjectRepository, storageNames } from "../../src/project-repository";
-import * as project from "../../src/project-document";
-import "../../src/index.css";
+import { App } from "../webapp/src/App";
+import { AuthSession, authStorageKey } from "../webapp/src/auth-session";
+import { claimAnonymousProjects } from "../webapp/src/anonymous-claims";
+import {
+  ProjectRepository,
+  storageNames,
+} from "../webapp/src/project-repository";
+import * as project from "../webapp/src/project-document";
+import "../webapp/src/index.css";
 
 let current: Y.Doc;
 const retired: Y.Doc[] = [];

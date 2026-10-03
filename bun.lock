@@ -23,6 +23,19 @@
         "typescript": "7.0.2",
       },
     },
+    "e2e": {
+      "name": "@mindgrab/e2e",
+      "devDependencies": {
+        "@biomejs/biome": "2.5.14",
+        "@tanstack/solid-query": "5.104.1",
+        "@types/bun": "=1.4.2",
+        "playwright": "1.62.0",
+        "solid-js": "=1.9.15",
+        "typescript": "=7.0.2",
+        "vite": "=8.3.0",
+        "yjs": "13.6.33",
+      },
+    },
     "shared": {
       "name": "@mindgrab/document",
       "version": "0.0.0",
@@ -53,7 +66,6 @@
         "@tailwindcss/vite": "=4.3.3",
         "@types/bun": "=1.4.2",
         "@types/node": "25.5.0",
-        "playwright": "1.62.0",
         "tailwindcss": "=4.3.3",
         "typescript": "=7.0.2",
         "vite": "=8.3.0",
@@ -129,6 +141,8 @@
     "@mindgrab/backend": ["@mindgrab/backend@workspace:backend"],
 
     "@mindgrab/document": ["@mindgrab/document@workspace:shared"],
+
+    "@mindgrab/e2e": ["@mindgrab/e2e@workspace:e2e"],
 
     "@oxc-project/types": ["@oxc-project/types@0.152.0", "", {}, "sha512-oM/5rLBm2tPkg0iBgkH/FOeR3PCDpY19GTgAZjMFM8h9WI9VW7cLgzp6nwtarYKmovavIQZ+Fe/RKX/8C8O/Rw=="],
 

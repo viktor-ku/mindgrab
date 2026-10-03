@@ -50,16 +50,30 @@ dir = "webapp"
 run = "bun --bun test --conditions browser"
 
 [tasks."webapp:test:browser"]
+description = "Alias for e2e:test"
+depends = ["e2e:test"]
+
+[tasks."e2e:test"]
 description = "Run webapp interaction tests in headless Chromium"
 depends = ["install"]
-dir = "webapp"
-run = "bun --bun run test:browser"
+dir = "e2e"
+run = "bun --bun run test"
 
 [tasks."webapp:test:offline"]
+description = "Alias for e2e:test:offline"
+depends = ["e2e:test:offline"]
+
+[tasks."e2e:test:offline"]
 description = "Verify production shell caching, cold offline reopen and safe upgrades"
 depends = ["install"]
-dir = "webapp"
+dir = "e2e"
 run = "bun --bun run test:offline"
+
+[tasks."e2e:check"]
+description = "Run e2e lint, formatting and type checks"
+depends = ["install"]
+dir = "e2e"
+run = "bun --bun run check"
 
 [tasks."webapp:build"]
 description = "Build the webapp"
@@ -74,8 +88,8 @@ dir = "webapp"
 run = "bun --bun run check"
 
 [tasks.check]
-description = "Run backend, shared document and webapp checks"
-depends = ["backend:check", "backend:test", "webapp:check", "webapp:test", "webapp:test:browser", "webapp:test:offline", "webapp:build"]
+description = "Run backend, shared document, webapp and e2e checks"
+depends = ["backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build"]
 
 [tasks."crdt:test"]
 description = "Run client/backend Yjs interoperability tests"

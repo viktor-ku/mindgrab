@@ -40,7 +40,7 @@ Backend tests use real Postgres in disposable databases and a local mock WorkOS
 provider. The database role needs permission to create/drop test databases. Tests
 cover authentication, API contracts, concurrent commits, causal gaps, read-model
 rebuilds, compaction, archives, process termination and live cross-instance sync.
-The existing editor, account, repository and offline-shell browser tests remain.
+The editor, account, repository and offline-shell browser tests live in `e2e/`.
 The old browser cloud/recovery and release orchestration was removed.
 
 ## Administration

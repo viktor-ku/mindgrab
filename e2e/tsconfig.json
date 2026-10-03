@@ -1,0 +1,8 @@
+{
+  "extends": "../webapp/tsconfig.app.json",
+  "compilerOptions": {
+    "types": ["bun", "vite/client"],
+    "tsBuildInfoFile": "../node_modules/.tmp/tsconfig.e2e.tsbuildinfo"
+  },
+  "include": ["*.ts", "*.tsx"]
+}

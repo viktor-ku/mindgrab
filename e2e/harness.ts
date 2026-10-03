@@ -1,9 +1,9 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
-import { queryClient } from "../../src/query-client";
+import { queryClient } from "../webapp/src/query-client";
 import { createComponent, render } from "solid-js/web";
 import * as Y from "yjs";
-import { App } from "../../src/App";
-import "../../src/index.css";
+import { App } from "../webapp/src/App";
+import "../webapp/src/index.css";
 import {
   createChild,
   deleteSubtree,
@@ -13,8 +13,8 @@ import {
   ORIGIN,
   projectMindMap,
   translateSubtree,
-} from "../../src/project-document";
-import type { MindMapNode } from "../../src/mind-map";
+} from "../webapp/src/project-document";
+import type { MindMapNode } from "../webapp/src/mind-map";
 
 // Mounts the real app with a second in-process replica of its document that
 // stands in for another device. Updates flow both ways immediately.
@@ -98,7 +98,8 @@ declare global {
 }
 
 // Account requests are answered as signed out; there is no API server here.
-window.fetch = async () => new Response(null, { status: 401 });
+window.fetch = (async () =>
+  new Response(null, { status: 401 })) as unknown as typeof window.fetch;
 window.harness = harness;
 const root = document.getElementById("root") as HTMLElement;
 render(

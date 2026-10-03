@@ -1,8 +1,8 @@
 // Browser-side helpers for project-repository.test.ts; bundled per test run.
 import * as Y from "yjs";
-import * as project from "../../src/project-document";
-import * as storage from "../../src/project-repository";
-import * as files from "../../src/project-import-export";
+import * as project from "../webapp/src/project-document";
+import * as storage from "../webapp/src/project-repository";
+import * as files from "../webapp/src/project-import-export";
 
 // Open IndexedDB connections by database name, for leak checks.
 const connections = new Map<string, number>();

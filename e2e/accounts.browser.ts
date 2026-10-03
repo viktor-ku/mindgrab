@@ -13,12 +13,13 @@ import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import * as Y from "yjs";
-import type { User } from "../../src/auth-session";
-import { digest } from "../../src/crdt-api";
-import { openProjectDocument } from "../../src/project-document";
+import type { User } from "../webapp/src/auth-session";
+import { digest } from "../webapp/src/crdt-api";
+import { openProjectDocument } from "../webapp/src/project-document";
 import type { AccountHarness } from "./accounts-harness";
 
 setDefaultTimeout(30_000);
+const harnessPath = `/@fs/${import.meta.dir}/accounts-harness.html`;
 const A: User = {
   id: 1,
   name: "Account A",
@@ -71,7 +72,7 @@ class Backend {
       this.meStatus = undefined;
       return route.fulfill({
         status: 303,
-        headers: { Location: "/tests/browser/accounts-harness.html" },
+        headers: { Location: harnessPath },
       });
     }
     if (url.pathname === "/api/logout") {
@@ -79,7 +80,7 @@ class Backend {
       if (!this.leaveCookieOnLogout) this.user = undefined;
       return route.fulfill({
         status: 303,
-        headers: { Location: "/tests/browser/accounts-harness.html" },
+        headers: { Location: harnessPath },
       });
     }
     if (url.pathname === "/api/getMe") {
@@ -180,21 +181,22 @@ let backend: Backend;
 let errors: Error[];
 let appUrl: string;
 beforeAll(async () => {
-  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const root = fileURLToPath(new URL("../webapp", import.meta.url));
   server = await createServer({
     root,
     configFile: `${root}/vite.config.ts`,
     cacheDir: "node_modules/.vite-account-tests",
     define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
     logLevel: "error",
-    server: { port: 5197, strictPort: false },
-    optimizeDeps: { entries: ["tests/browser/accounts-harness.html"] },
+    server: {
+      port: 5197,
+      strictPort: false,
+      fs: { allow: [fileURLToPath(new URL("..", import.meta.url))] },
+    },
+    optimizeDeps: { entries: [`${import.meta.dir}/accounts-harness.html`] },
   });
   await server.listen();
-  appUrl = new URL(
-    "tests/browser/accounts-harness.html",
-    server.resolvedUrls?.local[0],
-  ).href;
+  appUrl = new URL(harnessPath, server.resolvedUrls?.local[0]).href;
   browser = await chromium.launch();
 });
 afterAll(async () => {
@@ -221,7 +223,15 @@ afterEach(async () => {
   for (const record of backend.projects.values()) record.doc.destroy();
   expect(errors).toEqual([]);
 });
-function call<K extends keyof AccountHarness>(
+type AccountAction = {
+  [K in keyof AccountHarness]: AccountHarness[K] extends (
+    ...args: never[]
+  ) => unknown
+    ? K
+    : never;
+}[keyof AccountHarness];
+
+function call<K extends AccountAction>(
   name: K,
   ...args: Parameters<AccountHarness[K]>
 ): Promise<Awaited<ReturnType<AccountHarness[K]>>> {

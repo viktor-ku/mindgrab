@@ -1,0 +1,2 @@
+- use `bun --bun` for running things instead of node or npm
+- keep Playwright suites and their browser harnesses in this directory
