@@ -5,7 +5,7 @@ import {
   chromium,
   type Page,
 } from "playwright";
-import { storageNames } from "../../src/project-repository";
+import { storageNames } from "../webapp/src/project-repository";
 import type { Harness } from "./repository-harness";
 
 // Real Chromium IndexedDB. Run `bunx playwright install chromium` once.
@@ -99,13 +99,13 @@ describe("IndexedDB project repository", () => {
         );
         await second.waitForFunction(() => {
           const { handle } = globalThis as never as {
-            handle: import("../src/project-repository").ProjectHandle;
+            handle: import("../webapp/src/project-repository").ProjectHandle;
           };
           return handle.state().status === "ready";
         });
         const duplicate = await second.evaluate(async (id) => {
           const { handle } = globalThis as never as {
-            handle: import("../src/project-repository").ProjectHandle;
+            handle: import("../webapp/src/project-repository").ProjectHandle;
           };
           await handle.flush();
           const error = await mg.repo
@@ -196,7 +196,7 @@ describe("IndexedDB project repository", () => {
         });
         const failed = await page.evaluate(async () => {
           const { handle } = globalThis as never as {
-            handle: import("../src/project-repository").ProjectHandle;
+            handle: import("../webapp/src/project-repository").ProjectHandle;
           };
           const [root] = mg.project.projectForest(mg.content(handle));
           mg.project.replaceNodeText(handle.doc, root.id, mg.noise(60_000));
@@ -214,7 +214,7 @@ describe("IndexedDB project repository", () => {
         });
         const confirmed = await page.evaluate(async () => {
           const { handle } = globalThis as never as {
-            handle: import("../src/project-repository").ProjectHandle;
+            handle: import("../webapp/src/project-repository").ProjectHandle;
           };
           await handle.flush();
           return {
@@ -351,7 +351,7 @@ describe("IndexedDB project repository", () => {
         );
         const edited = await page.evaluate(async () => {
           const { handle } = globalThis as never as {
-            handle: import("../src/project-repository").ProjectHandle;
+            handle: import("../webapp/src/project-repository").ProjectHandle;
           };
           const [root] = mg.project.projectForest(mg.content(handle));
           mg.project.replaceNodeText(handle.doc, root.id, "After upgrade");

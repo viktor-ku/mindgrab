@@ -18,7 +18,7 @@ let context: BrowserContext;
 let page: Page;
 let errors: Error[];
 beforeAll(async () => {
-  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const root = fileURLToPath(new URL("../webapp", import.meta.url));
   server = await createServer({
     root,
     configFile: `${root}/vite.config.ts`,
