@@ -132,6 +132,150 @@ describe("remote documents", () => {
   });
 });
 
+async function addChild(parent: string, text: string) {
+  const id = await call("addChild", parent, text);
+  if (!id) throw new Error("Child was not created.");
+  return id;
+}
+
+describe("collapsing branches", () => {
+  test("G hides all descendants and connectors without editing the document", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    const grandchild = await addChild(child, "Grandchild");
+    const sibling = await addChild(root, "Sibling");
+    await node(grandchild).waitFor();
+    await node(root).click();
+    const content = await call("content");
+    const updates = await call("localUpdates");
+    await page.keyboard.press("g");
+    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
+    expect(await node(root).getAttribute("data-selected")).toBe("true");
+    expect(await page.locator("[data-node-id]").count()).toBe(1);
+    expect(await page.locator("svg.pointer-events-none path").count()).toBe(0);
+    expect(
+      await node(root)
+        .getByRole("button", { name: "Expand 3 hidden nodes" })
+        .count(),
+    ).toBe(1);
+    expect(await call("content")).toEqual(content);
+    expect(await call("localUpdates")).toBe(updates);
+    await page.keyboard.press("ArrowRight");
+    expect(await node(root).getAttribute("data-selected")).toBe("true");
+    await page.keyboard.press("g");
+    for (const id of [child, grandchild, sibling]) await node(id).waitFor();
+    expect(await page.locator("svg.pointer-events-none path").count()).toBe(3);
+    await page.keyboard.press("g");
+    await node(root)
+      .getByRole("button", { name: "Expand 3 hidden nodes" })
+      .click();
+    await node(grandchild).waitFor();
+  });
+
+  test("nested folds survive a parent fold and remote changes update the stack", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    const grandchild = await addChild(child, "Grandchild");
+    const sibling = await addChild(root, "Sibling");
+    await node(child)
+      .getByRole("button", { name: "Child", exact: true })
+      .click();
+    await page.keyboard.press("g");
+    await node(root).click();
+    await page.keyboard.press("g");
+    await call("edit", grandchild, 0, 10, "Updated");
+    const added = await addChild(child, "Remote child");
+    expect(
+      await node(root)
+        .getByRole("button", { name: "Expand 4 hidden nodes" })
+        .count(),
+    ).toBe(1);
+    await page.keyboard.press("g");
+    await node(sibling).waitFor();
+    expect(await node(child).getAttribute("data-collapsed")).toBe("true");
+    expect(await node(grandchild).count()).toBe(0);
+    await node(child)
+      .getByRole("button", { name: "Child", exact: true })
+      .click();
+    await page.keyboard.press("g");
+    await node(added).waitFor();
+    expect(await node(grandchild).textContent()).toBe("Updated");
+    await page.keyboard.press("g");
+    await call("remove", grandchild);
+    await call("remove", added);
+    expect(await node(child).getAttribute("data-collapsed")).toBe("false");
+  });
+
+  test("G ignores typing, modifiers, repeated keydowns, leaves, and no selection", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    await page.keyboard.press("g");
+    await node(child).waitFor();
+    await node(child)
+      .getByRole("button", { name: "Child", exact: true })
+      .click();
+    await page.keyboard.press("g");
+    expect(await node(child).getAttribute("data-collapsed")).toBe("false");
+    await edit(root);
+    await page.keyboard.type("g");
+    expect(await call("text", root)).toBe("g");
+    await node(child).waitFor();
+    await page.keyboard.press("Enter");
+    for (const key of ["Control+g", "Meta+g", "Alt+g"])
+      await page.keyboard.press(key);
+    expect(await node(root).getAttribute("data-collapsed")).toBe("false");
+    await page.keyboard.down("g");
+    await page.keyboard.down("g");
+    await page.keyboard.up("g");
+    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
+    await page.keyboard.press("g");
+    await node(child).waitFor();
+  });
+
+  test("adding a child expands the folded parent and undo can reveal hidden selections", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    await node(root).click();
+    await page.keyboard.press("g");
+    await page.keyboard.press("Tab");
+    await editor().waitFor();
+    await page.keyboard.type("Added");
+    await page.keyboard.press("Enter");
+    await node(child).waitFor();
+    const added = (await call("ids")).find(
+      (id) => id !== root && id !== child,
+    ) as string;
+    await page.keyboard.press("Delete");
+    await node(root).click();
+    await page.keyboard.press("g");
+    await page.keyboard.press("Control+z");
+    await node(added).waitFor();
+    expect(await node(added).getAttribute("data-selected")).toBe("true");
+  });
+
+  test("dragging a folded parent moves its hidden descendants", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    const grandchild = await addChild(child, "Grandchild");
+    await node(grandchild).waitFor();
+    await call("place", child, 220, 65);
+    await call("place", grandchild, 370, 120);
+    await node(root).click();
+    await page.keyboard.press("g");
+    // The wider stack must finish its ResizeObserver layout before dragging.
+    await frame();
+    await frame();
+    const move = await startDrag(root);
+    await move(90, 70);
+    await page.mouse.up();
+    expect(await call("position", child)).toEqual({ x: 310, y: 135 });
+    expect(await call("position", grandchild)).toEqual({ x: 460, y: 190 });
+    await page.keyboard.press("g");
+    await node(grandchild).waitFor();
+    expect(await translation(grandchild)).toEqual({ x: 460, y: 190 });
+  });
+});
+
 describe("text editing", () => {
   test("typing, newlines, emoji, and paste become incremental operations", async () => {
     const id = await rootId();
