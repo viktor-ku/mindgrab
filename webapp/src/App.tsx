@@ -1368,7 +1368,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         };
 
     const menuWidth = 208;
-    const menuHeight = nodeId ? 104 : 56;
+    const menuHeight = nodeId
+      ? details().get(nodeId)?.descendants
+        ? 144
+        : 104
+      : 56;
     setContextMenu({
       x: Math.max(8, Math.min(e.clientX, window.innerWidth - menuWidth - 8)),
       y: Math.max(8, Math.min(e.clientY, window.innerHeight - menuHeight - 8)),
@@ -2217,6 +2221,24 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             >
               Add child node
             </button>
+            <Show
+              when={details().get(contextMenu()?.nodeId ?? "")?.descendants}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                class="map-control w-full text-left"
+                onClick={() => {
+                  const id = contextMenu()?.nodeId;
+                  setContextMenu(undefined);
+                  if (id) toggleCollapse(id);
+                }}
+              >
+                {collapsedIds().has(contextMenu()?.nodeId ?? "")
+                  ? "Expand children"
+                  : "Collapse children"}
+              </button>
+            </Show>
           </Show>
         </div>
       </Show>

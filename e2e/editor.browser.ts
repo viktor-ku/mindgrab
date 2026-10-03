@@ -139,7 +139,7 @@ async function addChild(parent: string, text: string) {
 }
 
 describe("collapsing branches", () => {
-  test("G hides all descendants and connectors without editing the document", async () => {
+  test("G, the context menu, and the stack toggle descendants without editing the document", async () => {
     const root = await rootId();
     const child = await addChild(root, "Child");
     const grandchild = await addChild(child, "Grandchild");
@@ -170,6 +170,21 @@ describe("collapsing branches", () => {
       .getByRole("button", { name: "Expand 3 hidden nodes" })
       .click();
     await node(grandchild).waitFor();
+    await node(root).click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Collapse children" }).click();
+    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
+    expect(await node(grandchild).count()).toBe(0);
+    expect(await page.getByRole("menu").count()).toBe(0);
+    await node(root).click({ button: "right" });
+    expect(
+      await page.getByRole("menuitem", { name: "Collapse children" }).count(),
+    ).toBe(0);
+    await page.getByRole("menuitem", { name: "Expand children" }).click();
+    for (const id of [child, grandchild, sibling]) await node(id).waitFor();
+    expect(await node(root).getAttribute("data-collapsed")).toBe("false");
+    expect(await node(root).getAttribute("data-selected")).toBe("true");
+    expect(await call("content")).toEqual(content);
+    expect(await call("localUpdates")).toBe(updates);
   });
 
   test("nested folds survive a parent fold and remote changes update the stack", async () => {
@@ -216,6 +231,11 @@ describe("collapsing branches", () => {
       .click();
     await page.keyboard.press("g");
     expect(await node(child).getAttribute("data-collapsed")).toBe("false");
+    await node(child).click({ button: "right" });
+    expect(
+      await page.getByRole("menuitem", { name: /Collapse|Expand/ }).count(),
+    ).toBe(0);
+    await page.keyboard.press("Escape");
     await edit(root);
     await page.keyboard.type("g");
     expect(await call("text", root)).toBe("g");
