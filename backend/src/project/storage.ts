@@ -131,6 +131,15 @@ export class Storage {
     readonly documents = new DocumentPool(),
   ) {}
 
+  // The same row lock as ingestion serializes deletion with accepted writes.
+  // Foreign-key cascades remove updates, receipts, checkpoints and read models.
+  async remove(owner: bigint, id: string) {
+    await this.db.begin(async (tx) => {
+      await tx`SET LOCAL synchronous_commit = on`;
+      await tx`DELETE FROM crdt_project WHERE id = ${id} AND owner_id = ${owner}`;
+    });
+  }
+
   async ingest(
     owner: bigint,
     id: string,
@@ -186,7 +195,10 @@ export class Storage {
       updates.push(update);
       let validation: Validation;
       try {
-        validation = (await this.documents.run(updates)).validation;
+        const candidate = await this.documents.run(updates);
+        if (candidate.content?.metadata.saving?.cloud === false)
+          throw new ApiError("cloud_saving_disabled");
+        validation = candidate.validation;
       } catch (error) {
         if (
           project.last_sequence > 0n &&

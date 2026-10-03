@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import {
   effectivePlacements,
   materializeProject,
+  setSavingPreferences,
 } from "@mindgrab/document/project-document";
 import * as Y from "yjs";
 import { updateBatches } from "../../webapp/src/update-batches";
@@ -415,4 +416,25 @@ test("corrupt canonical bytes and missing log sequences fail closed", async () =
         .catch((error) => error)
     ).code,
   ).toBe("unavailable");
+});
+
+test("backend rejects documents that opt out of cloud saving without storing their bytes", async () => {
+  const writer = base();
+  setSavingPreferences(writer, { local: true, cloud: false });
+  await expect(
+    f.backend.services.storage.ingest(
+      user,
+      id,
+      crypto.randomUUID(),
+      Y.encodeStateAsUpdate(writer),
+    ),
+  ).rejects.toMatchObject({ code: "cloud_saving_disabled" });
+  expect(
+    (await f.db`SELECT * FROM crdt_update WHERE project_id = ${id}`).length,
+  ).toBe(0);
+  expect(
+    (await f.db`SELECT last_sequence FROM crdt_project WHERE id = ${id}`)[0]
+      .last_sequence,
+  ).toBe(0n);
+  writer.destroy();
 });

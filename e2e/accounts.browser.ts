@@ -131,6 +131,12 @@ class Backend {
       await this.catalogGate?.promise;
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
+    if (url.pathname === "/api/deleteProject") {
+      const { projectId } = request.postDataJSON();
+      if (this.projects.get(projectId)?.ownerId === owner.id)
+        this.projects.delete(projectId);
+      return route.fulfill({ json: { deleted: true } });
+    }
     const operation = url.pathname;
     const { projectId: id, updateId } =
       operation === "/api/submitProjectUpdate"
@@ -485,4 +491,94 @@ test("an aborted durable account hint prevents logout acknowledgement and can be
   await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   expect(backend.logoutRequests).toBe(1);
+});
+
+test("signed-in users can disable both destinations, edit privately, and keep New projects private", async () => {
+  await login();
+  await cloudSaved();
+  const id = await call("id");
+  expect(backend.projects.has(id)).toBe(true);
+  await page
+    .getByRole("button", { name: "Project preferences", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Project preferences" });
+  await dialog.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
+  await page.getByText("Cloud saving off", { exact: true }).waitFor();
+  expect(backend.projects.has(id)).toBe(false);
+  await dialog
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await dialog.getByText("This project lives only in memory.").waitFor();
+  await page.waitForFunction(
+    async (id) =>
+      !(await indexedDB.databases()).some((db) =>
+        db.name?.endsWith(`/project/${id}`),
+      ),
+    id,
+  );
+  await dialog
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  const uploads = backend.uploads.length;
+  const registrations = backend.registrations.length;
+  await edit("Secret work stays here");
+  await refreshAccount();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page
+    .getByText("Local saving is off. Export a copy to keep your work.")
+    .waitFor();
+  expect(backend.uploads).toHaveLength(uploads);
+  expect(backend.registrations).toHaveLength(registrations);
+  expect(backend.projects.has(id)).toBe(false);
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.waitForFunction((id) => window.accountHarness.id() !== id, id);
+  expect(backend.registrations).toHaveLength(registrations);
+  await page
+    .getByText("Memory only · Export before closing this tab.")
+    .waitFor();
+});
+
+test("cloud-only projects load after reload without leaving a local copy", async () => {
+  await login();
+  await rename("Cloud only project");
+  await cloudSaved();
+  const id = await call("id");
+  await page
+    .getByRole("button", { name: "Project preferences", exact: true })
+    .click();
+  await page.getByRole("switch", { name: "Save locally", exact: true }).click();
+  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await cloudSaved();
+  await page.reload();
+  await ready();
+  await page.getByRole("button", { name: "Load", exact: true }).click();
+  await page
+    .getByRole("button", { name: `Cloud only project · ${id.slice(0, 8)}` })
+    .click();
+  await page.getByText("Local saving off", { exact: true }).waitFor();
+  expect(await call("id")).toBe(id);
+  expect(
+    await page.evaluate(
+      async (id) =>
+        (await indexedDB.databases()).some((db) =>
+          db.name?.endsWith(`/project/${id}`),
+        ),
+      id,
+    ),
+  ).toBe(false);
+});
+
+test("anonymous projects with cloud saving off are never offered for account upload", async () => {
+  const id = await call("id");
+  await page
+    .getByRole("button", { name: "Project preferences", exact: true })
+    .click();
+  await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
+  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await login();
+  await cloudSaved();
+  expect(backend.projects.has(id)).toBe(false);
+  expect(await claim().count()).toBe(0);
+  const anonymous = await call("catalog", "anonymous");
+  expect(anonymous.find((entry) => entry.id === id)?.saving?.cloud).toBe(false);
 });

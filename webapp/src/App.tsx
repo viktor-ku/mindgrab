@@ -1,3 +1,4 @@
+import { ProjectPreferences } from "./ProjectPreferences";
 import {
   createMutation,
   createQuery,
@@ -493,11 +494,15 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     setDoc(handle.doc);
     setStorageReady(true);
     cloud?.activate(handle);
-    setSaveStatus(handle.durability().status === "saved" ? "done" : "saving");
+    setSaveStatus(
+      ["saved", "disabled"].includes(handle.durability().status)
+        ? "done"
+        : "saving",
+    );
     stopDurability = handle.onDurability((durability) => {
       if (activeHandle !== handle || repository !== owner || disposed) return;
       setSaveStatus(
-        durability.status === "saved"
+        durability.status === "saved" || durability.status === "disabled"
           ? "done"
           : durability.status === "saving"
             ? "saving"
@@ -507,7 +512,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         setStorageMessage(
           `${durability.error.message} Export a copy to keep your changes.`,
         );
-      else if (durability.status === "saved") setStorageMessage("");
+      else if (
+        durability.status === "saved" ||
+        durability.status === "disabled"
+      )
+        setStorageMessage("");
     });
     if (previous && previous !== handle) await previous.close();
     try {
@@ -798,6 +807,35 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
+  const [showPreferences, setShowPreferences] = createSignal(false);
+  const [preferencesBusy, setPreferencesBusy] = createSignal(false);
+  const [preferencesError, setPreferencesError] = createSignal("");
+  async function changeSaving(
+    value: import("./project-document").SavingPreferences,
+  ) {
+    const handle = activeHandle;
+    const owner = repository;
+    if (!handle || preferencesBusy()) return;
+    setPreferencesBusy(true);
+    setPreferencesError("");
+    try {
+      await owner.updateSaving(handle, value);
+      if (!value.cloud && !cloud && (await owner.cloudAttempted(handle.id)))
+        setCloudStatus({
+          status: "auth",
+          message:
+            "Cloud deletion pending. Sign in again and reconnect to delete the existing cloud copy. Keep this tab open.",
+        });
+      cloud?.retry();
+    } catch (error) {
+      if (handle === activeHandle)
+        setPreferencesError(
+          `Could not finish updating storage: ${error instanceof Error ? error.message : "Please retry."} Existing copies may remain.`,
+        );
+    } finally {
+      setPreferencesBusy(false);
+    }
+  }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
   function clearSaveStatus() {
@@ -1037,6 +1075,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       const handle = await target.create({
         name,
         root: { text: "New idea" },
+        saving: view().saving(),
       });
       await activate(handle, target);
       if (target !== repository || disposed) return;
@@ -1076,7 +1115,11 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("done");
-      setStorageMessage("Saved locally.");
+      setStorageMessage(
+        view().saving().local
+          ? "Saved locally."
+          : "Local saving is off. Export a copy to keep your work.",
+      );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("error");
@@ -1220,7 +1263,13 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       const { content, preferences } = prepareProjectImport(imported);
       await activeHandle?.flush();
       if (owner !== repository || disposed) return;
-      const handle = await owner.importContent(content);
+      const handle = await owner.importContent({
+        ...content,
+        metadata: {
+          ...content.metadata,
+          saving: content.metadata.saving ?? view().saving(),
+        },
+      });
       if (owner !== repository || disposed) {
         await handle.close();
         return;
@@ -1541,7 +1590,20 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       for (const recovery of parked) void recovery.repository.close();
     });
 
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (
+        repository.hasMemoryOnlyProjects() ||
+        (!view().saving().local &&
+          (!view().saving().cloud || cloudStatus()?.status !== "saved"))
+      ) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    onCleanup(() => window.removeEventListener("beforeunload", beforeUnload));
     const keydown = (e: KeyboardEvent) => {
+      if (showPreferences()) return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -1775,6 +1837,17 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
+      <ProjectPreferences
+        open={showPreferences()}
+        onClose={() => setShowPreferences(false)}
+        saving={view().saving()}
+        onChange={(value) => void changeSaving(value)}
+        busy={preferencesBusy()}
+        error={preferencesError()}
+        cloudStatus={cloudStatus()}
+        signedIn={account().status === "authenticated"}
+        onExport={exportCurrentProject}
+      />
       <div
         data-no-pan
         data-toolbar
@@ -1860,29 +1933,48 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
           >
             Export
           </button>
+          <button
+            type="button"
+            class="map-control"
+            disabled={!storageReady()}
+            aria-haspopup="dialog"
+            onClick={() => {
+              finishWriting();
+              finishProjectName();
+              setShowPreferences(true);
+            }}
+          >
+            Project preferences
+          </button>
           <span role="status" class="ml-auto px-2 text-xs text-stone-500">
-            {saveStatus() === "saving"
-              ? "Saving…"
-              : saveStatus() === "done"
-                ? "Saved locally"
-                : saveStatus() === "error"
-                  ? "Save failed"
-                  : ""}
+            {!view().saving().local
+              ? "Local saving off"
+              : saveStatus() === "saving"
+                ? "Saving…"
+                : saveStatus() === "done"
+                  ? "Saved locally"
+                  : saveStatus() === "error"
+                    ? "Save failed"
+                    : ""}
           </span>
         </fieldset>
         <Show when={cloudStatus()}>
           {(status) => (
             <div class="flex items-center gap-1 px-2 py-1 text-xs text-stone-500">
               <span role="status">
-                {status().status === "saved"
-                  ? "Saved to cloud"
-                  : status().status === "saving"
-                    ? "Saving to cloud…"
-                    : status().status === "offline"
-                      ? "Offline · cloud save pending"
-                      : "message" in status()
-                        ? (status() as { message: string }).message
-                        : ""}
+                {status().status === "disabled"
+                  ? "Cloud saving off"
+                  : status().status === "deleting"
+                    ? "Deleting cloud copy…"
+                    : status().status === "saved"
+                      ? "Saved to cloud"
+                      : status().status === "saving"
+                        ? "Saving to cloud…"
+                        : status().status === "offline"
+                          ? "Offline · cloud save pending"
+                          : "message" in status()
+                            ? (status() as { message: string }).message
+                            : ""}
               </span>
               <Show
                 when={["retrying", "blocked", "auth"].includes(status().status)}
@@ -1901,9 +1993,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             </div>
           )}
         </Show>
+        <Show when={!view().saving().local && !view().saving().cloud}>
+          <p role="status" class="px-2 py-1 text-xs text-amber-800">
+            Memory only · Export before closing this tab.
+          </p>
+        </Show>
         <Show when={showLoad()}>
           <div id="saved-projects" class="border-t border-stone-200 pt-2">
-            <p class="px-2 text-xs text-stone-500">Saved in this browser</p>
+            <p class="px-2 text-xs text-stone-500">Available projects</p>
             <ul class="max-h-60 overflow-y-auto text-sm">
               <For
                 each={savedProjects()}

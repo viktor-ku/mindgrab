@@ -67,10 +67,39 @@ const NodeSchema = z.strictObject({
   color: z.custom<NodeColor>(isNodeColor, "Invalid color."),
   deleted: z.boolean(),
 });
+export const SavingPreferencesSchema = z.strictObject({
+  local: z.boolean(),
+  cloud: z.boolean(),
+});
+export type SavingPreferences = z.infer<typeof SavingPreferencesSchema>;
+export const DEFAULT_SAVING_PREFERENCES: SavingPreferences = {
+  local: true,
+  cloud: true,
+};
+
+export function savingPreferences(doc: Y.Doc): SavingPreferences {
+  const metadata = doc.getMap(ROOT).get("metadata");
+  const value = metadata instanceof Y.Map ? metadata.get("saving") : undefined;
+  return (
+    SavingPreferencesSchema.safeParse(value).data ?? {
+      ...DEFAULT_SAVING_PREFERENCES,
+    }
+  );
+}
+
+// Privacy choices are deliberately excluded from edit undo/redo.
+export function setSavingPreferences(doc: Y.Doc, value: SavingPreferences) {
+  const preferences = SavingPreferencesSchema.parse(value);
+  const metadata = doc.getMap(ROOT).get("metadata");
+  if (!(metadata instanceof Y.Map)) invalid("The project has no metadata.");
+  doc.transact(() => metadata.set("saving", preferences), "saving-preferences");
+}
+
 const ContentSchema = z.strictObject({
   schemaVersion: z.literal(SCHEMA_VERSION),
   metadata: z.strictObject({
     name: z.string().refine(isProjectName, "Invalid project name."),
+    saving: SavingPreferencesSchema.optional(),
   }),
   nodes: z
     .record(IdSchema, NodeSchema)
@@ -173,6 +202,8 @@ function installContent(
     project.set("schemaVersion", SCHEMA_VERSION);
     const metadata = new Y.Map<unknown>();
     metadata.set("name", content.metadata.name);
+    if (content.metadata.saving)
+      metadata.set("saving", { ...content.metadata.saving });
     project.set("metadata", metadata);
     const nodes = new Y.Map<Y.Map<unknown>>();
     for (const [id, node] of Object.entries(content.nodes))
@@ -235,7 +266,10 @@ export function checkSharedTypes(doc: Y.Doc) {
     invalid("Unexpected project fields.");
   const metadata = project.get("metadata");
   if (!(metadata instanceof Y.Map)) invalid("Metadata must be a shared map.");
-  if (metadata.size !== 1) invalid("Unexpected metadata fields.");
+  if ([...metadata.keys()].some((key) => !["name", "saving"].includes(key)))
+    invalid("Unexpected metadata fields.");
+  if (metadata.get("saving") instanceof Y.AbstractType)
+    invalid("Saving preferences must be atomic.");
   if (typeof metadata.get("name") !== "string")
     invalid("Name must be an atomic string.");
   const nodes = project.get("nodes");

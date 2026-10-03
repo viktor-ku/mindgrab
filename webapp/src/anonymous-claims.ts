@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { CrdtApi, SyncError } from "./crdt-api";
-import { ORIGIN } from "./project-document";
+import { ORIGIN, savingPreferences } from "./project-document";
 import { accountNamespace, ANONYMOUS_NAMESPACE } from "./project-repository";
 import type { ProjectRepository } from "./project-repository";
 
@@ -10,8 +10,9 @@ export async function claimCandidates(
 ) {
   return (await source.list({ includeClaims: true })).filter(
     (entry) =>
-      !entry.claim ||
-      (entry.claim.ownerId === ownerId && entry.claim.phase === "pending"),
+      entry.saving?.cloud !== false &&
+      (!entry.claim ||
+        (entry.claim.ownerId === ownerId && entry.claim.phase === "pending")),
   );
 }
 
@@ -41,6 +42,7 @@ export async function claimAnonymousProjects(
         return;
       const original = await source.open(entry.id, { remember: false });
       try {
+        if (!savingPreferences(original.doc).cloud) return;
         await original.flush();
         signal.throwIfAborted();
         for (let attempt = 0; attempt < 5; attempt++) {
@@ -76,7 +78,13 @@ export async function claimAnonymousProjects(
             if (view !== undefined)
               await destination.setPreference(`project/${targetId}/view`, view);
             signal.throwIfAborted();
+            if (
+              !savingPreferences(original.doc).cloud ||
+              !savingPreferences(target.doc).cloud
+            )
+              return;
             try {
+              await destination.markCloudAttempted(targetId);
               await api.register(targetId, signal);
             } catch (error) {
               signal.throwIfAborted();

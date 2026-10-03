@@ -126,6 +126,10 @@ export class CrdtApi {
     );
   }
 
+  async remove(id: string, signal: AbortSignal) {
+    await this.#json("deleteProject", { projectId: id }, signal);
+  }
+
   list(signal: AbortSignal) {
     return this.#read("catalog", signal, (signal) => this.#list(signal));
   }

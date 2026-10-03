@@ -8,6 +8,7 @@ import {
   ORIGIN,
   openProjectDocument,
   replaceNodeText,
+  setSavingPreferences,
 } from "../src/project-document";
 import type {
   ProjectHandle,
@@ -33,6 +34,13 @@ function deferred<T>() {
 class Server extends CrdtApi {
   doc = openProjectDocument(ID);
   registrations = 0;
+  removals = 0;
+  deleteFails = false;
+  override async remove() {
+    if (this.deleteFails) throw new SyncError("Unavailable");
+    this.removals++;
+    this.doc = openProjectDocument(ID);
+  }
   submissions: { id: string; bytes: Uint8Array }[] = [];
   receipts = new Map<
     string,
@@ -136,6 +144,10 @@ function attach(doc: Y.Doc, server: Server, online = () => true) {
     refreshMetadata: async () => {},
   } as ProjectHandle;
   const repo = {
+    isRegistered: async () => false,
+    cloudAttempted: async () => false,
+    markCloudAttempted: async () => {},
+    markUnregistered: async () => {},
     markRegistered: async () => {
       registrations++;
     },
@@ -366,4 +378,63 @@ test("auth fencing during a delayed receipt cannot later show saved", async () =
   const reauthenticated = attach(sync.handle.doc, server);
   await reauthenticated.sync.syncNow();
   expect(reauthenticated.sync.status.status).toBe("saved");
+});
+
+test("a private project never registers, uploads, or opens a socket, including manual retry", async () => {
+  const doc = seed();
+  setSavingPreferences(doc, { local: false, cloud: false });
+  const server = new Server();
+  const { sync, provider } = attach(doc, server);
+  await sync.syncNow();
+  replaceNodeText(doc, ROOT, "Secret");
+  sync.retry();
+  await sync.syncNow();
+  expect(server.registrations).toBe(0);
+  expect(server.submissions).toHaveLength(0);
+  expect(server.removals).toBe(0);
+  expect(provider.connected).toBe(false);
+  expect(sync.status.status).toBe("disabled");
+});
+
+test("cloud opt-out fences queued edits and deletes after in-flight registration finishes", async () => {
+  const doc = seed();
+  const server = new Server();
+  const gate = deferred<void>();
+  server.registerGate = gate.promise;
+  const { sync, provider } = attach(doc, server);
+  const pending = sync.syncNow();
+  await Bun.sleep(5);
+  setSavingPreferences(doc, { local: true, cloud: false });
+  replaceNodeText(doc, ROOT, "Never upload this");
+  gate.resolve();
+  await pending;
+  await sync.syncNow();
+  expect(server.submissions).toHaveLength(0);
+  expect(server.removals).toBe(1);
+  expect(provider.connected).toBe(false);
+  expect(sync.status.status).toBe("disabled");
+});
+
+test("failed cloud deletion stays pending without uploads and can be retried, then saving re-enabled", async () => {
+  const doc = seed();
+  const server = new Server();
+  const { sync, provider } = attach(doc, server);
+  await sync.syncNow();
+  const before = server.submissions.length;
+  server.deleteFails = true;
+  setSavingPreferences(doc, { local: false, cloud: false });
+  expect(provider.destroyed).toBe(true);
+  replaceNodeText(doc, ROOT, "Private edits");
+  await sync.syncNow();
+  expect(sync.status.status).toBe("retrying");
+  expect(server.submissions).toHaveLength(before);
+  server.deleteFails = false;
+  sync.retry();
+  await sync.syncNow();
+  expect(sync.status.status).toBe("disabled");
+  expect(server.removals).toBe(1);
+  setSavingPreferences(doc, { local: false, cloud: true });
+  await sync.syncNow();
+  expect(materializeProject(server.doc).nodes[ROOT].text).toBe("Private edits");
+  expect(sync.status.status).toBe("saved");
 });

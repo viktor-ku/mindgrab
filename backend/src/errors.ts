@@ -8,6 +8,7 @@ const errors = {
     409,
     "The active account changed. Check your session before syncing.",
   ],
+  cloud_saving_disabled: [409, "Cloud saving is disabled for this project."],
   project_not_found: [404, "Project not found."],
   project_id_conflict: [409, "This project ID is unavailable."],
   unsupported_schema: [426, "This project schema version is not supported."],
