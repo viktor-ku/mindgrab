@@ -1,4 +1,4 @@
-import { IndexeddbPersistence, PREFERRED_TRIM_SIZE } from "y-indexeddb";
+import { PREFERRED_TRIM_SIZE } from "y-indexeddb";
 import * as Y from "yjs";
 import {
   createProjectDocument,
@@ -8,8 +8,15 @@ import {
   openProjectDocument,
   projectName,
   readProject,
+  savingPreferences,
+  setSavingPreferences,
 } from "./project-document";
-import type { NewNode, ProjectContent, ProjectState } from "./project-document";
+import type {
+  NewNode,
+  ProjectContent,
+  ProjectState,
+  SavingPreferences,
+} from "./project-document";
 
 import { CATALOG_VERSION, STORAGE_GENERATION } from "./offline-contract";
 
@@ -231,7 +238,12 @@ async function readStoredName(name: string, id: string, timeoutMs: number) {
     const doc = openProjectDocument(id, updates);
     const state = readProject(doc);
     doc.destroy();
-    return state.status === "ready" ? state.content.metadata.name : undefined;
+    return state.status === "ready"
+      ? {
+          name: state.content.metadata.name,
+          saving: state.content.metadata.saving,
+        }
+      : undefined;
   } catch {
     return;
   } finally {
@@ -250,6 +262,8 @@ export interface CatalogEntry {
   // A copied target cannot sync or appear in Load before registration succeeds.
   claimPending?: boolean;
   claimSource?: string;
+  saving?: SavingPreferences;
+  cloudAttempted?: boolean;
 }
 
 class Catalog {
@@ -342,9 +356,25 @@ class Catalog {
   }
 
   async remove(id: string) {
-    const store = await this.#transaction(PROJECTS, "readwrite");
-    store.delete(id);
-    await committed(store.transaction);
+    const db = await (this.#connection ?? this.#open());
+    const tx = db.transaction([PROJECTS, PREFERENCES], "readwrite");
+    const done = committed(tx);
+    tx.objectStore(PROJECTS).delete(id);
+    const preferences = tx.objectStore(PREFERENCES);
+    const cursor = preferences.openCursor();
+    cursor.onsuccess = () => {
+      const row = cursor.result;
+      if (!row) return;
+      const key = String(row.key);
+      if (
+        key.startsWith(`local/project/${id}/`) ||
+        key === pendingImportKey(id) ||
+        (key === LATEST_PROJECT && row.value === id)
+      )
+        row.delete();
+      row.continue();
+    };
+    await done;
   }
 
   close() {
@@ -354,6 +384,7 @@ class Catalog {
 }
 
 export type Durability =
+  | { status: "disabled" }
   | { status: "saved" }
   | { status: "saving" }
   | { status: "unsaved"; error: StorageError };
@@ -361,6 +392,13 @@ export type Durability =
 type RelayMessage =
   | { type: "sync"; stateVector: Uint8Array; reply?: boolean }
   | { type: "update"; update: Uint8Array };
+
+interface PersistenceConnection {
+  db: IDBDatabase;
+  _dbref: number;
+  _dbsize: number;
+  destroy(): Promise<void>;
+}
 
 // One live document per project per tab, shared by every handle opened on it.
 class ProjectSession {
@@ -372,7 +410,11 @@ class ProjectSession {
   metadata: Promise<void> = Promise.resolve();
   catalogName?: string;
   registered = false;
-  #persistence?: IndexeddbPersistence;
+  #persistence?: PersistenceConnection;
+  #local = true;
+  #changingStorage = false;
+  #storageChangeFailed = false;
+  #storageChange: Promise<void> = Promise.resolve();
   #disconnected = false;
   #channel?: BroadcastChannel;
   #pending = new Set<Promise<void>>();
@@ -397,10 +439,37 @@ class ProjectSession {
     this.doc = openProjectDocument(id);
   }
 
-  async hydrate() {
+  async hydrate(initialUpdate?: Uint8Array) {
     try {
-      await this.#connect();
+      // Inspect persisted and remote preferences before opening a writable database.
+      const db = await openDatabase(this.dbName, this.timeoutMs);
+      if (db) {
+        try {
+          if (db.objectStoreNames.contains(UPDATES)) {
+            const tx = db.transaction([UPDATES], "readonly");
+            for (const update of await request(
+              tx.objectStore(UPDATES).getAll(),
+            ))
+              Y.applyUpdate(this.doc, update, ORIGIN.persistence);
+          }
+        } finally {
+          db.close();
+        }
+      }
+      if (initialUpdate) Y.applyUpdate(this.doc, initialUpdate, ORIGIN.remote);
+      this.#local = savingPreferences(this.doc).local;
+      if (this.#local) await this.#connect();
+      this.#local = savingPreferences(this.doc).local;
+      if (!this.#local) {
+        await this.#persistence?.destroy();
+        this.#persistence = undefined;
+        if (db) await deleteDatabase(this.dbName, this.timeoutMs);
+      } else if (initialUpdate) {
+        // A remote baseline is not durable until our full-state write commits.
+        await this.#writeFull();
+      }
     } catch (error) {
+      await this.#persistence?.destroy().catch(() => {});
       this.doc.destroy();
       throw error;
     }
@@ -409,37 +478,54 @@ class ProjectSession {
     this.onChange(this);
   }
 
-  // y-indexeddb hydrates and owns the database layout; writes are tracked here
-  // because its own handler reports neither commits nor failures.
+  // Use the existing y-indexeddb layout, but read without its eager seed write.
+  // All writes go through our commit tracking, including opt-in and retries.
   async #connect() {
-    factory();
-    const persistence = new IndexeddbPersistence(this.dbName, this.doc);
-    this.doc.off("update", persistence._storeUpdate);
-    persistence._storeUpdate = () => {};
+    const db = await openDatabase(this.dbName, this.timeoutMs, (db) => {
+      db.createObjectStore(UPDATES, { autoIncrement: true });
+      db.createObjectStore("custom");
+    });
+    if (!db) throw new StorageError("open");
+    const persistence: PersistenceConnection = {
+      db,
+      _dbref: 0,
+      _dbsize: 0,
+      destroy: async () => {
+        db.close();
+      },
+    };
     this.#persistence = persistence;
     this.#disconnected = false;
-    const opened = persistence._db.then((db) => {
-      const lost = () => {
-        if (this.#persistence === persistence) this.#disconnected = true;
-      };
-      db.onversionchange = () => {
-        db.close();
-        lost();
-      };
-      db.onclose = lost;
-    });
+    const lost = () => {
+      if (this.#persistence === persistence) this.#disconnected = true;
+    };
+    db.onversionchange = () => {
+      db.close();
+      lost();
+    };
+    db.onclose = lost;
     try {
-      await withTimeout(
-        Promise.all([opened, persistence.whenSynced]),
-        this.timeoutMs,
-      );
+      const store = db.transaction([UPDATES], "readonly").objectStore(UPDATES);
+      const [updates, keys] = await Promise.all([
+        request(store.getAll()),
+        request(store.getAllKeys()),
+      ]);
+      for (const update of updates)
+        Y.applyUpdate(this.doc, update, persistence);
+      persistence._dbref = Number(keys.at(-1) ?? 0) + 1;
+      persistence._dbsize = keys.length;
     } catch (error) {
-      persistence.destroy().catch(() => {});
+      db.close();
       throw storageError(error, "open");
     }
   }
 
   #onUpdate = (update: Uint8Array, origin: unknown) => {
+    const local = savingPreferences(this.doc).local;
+    if (local !== this.#local) {
+      this.#local = local;
+      this.#changeStorage();
+    }
     if (origin !== this.#persistence) {
       if (origin !== this.#channel)
         this.#channel?.postMessage({ type: "update", update });
@@ -448,9 +534,37 @@ class ProjectSession {
     this.onChange(this);
   };
 
+  #changeStorage() {
+    clearTimeout(this.#trimTimer);
+    this.#changingStorage = true;
+    this.#storageChangeFailed = false;
+    const pending = [...this.#pending];
+    this.#storageChange = this.#storageChange
+      .catch(() => {})
+      .then(async () => {
+        await Promise.allSettled(pending);
+        await this.#persistence?.destroy();
+        this.#persistence = undefined;
+        if (this.#local) await this.#writeFull();
+        else await deleteDatabase(this.dbName, this.timeoutMs);
+      })
+      .catch((error) => {
+        this.#storageChangeFailed = true;
+        throw error;
+      })
+      .finally(() => {
+        this.#changingStorage = false;
+        // Include edits made while the first full-state transaction committed.
+        if (this.#local && !this.#storageChangeFailed)
+          this.#requestFull().catch(() => {});
+      });
+    this.#track(this.#storageChange, true);
+  }
+
   #persist(update: Uint8Array) {
-    const persistence = this.#persistence as IndexeddbPersistence;
-    if (this.#failure || this.#disconnected || !persistence.db) {
+    if (!this.#local || this.#changingStorage) return;
+    const persistence = this.#persistence as PersistenceConnection;
+    if (this.#failure || this.#disconnected || !persistence?.db) {
       this.#requestFull().catch(() => {});
       return;
     }
@@ -501,11 +615,14 @@ class ProjectSession {
   // Same-store readwrite transactions run in creation order, so everything
   // stored before this one is merged into the snapshot that replaces it.
   async #writeFull() {
+    if (!this.#local) return;
     if (this.#disconnected || !this.#persistence?.db) {
       await this.#persistence?.destroy().catch(() => {});
+      if (!this.#local) return;
       await this.#connect();
     }
-    const persistence = this.#persistence as IndexeddbPersistence;
+    if (!this.#local) return;
+    const persistence = this.#persistence as PersistenceConnection;
     const tx = (persistence.db as IDBDatabase).transaction(
       [UPDATES],
       "readwrite",
@@ -523,6 +640,7 @@ class ProjectSession {
         persistence,
         false,
       );
+      if (!this.#local) return;
       const add = store.add(Y.encodeStateAsUpdate(this.doc));
       add.onsuccess = () => {
         key = add.result as number;
@@ -575,7 +693,13 @@ class ProjectSession {
 
   durability(): Durability {
     if (this.#failure) return { status: "unsaved", error: this.#failure };
-    return { status: this.#pending.size ? "saving" : "saved" };
+    return {
+      status: this.#pending.size
+        ? "saving"
+        : this.#local
+          ? "saved"
+          : "disabled",
+    };
   }
 
   #notify() {
@@ -599,6 +723,13 @@ class ProjectSession {
   }
 
   async flush() {
+    if (this.#storageChangeFailed && !this.#changingStorage)
+      this.#changeStorage();
+    await this.#storageChange;
+    if (!this.#local) {
+      await this.settled();
+      return;
+    }
     // Yjs update events omit unresolved structs/delete sets. Preserve those
     // bytes explicitly before closing, claiming or acknowledging a baseline.
     if (
@@ -728,6 +859,7 @@ export interface NewProject {
   id?: string;
   name: string;
   root?: NewNode;
+  saving?: SavingPreferences;
 }
 
 const byName = (a: CatalogEntry, b: CatalogEntry) =>
@@ -747,6 +879,12 @@ export class ProjectRepository {
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #listeners = new Set<() => void>();
   readonly #pendingImports = new Set<string>();
+  readonly #memoryEntries = new Map<string, CatalogEntry>();
+  readonly #volatile = new Set<string>();
+  readonly #registeredCloud = new Set<string>();
+  readonly #attemptedCloud = new Set<string>();
+  readonly #memoryPreferences = new Map<string, unknown>();
+  #latest?: string;
   readonly #channel?: BroadcastChannel;
   #closed = false;
   #detached = false;
@@ -764,8 +902,9 @@ export class ProjectRepository {
   }
 
   // Seeds only an explicitly new UUID, and registers it after the seed commits.
-  async create({ id = crypto.randomUUID(), name, root }: NewProject) {
+  async create({ id = crypto.randomUUID(), name, root, saving }: NewProject) {
     const seed = createProjectDocument(id, name, root);
+    if (saving) setSavingPreferences(seed, saving);
     return this.#createFromSeed(id, seed);
   }
 
@@ -777,6 +916,25 @@ export class ProjectRepository {
   }
 
   async #createFromSeed(id: string, seed: Y.Doc, importing = false) {
+    if (!savingPreferences(seed).local) {
+      try {
+        if (this.#sessions.has(id)) throw new ProjectExistsError(id);
+        const existing = await openDatabase(
+          this.names.project(id),
+          this.#timeoutMs,
+        );
+        if (existing) {
+          existing.close();
+          throw new ProjectExistsError(id);
+        }
+        const handle = await this.#acquire(id, Y.encodeStateAsUpdate(seed));
+        await handle.refreshMetadata();
+        this.#latest = id;
+        return handle;
+      } finally {
+        seed.destroy();
+      }
+    }
     if (importing) this.#pendingImports.add(id);
     let handle: ProjectHandle | undefined;
     try {
@@ -830,8 +988,16 @@ export class ProjectRepository {
   }
 
   // Resolves after hydration. Never seeds: an empty document stays "loading".
-  async open(id: string, { remember = true } = {}) {
-    const handle = await this.#acquire(id);
+  async open(
+    id: string,
+    {
+      remember = true,
+      initialUpdate,
+    }: { remember?: boolean; initialUpdate?: Uint8Array } = {},
+  ) {
+    const handle = await this.#acquire(id, initialUpdate);
+    if (initialUpdate && savingPreferences(handle.doc).cloud)
+      Y.applyUpdate(handle.doc, initialUpdate, ORIGIN.remote);
     if (remember) await this.setLatestProject(id).catch(() => {});
     return handle;
   }
@@ -848,14 +1014,26 @@ export class ProjectRepository {
         const entry = await this.#recover(id).catch(() => undefined);
         if (entry) entries.set(id, entry);
       }
+    for (const [id, entry] of this.#memoryEntries) entries.set(id, entry);
     return [...entries.values()]
-      .filter((entry) => !stored || stored.has(entry.id))
+      .filter(
+        (entry) =>
+          this.#memoryEntries.has(entry.id) ||
+          (!this.#volatile.has(entry.id) && (!stored || stored.has(entry.id))),
+      )
       .filter((entry) => includeClaims || (!entry.claim && !entry.claimPending))
       .sort(byName);
   }
 
+  hasMemoryOnlyProjects() {
+    return [...this.#memoryEntries.values()].some(
+      (entry) => entry.saving?.cloud === false,
+    );
+  }
+
   async latestProject(): Promise<string | undefined> {
     this.#assertOpen();
+    if (this.#latest) return this.#latest;
     const id = await this.#catalog.preference(LATEST_PROJECT);
     if (typeof id !== "string" || !isNodeId(id)) return;
     const entry = await this.#catalog.get(id);
@@ -865,22 +1043,78 @@ export class ProjectRepository {
 
   setLatestProject(id: string) {
     this.#assertOpen();
+    this.#latest = id;
+    if (this.#volatile.has(id)) return Promise.resolve();
     return this.#catalog.setPreference(LATEST_PROJECT, id);
   }
 
   // Device-local values, e.g. `project/<uuid>/view`; never project content.
   preference(key: string) {
     this.#assertOpen();
+    if (this.#memoryPreferences.has(key))
+      return Promise.resolve(this.#memoryPreferences.get(key));
+    if (this.#volatile.has(key.split("/")[1]))
+      return Promise.resolve(undefined);
     return this.#catalog.preference(`local/${key}`);
   }
 
   setPreference(key: string, value: unknown) {
     this.#assertOpen();
+    this.#memoryPreferences.set(key, value);
+    if (this.#volatile.has(key.split("/")[1])) return Promise.resolve();
     return this.#catalog.setPreference(`local/${key}`, value);
+  }
+
+  async isRegistered(id: string) {
+    return (
+      this.#registeredCloud.has(id) ||
+      (await this.#catalog.get(id))?.registration === "registered"
+    );
+  }
+
+  async cloudAttempted(id: string) {
+    return (
+      this.#attemptedCloud.has(id) ||
+      this.#registeredCloud.has(id) ||
+      ((await this.#catalog.get(id))?.cloudAttempted ?? false) ||
+      (await this.isRegistered(id))
+    );
+  }
+
+  async markCloudAttempted(id: string) {
+    this.#attemptedCloud.add(id);
+    if (this.#volatile.has(id)) return;
+    await this.#catalog.update(id, (entry) =>
+      entry ? { ...entry, cloudAttempted: true } : entry,
+    );
+  }
+
+  async markUnregistered(id: string) {
+    this.#registeredCloud.delete(id);
+    this.#attemptedCloud.delete(id);
+    await this.#catalog.update(id, (entry) =>
+      entry
+        ? { ...entry, registration: "pending", cloudAttempted: false }
+        : entry,
+    );
+  }
+
+  async updateSaving(handle: ProjectHandle, preferences: SavingPreferences) {
+    this.#assertOpen();
+    setSavingPreferences(handle.doc, preferences);
+    await handle.flush();
+    await handle.refreshMetadata();
+    if (preferences.local) {
+      for (const [key, value] of this.#memoryPreferences)
+        if (key.startsWith(`project/${handle.id}/`))
+          await this.setPreference(key, value);
+    }
   }
 
   async markRegistered(id: string) {
     this.#assertOpen();
+    this.#registeredCloud.add(id);
+    if (this.#volatile.has(id)) return;
     const { written } = await this.#catalog.update(id, (entry) =>
       entry && entry.registration !== "registered"
         ? { ...entry, registration: "registered" }
@@ -997,7 +1231,10 @@ export class ProjectRepository {
       throw new Error("The project repository is closed.");
   }
 
-  async #acquire(id: string): Promise<ProjectHandle> {
+  async #acquire(
+    id: string,
+    initialUpdate?: Uint8Array,
+  ): Promise<ProjectHandle> {
     this.#assertOpen();
     let record = this.#sessions.get(id);
     if (!record) {
@@ -1009,7 +1246,7 @@ export class ProjectRepository {
       );
       const created: SessionRecord = {
         refs: 0,
-        session: session.hydrate().then(() => session),
+        session: session.hydrate(initialUpdate).then(() => session),
       };
       created.session.catch(() => {
         if (this.#sessions.get(id) === created) this.#sessions.delete(id);
@@ -1032,16 +1269,19 @@ export class ProjectRepository {
   }
 
   async #release(id: string, record: SessionRecord, session: ProjectSession) {
-    if (--record.refs > 0) return session.durability();
+    if (--record.refs > 0 || !savingPreferences(session.doc).local)
+      return session.durability();
     if (this.#sessions.get(id) === record) this.#sessions.delete(id);
     return session.close();
   }
 
   #metadataChanged(session: ProjectSession) {
+    if (!savingPreferences(session.doc).local) this.#volatile.add(session.id);
+    else this.#volatile.delete(session.id);
     if (this.#pendingImports.has(session.id)) return;
     const name = projectName(session.doc);
     if (name === undefined) return;
-    if (session.registered && name === session.catalogName) return;
+
     this.#queueRefresh(session).catch(() => {});
   }
 
@@ -1057,18 +1297,47 @@ export class ProjectRepository {
     if (session.durability().status === "unsaved") return;
     const name = projectName(session.doc);
     if (name === undefined) return;
+    const saving = savingPreferences(session.doc);
+    if (!saving.local) {
+      const previous = await this.#catalog.get(session.id);
+      if (previous?.registration === "registered")
+        this.#registeredCloud.add(session.id);
+      if (previous?.cloudAttempted) this.#attemptedCloud.add(session.id);
+      this.#memoryEntries.set(session.id, {
+        id: session.id,
+        name,
+        createdAt: previous?.createdAt ?? new Date().toISOString(),
+        registration: this.#registeredCloud.has(session.id)
+          ? "registered"
+          : "pending",
+        saving,
+      });
+      await this.#catalog.remove(session.id);
+      session.registered = false;
+      this.#announce();
+      return;
+    }
+    this.#memoryEntries.delete(session.id);
     const ready =
       session.registered || readProject(session.doc).status === "ready";
     const { entry, written } = await this.#catalog.update(
       session.id,
       (entry) => {
-        if (entry) return entry.name === name ? entry : { ...entry, name };
+        if (entry)
+          return entry.name === name &&
+            entry.saving?.local === saving.local &&
+            entry.saving?.cloud === saving.cloud
+            ? entry
+            : { ...entry, name, saving };
         if (!ready) return;
         return {
           id: session.id,
           name,
+          saving,
           createdAt: new Date().toISOString(),
-          registration: "pending",
+          registration: this.#registeredCloud.has(session.id)
+            ? "registered"
+            : "pending",
         };
       },
     );
@@ -1099,18 +1368,20 @@ export class ProjectRepository {
       (await this.#catalog.preference(pendingImportKey(id)))
     )
       return;
-    const name = await readStoredName(
+    const stored = await readStoredName(
       this.names.project(id),
       id,
       this.#timeoutMs,
     );
-    if (name === undefined) return;
+    if (stored === undefined) return;
+    const { name, saving } = stored;
     const { entry, written } = await this.#catalog.update(
       id,
       (entry) =>
         entry ?? {
           id,
           name,
+          saving,
           createdAt: new Date().toISOString(),
           registration: "pending",
         },

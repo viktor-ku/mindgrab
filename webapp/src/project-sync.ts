@@ -4,12 +4,12 @@ import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { backendEndpoint } from "./backend";
 import { CrdtApi, decodeBase64, SyncError } from "./crdt-api";
-import { ORIGIN, readProject } from "./project-document";
+import { ORIGIN, readProject, savingPreferences } from "./project-document";
 import { updateBatches } from "./update-batches";
 import type { ProjectHandle, ProjectRepository } from "./project-repository";
 
 export type CloudStatus =
-  | { status: "saving" | "saved" | "offline" }
+  | { status: "saving" | "saved" | "offline" | "disabled" | "deleting" }
   | { status: "retrying" | "auth" | "blocked"; message: string };
 
 export interface SyncProvider {
@@ -91,6 +91,9 @@ export class ProjectSync {
   readonly #abort = new AbortController();
   #provider?: SyncProvider;
   #registered = false;
+  #registrationChecked = false;
+  #deleted = false;
+  #registrationStarted = false;
   #needsBaseline = true;
   #baseline: Uint8Array = new Uint8Array([0, 0]);
   #generation = 0;
@@ -136,7 +139,11 @@ export class ProjectSync {
     return this.#options.online?.() ?? globalThis.navigator?.onLine !== false;
   }
   #alive() {
-    if (this.destroyed || this.#paused)
+    if (
+      this.destroyed ||
+      this.#paused ||
+      !savingPreferences(this.handle.doc).cloud
+    )
       throw new DOMException("Disposed", "AbortError");
   }
   #setStatus(status: CloudStatus) {
@@ -145,6 +152,22 @@ export class ProjectSync {
     this.#options.onStatus?.(status);
   }
   #onUpdate = (_bytes: Uint8Array, origin: unknown) => {
+    if (!savingPreferences(this.handle.doc).cloud) {
+      // Remove the websocket listener synchronously, before it can send this
+      // update (or subsequent private edits) to the backend.
+      this.#provider?.destroy();
+      this.#provider = undefined;
+      this.#batches = [];
+      this.#requested = true;
+      this.#schedule(0);
+      return;
+    }
+    if (this.#deleted) {
+      this.#deleted = false;
+      this.#registered = false;
+      this.#needsBaseline = true;
+      this.#baseline = new Uint8Array([0, 0]);
+    }
     if (origin === ORIGIN.remote || origin === this.#provider) return;
     this.#generation++;
     if (this.#paused) return;
@@ -157,7 +180,17 @@ export class ProjectSync {
   };
   #offline = () => {
     this.#provider?.disconnect();
-    this.#setStatus({ status: "offline" });
+    this.#setStatus(
+      !savingPreferences(this.handle.doc).cloud
+        ? this.#deleted
+          ? { status: "disabled" }
+          : {
+              status: "retrying",
+              message:
+                "Cloud deletion pending. Reconnect to delete the existing cloud copy.",
+            }
+        : { status: "offline" },
+    );
   };
   #visible = () => {
     if (globalThis.document?.visibilityState === "visible") this.#wake();
@@ -188,7 +221,7 @@ export class ProjectSync {
     if (this.destroyed || this.#paused) return;
     clearTimeout(this.#timer);
     this.#timer = undefined;
-    if (!this.#online()) {
+    if (!this.#online() && savingPreferences(this.handle.doc).cloud) {
       this.#offline();
       return;
     }
@@ -196,9 +229,25 @@ export class ProjectSync {
       this.#requested = true;
       return this.#running;
     }
-    this.#running = this.#sync()
+    // Serialize registration/deletion across controllers and browser tabs.
+    const work = globalThis.navigator?.locks
+      ? navigator.locks.request(
+          `${this.repository.names.catalog}/cloud/${this.handle.id}`,
+          { signal: this.#abort.signal },
+          () => this.#sync(),
+        )
+      : this.#sync();
+    this.#running = work
       .catch((error: unknown) => {
         if (this.destroyed || this.#paused) return;
+        if (
+          !savingPreferences(this.handle.doc).cloud &&
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          this.#schedule(0);
+          return;
+        }
         const failure =
           error instanceof SyncError
             ? error
@@ -210,9 +259,15 @@ export class ProjectSync {
           this.#setStatus({ status: failure.kind, message: failure.message });
         } else {
           this.#setStatus(
-            this.#online()
-              ? { status: "retrying", message: failure.message }
-              : { status: "offline" },
+            !savingPreferences(this.handle.doc).cloud
+              ? {
+                  status: "retrying",
+                  message:
+                    "Cloud deletion pending. Keep this tab open and reconnect to finish deleting the cloud copy.",
+                }
+              : this.#online()
+                ? { status: "retrying", message: failure.message }
+                : { status: "offline" },
           );
           this.#needsBaseline = true;
           this.#schedule(
@@ -235,8 +290,37 @@ export class ProjectSync {
   }
   async #sync() {
     const signal = this.#abort.signal;
+    if (!savingPreferences(this.handle.doc).cloud) {
+      if (
+        !this.#deleted &&
+        (this.#registrationStarted ||
+          this.#registered ||
+          (await this.repository.cloudAttempted(this.handle.id)))
+      ) {
+        this.#setStatus({ status: "deleting" });
+        await this.api.remove(this.handle.id, signal);
+        signal.throwIfAborted();
+        await this.repository.markUnregistered(this.handle.id);
+        this.#registered = false;
+        this.#registrationStarted = false;
+        this.#needsBaseline = true;
+        this.#baseline = new Uint8Array([0, 0]);
+        this.#acknowledged = -1;
+      }
+      this.#deleted = true;
+      this.#setStatus({ status: "disabled" });
+      return;
+    }
+    if (!this.#registrationChecked) {
+      this.#registered = await this.repository.isRegistered(this.handle.id);
+      this.#registrationChecked = true;
+      this.#alive();
+    }
     this.#setStatus({ status: "saving" });
     if (!this.#registered) {
+      this.#registrationStarted = true;
+      await this.repository.markCloudAttempted(this.handle.id);
+      this.#alive();
       await this.api.register(this.handle.id, signal);
       this.#alive();
       await this.handle.flush();
@@ -375,15 +459,22 @@ export async function discoverProjects(
   signal: AbortSignal,
 ) {
   const projects = await api.list(signal);
+  const knownProjects = new Map(
+    (await repository.list()).map((entry) => [entry.id, entry]),
+  );
   for (const project of projects) {
     signal.throwIfAborted();
+    const known = knownProjects.get(project.projectId);
+    if (known?.saving?.cloud === false) continue;
+    const baseline = await api.baseline(project.projectId, signal);
+    signal.throwIfAborted();
+    // Inspect cloud preferences before opening any writable local database.
     const handle = await repository.open(project.projectId, {
       remember: false,
+      initialUpdate: decodeBase64(baseline.data),
     });
     try {
-      const baseline = await api.baseline(project.projectId, signal);
       signal.throwIfAborted();
-      Y.applyUpdate(handle.doc, decodeBase64(baseline.data), ORIGIN.remote);
       await handle.flush();
       signal.throwIfAborted();
       await handle.refreshMetadata();

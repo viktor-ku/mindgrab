@@ -47,10 +47,12 @@ function monitorUpdates() {
     const report = () => {
       if (registration.waiting)
         setOfflineMessage(
-          "An update is ready. Wait for Saved locally, then close all Mindgrab tabs and reopen. Unsynced work stays in this browser.",
+          "An update is ready. Save or export your projects before closing all Mindgrab tabs to reopen. Projects with local saving off are not kept in this browser.",
         );
       else if (registration.active)
-        setOfflineMessage("Ready to reopen offline in this browser.");
+        setOfflineMessage(
+          "Ready to reopen offline in this browser. Only projects with local saving on are available offline.",
+        );
     };
     const watch = () => {
       registration.installing?.addEventListener("statechange", report);

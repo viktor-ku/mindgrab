@@ -190,6 +190,15 @@ export function createApi(services: Services) {
     },
     true,
   );
+  protectedRpc(
+    "deleteProject",
+    async (context, user) => {
+      const args = await json(context.req.raw, projectRequest);
+      await storage.remove(user.id, parseProjectId(args.projectId));
+      return Response.json({ deleted: true });
+    },
+    true,
+  );
   protectedRpc("listProjects", async (context, user) => {
     const args = await json(
       context.req.raw,

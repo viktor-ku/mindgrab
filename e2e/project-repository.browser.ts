@@ -523,3 +523,236 @@ for (const [database, store] of [
     TIMEOUT,
   );
 }
+
+describe("project saving preferences", () => {
+  test(
+    "disabling local saving deletes the database, catalog, latest and viewport in both tabs",
+    () =>
+      withContext(async (context) => {
+        const first = await tab(context);
+        const id = await first.evaluate(async () => {
+          const repo = mg.open();
+          const handle = await repo.create({
+            name: "Private project",
+            root: { text: "Secret" },
+          });
+          await repo.setPreference(`project/${handle.id}/view`, { left: 10 });
+          return handle.id;
+        });
+        const second = await tab(context);
+        await second.evaluate(async (id) => {
+          await mg.open().open(id);
+        }, id);
+        await first.evaluate(async (id) => {
+          const handle = await mg.repo.open(id);
+          await mg.repo.updateSaving(handle, { local: false, cloud: false });
+          mg.project.renameProject(handle.doc, "Still private");
+          await handle.flush();
+          await handle.refreshMetadata();
+          await mg.repo.setPreference(`project/${id}/view`, { left: 20 });
+        }, id);
+        for (const page of [first, second]) {
+          await page.waitForFunction(
+            async (id) =>
+              !(await indexedDB.databases()).some((db) =>
+                db.name?.endsWith(`/project/${id}`),
+              ),
+            id,
+          );
+          const state = await page.evaluate(async (id) => {
+            const handle = await mg.repo.open(id);
+            await handle.flush();
+            await handle.refreshMetadata();
+            const request = indexedDB.open(mg.repo.names.catalog);
+            const db = await new Promise<IDBDatabase>((resolve) => {
+              request.onsuccess = () => resolve(request.result);
+            });
+            const read = (store: string) =>
+              new Promise<unknown[]>((resolve) => {
+                const req = db.transaction(store).objectStore(store).getAll();
+                req.onsuccess = () => resolve(req.result);
+              });
+            const projects = await read("projects");
+            const preferences = await read("preferences");
+            db.close();
+            return {
+              projects,
+              preferences,
+              name: mg.project.materializeProject(handle.doc).metadata.name,
+              durability: handle.durability().status,
+            };
+          }, id);
+          expect(state).toEqual({
+            projects: [],
+            preferences: [],
+            name: "Still private",
+            durability: "disabled",
+          });
+        }
+        await first.evaluate(() => mg.repo.close());
+        await second.evaluate(() => mg.repo.close());
+        await reload(first);
+        expect(await first.evaluate(() => mg.open().list())).toEqual([]);
+      }),
+    TIMEOUT,
+  );
+
+  test(
+    "private imports never write content and explicitly enabling local saving persists the complete document",
+    () =>
+      withContext(async (context) => {
+        const page = await tab(context);
+        const result = await page.evaluate(async () => {
+          const repo = mg.open();
+          const privateProject = await repo.create({
+            name: "Private",
+            root: { text: "Secret" },
+            saving: { local: false, cloud: false },
+          });
+          const file = mg.files.parseProjectFile(
+            mg.files.exportProjectDocument(privateProject.doc),
+          );
+          const { content } = mg.files.prepareProjectImport(file);
+          const imported = await repo.importContent(content);
+          await imported.flush();
+          const databases = (await indexedDB.databases()).map((db) => db.name);
+          const before = databases.filter((name) =>
+            name?.includes("/project/"),
+          );
+          await repo.updateSaving(imported, { local: true, cloud: false });
+          mg.project.renameProject(imported.doc, "Explicitly saved");
+          await imported.flush();
+          await imported.refreshMetadata();
+          await repo.close();
+          const reopened = await mg.open().open(imported.id);
+          return {
+            before,
+            content: mg.project.materializeProject(reopened.doc),
+          };
+        });
+        expect(result.before).toEqual([]);
+        expect(result.content.metadata).toEqual({
+          name: "Explicitly saved",
+          saving: { local: true, cloud: false },
+        });
+        expect(Object.values(result.content.nodes)[0].text).toBe("Secret");
+      }),
+    TIMEOUT,
+  );
+
+  test(
+    "cloud-only hydration never creates a project database",
+    () =>
+      withContext(async (context) => {
+        const page = await tab(context);
+        const result = await page.evaluate(async () => {
+          const seed = mg.project.createProjectDocument(
+            crypto.randomUUID(),
+            "Cloud only",
+            { text: "Cloud secret" },
+          );
+          mg.project.setSavingPreferences(seed, { local: false, cloud: true });
+          const repo = mg.open();
+          const handle = await repo.open(seed.guid, {
+            remember: false,
+            initialUpdate: mg.Y.encodeStateAsUpdate(seed),
+          });
+          await handle.flush();
+          await handle.refreshMetadata();
+          await handle.close();
+          return {
+            names: (await indexedDB.databases())
+              .map((db) => db.name)
+              .filter((name) => name?.includes("/project/")),
+            projects: (await repo.list()).map((entry) => entry.name),
+          };
+        });
+        expect(result).toEqual({ names: [], projects: ["Cloud only"] });
+      }),
+    TIMEOUT,
+  );
+});
+
+test(
+  "blocked local deletion is reported, stops writes immediately, and retries after the blocker closes",
+  () =>
+    withContext(async (context) => {
+      const page = await tab(context);
+      const result = await page.evaluate(async () => {
+        const repo = mg.open({ openTimeoutMs: 100 });
+        const handle = await repo.create({
+          name: "Delete me",
+          root: { text: "Secret" },
+        });
+        const req = indexedDB.open(repo.names.project(handle.id));
+        const blocker = await new Promise<IDBDatabase>((resolve) => {
+          req.onsuccess = () => resolve(req.result);
+        });
+        blocker.onversionchange = () => {};
+        let failed = false;
+        try {
+          await repo.updateSaving(handle, { local: false, cloud: false });
+        } catch {
+          failed = true;
+        }
+        mg.project.renameProject(handle.doc, "Still in memory");
+        const status = handle.durability().status;
+        blocker.close();
+        await repo.updateSaving(handle, { local: false, cloud: false });
+        return {
+          failed,
+          status,
+          after: handle.durability().status,
+          exists: (await indexedDB.databases()).some(
+            (db) => db.name === repo.names.project(handle.id),
+          ),
+        };
+      });
+      expect(result).toEqual({
+        failed: true,
+        status: "unsaved",
+        after: "disabled",
+        exists: false,
+      });
+    }),
+  TIMEOUT,
+);
+
+test(
+  "failed local opt-in retains the memory document and retries without unhandled writes",
+  () =>
+    withContext(async (context) => {
+      const page = await tab(context);
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      const result = await page.evaluate(async () => {
+        const repo = mg.open();
+        const handle = await repo.create({
+          name: "Memory first",
+          root: { text: "Keep this" },
+          saving: { local: false, cloud: false },
+        });
+        mg.failWrites("/project/", "updates");
+        let failed = false;
+        try {
+          await repo.updateSaving(handle, { local: true, cloud: false });
+        } catch {
+          failed = true;
+        }
+        mg.clearFaults();
+        await repo.updateSaving(handle, { local: true, cloud: false });
+        await handle.close();
+        const restored = await repo.open(handle.id);
+        return {
+          failed,
+          state: restored.state(),
+          status: restored.durability().status,
+        };
+      });
+      expect(result.failed).toBe(true);
+      expect(result.state.status).toBe("ready");
+      expect(result.status).toBe("saved");
+      expect(errors).toEqual([]);
+    }),
+  TIMEOUT,
+);

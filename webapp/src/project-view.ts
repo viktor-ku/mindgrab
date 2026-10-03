@@ -2,7 +2,12 @@ import { batch, createSignal, onCleanup } from "solid-js";
 import type { Accessor, Setter } from "solid-js";
 import * as Y from "yjs";
 import type { MindMapNode } from "./mind-map";
-import { LIMITS, projectMindMap, readProject } from "./project-document";
+import {
+  LIMITS,
+  projectMindMap,
+  readProject,
+  savingPreferences,
+} from "./project-document";
 import type { ProjectState } from "./project-document";
 
 // A read-only reactive view of one project document. Writes go through the
@@ -10,6 +15,7 @@ import type { ProjectState } from "./project-document";
 export interface ProjectView {
   status: Accessor<ProjectState["status"]>;
   name: Accessor<string>;
+  saving: Accessor<import("./project-document").SavingPreferences>;
   // Hierarchy, colors, and positions. Its `text` fields refresh only with
   // structural changes, so render text through `text(id)`.
   forest: Accessor<MindMapNode[]>;
@@ -21,6 +27,7 @@ export interface ProjectView {
 // edited nodes' signals, and anything else re-projects the tree.
 export function createProjectView(doc: Y.Doc): ProjectView {
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
+  const [saving, setSaving] = createSignal(savingPreferences(doc));
   const [name, setName] = createSignal("");
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
@@ -37,6 +44,7 @@ export function createProjectView(doc: Y.Doc): ProjectView {
     ready = state.status === "ready";
     batch(() => {
       setStatus(state.status);
+      setSaving(savingPreferences(doc));
       if (state.status !== "ready") {
         setForest([]);
         return;
@@ -69,6 +77,7 @@ export function createProjectView(doc: Y.Doc): ProjectView {
   return {
     status,
     name,
+    saving,
     forest,
     text: (id) => textSignal(id)[0](),
   };

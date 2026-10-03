@@ -2,6 +2,7 @@ import { generateNKeysBetween } from "fractional-indexing";
 import { z } from "zod";
 import {
   LIMITS,
+  SavingPreferencesSchema,
   materializeProject,
   projectForest,
   SCHEMA_VERSION,
@@ -36,6 +37,7 @@ export interface ProjectFile {
   version: typeof PROJECT_FILE_VERSION;
   project: { name: string; nodes: ProjectFileNode[] };
   preferences?: {
+    saving?: import("./project-document").SavingPreferences;
     viewport?: { left: number; top: number; zoom: number };
     anchor?: { id: string; centerY: number };
   };
@@ -93,6 +95,7 @@ const PortableProjectSchema = z
     }),
     preferences: z
       .strictObject({
+        saving: SavingPreferencesSchema.optional(),
         viewport: ViewportSchema.optional(),
         anchor: AnchorSchema.optional(),
       })
@@ -152,7 +155,8 @@ export function projectFileFromContent(
   preferences?: ProjectFile["preferences"],
 ): ProjectFile {
   const anchor = preferences?.anchor;
-  const localPreferences = preferences && {
+  const localPreferences = (preferences || content.metadata.saving) && {
+    ...(content.metadata.saving && { saving: content.metadata.saving }),
     ...preferences,
     // A deleted layout anchor is only a stale local preference.
     anchor:
@@ -232,7 +236,10 @@ export function prepareProjectImport(input: ProjectFile) {
   add(file.project.nodes, null);
   const content: ProjectContent = {
     schemaVersion: SCHEMA_VERSION,
-    metadata: { name: file.project.name },
+    metadata: {
+      name: file.project.name,
+      ...(file.preferences?.saving && { saving: file.preferences.saving }),
+    },
     nodes,
   };
   const preferences = file.preferences && {

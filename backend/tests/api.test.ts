@@ -313,3 +313,45 @@ test("a deferred commit failure returns no receipt and rolls back all update sta
   );
   expect((await f.submit(credential, id, initial)).status).toBe(201);
 });
+
+test("deleting cloud storage is owner scoped, idempotent and cascades to every project table", async () => {
+  const id = await f.register(credential);
+  const user = await owner(f.db, id);
+  const data = initial;
+  await f.backend.services.storage.ingest(user, id, crypto.randomUUID(), data);
+  await f.backend.services.readModels.current(user, id);
+  await f.backend.maintenance.compact(user, id);
+  const other = await f.sessionFor("user_other");
+  expect((await f.rpc("deleteProject", { projectId: id }, other)).status).toBe(
+    200,
+  );
+  expect(
+    (await f.rpc("getProject", { projectId: id }, credential)).status,
+  ).toBe(200);
+  expect((await f.rpc("deleteProject", { projectId: id })).status).toBe(401);
+  expect(
+    (await f.rpc("deleteProject", { projectId: id }, credential)).status,
+  ).toBe(200);
+  expect(
+    (await f.rpc("deleteProject", { projectId: id }, credential)).status,
+  ).toBe(200);
+  for (const table of [
+    "crdt_update",
+    "crdt_checkpoint",
+    "crdt_receipt",
+    "crdt_node_read",
+  ])
+    expect(
+      (await f.db.unsafe(`SELECT * FROM ${table} WHERE project_id = $1`, [id]))
+        .length,
+    ).toBe(0);
+  expect((await f.db`SELECT * FROM crdt_project WHERE id = ${id}`).length).toBe(
+    0,
+  );
+  expect(
+    (await f.rpc("getProjectBaseline", { projectId: id }, credential)).status,
+  ).toBe(404);
+  await expect(
+    f.backend.services.storage.ingest(user, id, crypto.randomUUID(), data),
+  ).rejects.toMatchObject({ code: "project_not_found" });
+});
