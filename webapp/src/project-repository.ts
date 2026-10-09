@@ -1,9 +1,9 @@
-import { PREFERRED_TRIM_SIZE } from "y-indexeddb";
-import * as Y from "yjs";
+import type { ProjectDocument } from "./project-document";
+const PREFERRED_TRIM_SIZE = 10;
 import {
   createProjectDocument,
   importProjectDocument,
-  isNodeId,
+  isProjectId,
   ORIGIN,
   openProjectDocument,
   projectName,
@@ -13,7 +13,7 @@ import {
 } from "./project-document";
 import type {
   NewNode,
-  ProjectContent,
+  DocumentView,
   ProjectState,
   SavingPreferences,
 } from "./project-document";
@@ -25,7 +25,7 @@ export const ANONYMOUS_NAMESPACE = "anonymous";
 export const accountNamespace = (userId: number | string) =>
   `account-${userId}`;
 
-const UPDATES = "updates";
+const SNAPSHOTS = "snapshots";
 const PROJECTS = "projects";
 const PREFERENCES = "preferences";
 const LATEST_PROJECT = "latestProject";
@@ -45,7 +45,7 @@ export function storageNames(scope: RepositoryScope) {
   const { deployment, namespace, generation = STORAGE_GENERATION } = scope;
   if (!deployment || !namespace || !Number.isSafeInteger(generation))
     throw new Error("Invalid storage scope.");
-  const base = `mindgrab/${encodeURIComponent(deployment)}/${encodeURIComponent(namespace)}/g${generation}`;
+  const base = `mindgrab-loro/${encodeURIComponent(deployment)}/${encodeURIComponent(namespace)}/g${generation}`;
   const projectPrefix = `${base}/project/`;
   return {
     catalog: `${base}/catalog`,
@@ -132,23 +132,22 @@ function deleteDatabase(name: string, timeoutMs: number): Promise<void> {
 
 async function persistImportedSeed(
   name: string,
-  seed: Y.Doc,
+  seed: ProjectDocument,
   timeoutMs: number,
 ) {
   let created = false;
   const db = await openDatabase(name, timeoutMs, (db) => {
     created = true;
-    // The y-indexeddb database layout; hydration starts only after this commit.
-    db.createObjectStore(UPDATES, { autoIncrement: true });
-    db.createObjectStore("custom");
+    // The Loro snapshot journal; hydration starts only after this commit.
+    db.createObjectStore(SNAPSHOTS, { autoIncrement: true });
   });
   if (!db) throw new StorageError("open");
   try {
-    if (!created) throw new ProjectExistsError(seed.guid);
-    const tx = db.transaction([UPDATES], "readwrite");
+    if (!created) throw new ProjectExistsError(seed.id);
+    const tx = db.transaction([SNAPSHOTS], "readwrite");
     const done = committed(tx);
     try {
-      tx.objectStore(UPDATES).add(Y.encodeStateAsUpdate(seed));
+      tx.objectStore(SNAPSHOTS).add(seed.snapshot());
     } catch (error) {
       tx.abort();
       await done.catch(() => {});
@@ -232,16 +231,16 @@ async function readStoredName(name: string, id: string, timeoutMs: number) {
   const db = await openDatabase(name, timeoutMs);
   if (!db) return;
   try {
-    if (!db.objectStoreNames.contains(UPDATES)) return;
-    const tx = db.transaction([UPDATES], "readonly");
-    const updates = await request(tx.objectStore(UPDATES).getAll());
+    if (!db.objectStoreNames.contains(SNAPSHOTS)) return;
+    const tx = db.transaction([SNAPSHOTS], "readonly");
+    const updates = await request(tx.objectStore(SNAPSHOTS).getAll());
     const doc = openProjectDocument(id, updates);
     const state = readProject(doc);
     doc.destroy();
     return state.status === "ready"
       ? {
-          name: state.content.metadata.name,
-          saving: state.content.metadata.saving,
+          name: state.view.name,
+          saving: state.view.saving,
         }
       : undefined;
   } catch {
@@ -390,13 +389,13 @@ export type Durability =
   | { status: "unsaved"; error: StorageError };
 
 type RelayMessage =
-  | { type: "sync"; stateVector: Uint8Array; reply?: boolean }
-  | { type: "update"; update: Uint8Array };
+  | { type: "sync"; reply?: boolean }
+  | { type: "snapshot"; snapshot: Uint8Array };
 
 interface PersistenceConnection {
   db: IDBDatabase;
-  _dbref: number;
-  _dbsize: number;
+  nextSnapshotKey: number;
+  snapshotCount: number;
   destroy(): Promise<void>;
 }
 
@@ -406,7 +405,7 @@ class ProjectSession {
   readonly dbName: string;
   readonly timeoutMs: number;
   readonly onChange: (session: ProjectSession) => void;
-  readonly doc: Y.Doc;
+  readonly doc: ProjectDocument;
   metadata: Promise<void> = Promise.resolve();
   catalogName?: string;
   registered = false;
@@ -439,24 +438,24 @@ class ProjectSession {
     this.doc = openProjectDocument(id);
   }
 
-  async hydrate(initialUpdate?: Uint8Array) {
+  async hydrate(initialSnapshot?: Uint8Array) {
     try {
       // Inspect persisted and remote preferences before opening a writable database.
       const db = await openDatabase(this.dbName, this.timeoutMs);
       if (db) {
         try {
-          if (db.objectStoreNames.contains(UPDATES)) {
-            const tx = db.transaction([UPDATES], "readonly");
+          if (db.objectStoreNames.contains(SNAPSHOTS)) {
+            const tx = db.transaction([SNAPSHOTS], "readonly");
             for (const update of await request(
-              tx.objectStore(UPDATES).getAll(),
+              tx.objectStore(SNAPSHOTS).getAll(),
             ))
-              Y.applyUpdate(this.doc, update, ORIGIN.persistence);
+              this.doc.merge(update, ORIGIN.persistence);
           }
         } finally {
           db.close();
         }
       }
-      if (initialUpdate) Y.applyUpdate(this.doc, initialUpdate, ORIGIN.remote);
+      if (initialSnapshot) this.doc.merge(initialSnapshot, ORIGIN.remote);
       this.#local = savingPreferences(this.doc).local;
       if (this.#local) await this.#connect();
       this.#local = savingPreferences(this.doc).local;
@@ -464,7 +463,7 @@ class ProjectSession {
         await this.#persistence?.destroy();
         this.#persistence = undefined;
         if (db) await deleteDatabase(this.dbName, this.timeoutMs);
-      } else if (initialUpdate) {
+      } else if (initialSnapshot) {
         // A remote baseline is not durable until our full-state write commits.
         await this.#writeFull();
       }
@@ -473,23 +472,22 @@ class ProjectSession {
       this.doc.destroy();
       throw error;
     }
-    this.doc.on("update", this.#onUpdate);
+    this.doc.on("snapshot", this.#onSnapshot);
     this.#openChannel();
     this.onChange(this);
   }
 
-  // Use the existing y-indexeddb layout, but read without its eager seed write.
+  // Use the Loro snapshot journal, but read without its eager seed write.
   // All writes go through our commit tracking, including opt-in and retries.
   async #connect() {
     const db = await openDatabase(this.dbName, this.timeoutMs, (db) => {
-      db.createObjectStore(UPDATES, { autoIncrement: true });
-      db.createObjectStore("custom");
+      db.createObjectStore(SNAPSHOTS, { autoIncrement: true });
     });
     if (!db) throw new StorageError("open");
     const persistence: PersistenceConnection = {
       db,
-      _dbref: 0,
-      _dbsize: 0,
+      nextSnapshotKey: 0,
+      snapshotCount: 0,
       destroy: async () => {
         db.close();
       },
@@ -505,22 +503,23 @@ class ProjectSession {
     };
     db.onclose = lost;
     try {
-      const store = db.transaction([UPDATES], "readonly").objectStore(UPDATES);
+      const store = db
+        .transaction([SNAPSHOTS], "readonly")
+        .objectStore(SNAPSHOTS);
       const [updates, keys] = await Promise.all([
         request(store.getAll()),
         request(store.getAllKeys()),
       ]);
-      for (const update of updates)
-        Y.applyUpdate(this.doc, update, persistence);
-      persistence._dbref = Number(keys.at(-1) ?? 0) + 1;
-      persistence._dbsize = keys.length;
+      for (const update of updates) this.doc.merge(update, persistence);
+      persistence.nextSnapshotKey = Number(keys.at(-1) ?? 0) + 1;
+      persistence.snapshotCount = keys.length;
     } catch (error) {
       db.close();
       throw storageError(error, "open");
     }
   }
 
-  #onUpdate = (update: Uint8Array, origin: unknown) => {
+  #onSnapshot = (update: Uint8Array, origin: unknown) => {
     const local = savingPreferences(this.doc).local;
     if (local !== this.#local) {
       this.#local = local;
@@ -528,7 +527,7 @@ class ProjectSession {
     }
     if (origin !== this.#persistence) {
       if (origin !== this.#channel)
-        this.#channel?.postMessage({ type: "update", update });
+        this.#channel?.postMessage({ type: "snapshot", snapshot: update });
       this.#persist(update);
     }
     this.onChange(this);
@@ -569,15 +568,16 @@ class ProjectSession {
       return;
     }
     try {
-      const tx = persistence.db.transaction([UPDATES], "readwrite");
-      tx.objectStore(UPDATES).add(update);
+      const tx = persistence.db.transaction([SNAPSHOTS], "readwrite");
+      tx.objectStore(SNAPSHOTS).add(update);
       this.#track(committed(tx));
     } catch (error) {
       this.#disconnected = true;
       this.#track(Promise.reject(storageError(error, "closed")));
       return;
     }
-    if (++persistence._dbsize >= PREFERRED_TRIM_SIZE) this.#scheduleTrim();
+    if (++persistence.snapshotCount >= PREFERRED_TRIM_SIZE)
+      this.#scheduleTrim();
   }
 
   #track(write: Promise<void>, full = false) {
@@ -624,32 +624,32 @@ class ProjectSession {
     if (!this.#local) return;
     const persistence = this.#persistence as PersistenceConnection;
     const tx = (persistence.db as IDBDatabase).transaction(
-      [UPDATES],
+      [SNAPSHOTS],
       "readwrite",
     );
     const done = committed(tx);
-    const store = tx.objectStore(UPDATES);
-    let key = persistence._dbref - 1;
-    const read = store.getAll(IDBKeyRange.lowerBound(persistence._dbref));
+    const store = tx.objectStore(SNAPSHOTS);
+    let key = persistence.nextSnapshotKey - 1;
+    const read = store.getAll(
+      IDBKeyRange.lowerBound(persistence.nextSnapshotKey),
+    );
     read.onsuccess = () => {
-      Y.transact(
-        this.doc,
-        () => {
-          for (const update of read.result) Y.applyUpdate(this.doc, update);
-        },
-        persistence,
-        false,
-      );
+      try {
+        for (const update of read.result) this.doc.merge(update, persistence);
+      } catch {
+        tx.abort();
+        return;
+      }
       if (!this.#local) return;
-      const add = store.add(Y.encodeStateAsUpdate(this.doc));
+      const add = store.add(this.doc.snapshot());
       add.onsuccess = () => {
         key = add.result as number;
         store.delete(IDBKeyRange.upperBound(key, true));
       };
     };
     await done;
-    persistence._dbref = key + 1;
-    persistence._dbsize = 1;
+    persistence.nextSnapshotKey = key + 1;
+    persistence.snapshotCount = 1;
   }
 
   #scheduleTrim() {
@@ -667,28 +667,24 @@ class ProjectSession {
     const post = (message: RelayMessage) => channel.postMessage(message);
     channel.onmessage = ({ data }: MessageEvent<RelayMessage>) => {
       try {
-        if (data.type === "update")
-          Y.applyUpdate(this.doc, data.update, channel);
+        if (data.type === "snapshot") this.doc.merge(data.snapshot, channel);
         else if (data.type === "sync") {
           post({
-            type: "update",
-            update: Y.encodeStateAsUpdate(this.doc, data.stateVector),
+            type: "snapshot",
+            snapshot: this.doc.snapshot(),
           });
           if (!data.reply)
             post({
               type: "sync",
-              stateVector: Y.encodeStateVector(this.doc),
               reply: true,
             });
         }
-        if (this.doc.store.pendingStructs || this.doc.store.pendingDs)
-          this.#requestFull().catch(() => {});
       } catch {
         // A malformed message from another tab must not break this document.
       }
     };
     this.#channel = channel;
-    post({ type: "sync", stateVector: Y.encodeStateVector(this.doc) });
+    post({ type: "sync" });
   }
 
   durability(): Durability {
@@ -730,14 +726,8 @@ class ProjectSession {
       await this.settled();
       return;
     }
-    // Yjs update events omit unresolved structs/delete sets. Preserve those
-    // bytes explicitly before closing, claiming or acknowledging a baseline.
-    if (
-      this.#failure ||
-      this.doc.store.pendingStructs ||
-      this.doc.store.pendingDs
-    )
-      await this.#requestFull();
+    // Retry a full snapshot after a failed browser storage commit.
+    if (this.#failure) await this.#requestFull();
     await this.settled();
     if (this.#failure) throw this.#failure;
   }
@@ -752,7 +742,7 @@ class ProjectSession {
     await this.flush().catch(() => {});
     await this.metadata;
     clearTimeout(this.#trimTimer);
-    this.doc.off("update", this.#onUpdate);
+    this.doc.off("snapshot", this.#onSnapshot);
     this.#listeners.clear();
     const result = this.durability();
     await this.#persistence?.destroy().catch(() => {});
@@ -772,8 +762,9 @@ class ProjectSession {
 
 export interface ProjectHandle {
   readonly id: string;
+  importedIds?: ReadonlyMap<string, string>;
   // Hydrated; edit it with the project-document commands.
-  readonly doc: Y.Doc;
+  readonly doc: ProjectDocument;
   // "loading" after hydration means no content has arrived for this UUID yet.
   state(): ProjectState;
   durability(): Durability;
@@ -909,13 +900,15 @@ export class ProjectRepository {
   }
 
   // Imports complete validated content as one update under a fresh project UUID.
-  async importContent(content: ProjectContent) {
+  async importContent(content: DocumentView) {
     const id = crypto.randomUUID();
     const seed = importProjectDocument(id, content);
-    return this.#createFromSeed(id, seed, true);
+    return Object.assign(await this.#createFromSeed(id, seed, true), {
+      importedIds: seed.importedIds,
+    });
   }
 
-  async #createFromSeed(id: string, seed: Y.Doc, importing = false) {
+  async #createFromSeed(id: string, seed: ProjectDocument, importing = false) {
     if (!savingPreferences(seed).local) {
       try {
         if (this.#sessions.has(id)) throw new ProjectExistsError(id);
@@ -927,7 +920,7 @@ export class ProjectRepository {
           existing.close();
           throw new ProjectExistsError(id);
         }
-        const handle = await this.#acquire(id, Y.encodeStateAsUpdate(seed));
+        const handle = await this.#acquire(id, seed.snapshot());
         await handle.refreshMetadata();
         this.#latest = id;
         return handle;
@@ -949,10 +942,9 @@ export class ProjectRepository {
       }
       handle = await this.#acquire(id);
       if (!importing) {
-        const { store } = handle.doc;
-        if (store.clients.size || store.pendingStructs || store.pendingDs)
-          throw new ProjectExistsError(id);
-        Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(seed), ORIGIN.create);
+        if (handle.doc.ready) throw new ProjectExistsError(id);
+        handle.doc.merge(seed.snapshot(), ORIGIN.create);
+        handle.doc.clearHistory();
       }
       await handle.flush();
       await handle.refreshMetadata();
@@ -992,12 +984,12 @@ export class ProjectRepository {
     id: string,
     {
       remember = true,
-      initialUpdate,
-    }: { remember?: boolean; initialUpdate?: Uint8Array } = {},
+      initialSnapshot,
+    }: { remember?: boolean; initialSnapshot?: Uint8Array } = {},
   ) {
-    const handle = await this.#acquire(id, initialUpdate);
-    if (initialUpdate && savingPreferences(handle.doc).cloud)
-      Y.applyUpdate(handle.doc, initialUpdate, ORIGIN.remote);
+    const handle = await this.#acquire(id, initialSnapshot);
+    if (initialSnapshot && savingPreferences(handle.doc).cloud)
+      handle.doc.merge(initialSnapshot, ORIGIN.remote);
     if (remember) await this.setLatestProject(id).catch(() => {});
     return handle;
   }
@@ -1035,7 +1027,7 @@ export class ProjectRepository {
     this.#assertOpen();
     if (this.#latest) return this.#latest;
     const id = await this.#catalog.preference(LATEST_PROJECT);
-    if (typeof id !== "string" || !isNodeId(id)) return;
+    if (typeof id !== "string" || !isProjectId(id)) return;
     const entry = await this.#catalog.get(id);
     if (entry) return !entry.claim && !entry.claimPending ? id : undefined;
     return (await this.#recover(id))?.id;
@@ -1233,7 +1225,7 @@ export class ProjectRepository {
 
   async #acquire(
     id: string,
-    initialUpdate?: Uint8Array,
+    initialSnapshot?: Uint8Array,
   ): Promise<ProjectHandle> {
     this.#assertOpen();
     let record = this.#sessions.get(id);
@@ -1246,7 +1238,7 @@ export class ProjectRepository {
       );
       const created: SessionRecord = {
         refs: 0,
-        session: session.hydrate(initialUpdate).then(() => session),
+        session: session.hydrate(initialSnapshot).then(() => session),
       };
       created.session.catch(() => {
         if (this.#sessions.get(id) === created) this.#sessions.delete(id);
@@ -1357,7 +1349,7 @@ export class ProjectRepository {
       const id = name?.startsWith(projectPrefix)
         ? name.slice(projectPrefix.length)
         : "";
-      if (isNodeId(id)) ids.add(id);
+      if (isProjectId(id)) ids.add(id);
     }
     return ids;
   }

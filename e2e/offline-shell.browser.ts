@@ -7,12 +7,13 @@ import {
   setDefaultTimeout,
   test,
 } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import { build } from "vite";
+import { STORAGE_GENERATION } from "../shared/src/offline-contract";
 
 // Real HTTP + production output; no request interception and no dev harness.
 // A persistent profile also proves reopen after the browser process exits.
@@ -107,7 +108,10 @@ beforeAll(async () => {
           });
         let script = await Bun.file(join(builds[version], "sw.js")).text();
         if (incompatible)
-          script = script.replace('"storage":1', '"storage":99');
+          script = script.replace(
+            `"storage":${STORAGE_GENERATION}`,
+            '"storage":99',
+          );
         return new Response(script, {
           headers: { ...headers, "Content-Type": "text/javascript" },
         });
@@ -224,7 +228,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     "/api/startLogin",
     "/api/auth/callback",
     "/api/logout",
-    "/sync/v1/test-project",
+    "/sync/loro/test-project",
     "/checkhealth",
     "/?token=secret",
     "/unknown",
@@ -255,7 +259,13 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   expect(requests).toContain("POST /api/logout");
   const cache = await cacheKeys();
   expect(cache.names).toHaveLength(1);
-  expect(cache.urls).toHaveLength(5);
+  const assets: string[] = [];
+  for (const name of await readdir(builds[version], { recursive: true })) {
+    if (name === "sw.js" || name.endsWith(".map")) continue;
+    if ((await stat(join(builds[version], name))).isFile())
+      assets.push(`/${name}`);
+  }
+  expect(cache.urls.toSorted()).toEqual(assets.toSorted());
   expect(cache.urls).toContain("/icons.svg");
   expect(
     cache.urls.every(
@@ -433,7 +443,7 @@ test("a newer catalog version reports a recoverable upgrade and retains stored p
   expect(
     await page.evaluate(async () =>
       (await indexedDB.databases()).some(({ name }) =>
-        name?.includes("/account-1/g1/project/"),
+        name?.includes("/account-1/g2/project/"),
       ),
     ),
   ).toBe(true);

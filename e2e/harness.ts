@@ -1,14 +1,13 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
 import { queryClient } from "../webapp/src/query-client";
 import { createComponent, render } from "solid-js/web";
-import * as Y from "yjs";
+import type { ProjectDocument } from "../webapp/src/project-document";
 import { App } from "../webapp/src/App";
 import "../webapp/src/index.css";
 import {
   createChild,
   deleteSubtree,
   editNodeText,
-  materializeProject,
   openProjectDocument,
   ORIGIN,
   projectMindMap,
@@ -18,59 +17,44 @@ import type { MindMapNode } from "../webapp/src/mind-map";
 
 // Mounts the real app with a second in-process replica of its document that
 // stands in for another device. Updates flow both ways immediately.
-let local: Y.Doc;
-let remote: Y.Doc;
-const retired: Y.Doc[] = [];
-const retiredRemotes: Y.Doc[] = [];
+let local: ProjectDocument;
+let remote: ProjectDocument;
+const retired: ProjectDocument[] = [];
+const retiredRemotes: ProjectDocument[] = [];
 let localUpdates = 0;
-let textDeltas: unknown[] = [];
 
-function link(doc: Y.Doc) {
+function link(doc: ProjectDocument) {
   if (local) {
     retired.push(local);
     retiredRemotes.push(remote);
   }
   local = doc;
-  const replica = openProjectDocument(
-    doc.guid,
-    [Y.encodeStateAsUpdate(doc)],
-    ORIGIN.remote,
-  );
+  const replica = openProjectDocument(doc.id, [doc.snapshot()], ORIGIN.remote);
   remote = replica;
-  doc.on("update", (update: Uint8Array, origin: unknown) => {
+  doc.on("snapshot", (update: Uint8Array, origin: unknown) => {
     if (origin === ORIGIN.remote) return;
     localUpdates++;
-    Y.applyUpdate(replica, update, ORIGIN.remote);
+    replica.merge(update, ORIGIN.remote);
   });
-  replica.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== ORIGIN.remote) Y.applyUpdate(doc, update, ORIGIN.remote);
-  });
-  replica.getMap("project").observeDeep((events, transaction) => {
-    if (transaction.origin !== ORIGIN.remote) return;
-    for (const event of events)
-      if (event.target instanceof Y.Text) textDeltas.push(event.delta);
+  replica.on("snapshot", (update: Uint8Array, origin: unknown) => {
+    if (origin !== ORIGIN.remote && doc.ready) doc.merge(update, ORIGIN.remote);
   });
 }
 
 const flatten = (nodes: MindMapNode[]): MindMapNode[] =>
   nodes.flatMap((node) => [node, ...flatten(node.next ?? [])]);
-const nodes = (doc: Y.Doc) => flatten(projectMindMap(materializeProject(doc)));
+const nodes = (doc: ProjectDocument) => flatten(projectMindMap(doc.view()));
 
 const harness = {
-  projectId: () => local.guid,
-  content: () => materializeProject(local),
+  projectId: () => local.id,
+  content: () => local.view(),
   ids: () => nodes(remote).map((node) => node.id),
   text: (id: string) => nodes(remote).find((node) => node.id === id)?.text,
   localText: (id: string) => nodes(local).find((node) => node.id === id)?.text,
   position: (id: string) =>
     nodes(remote).find((node) => node.id === id)?.position,
-  deleted: (id: string) => materializeProject(remote).nodes[id]?.deleted,
+  deleted: (id: string) => !remote.view().nodes.some((node) => node.id === id),
   localUpdates: () => localUpdates,
-  takeTextDeltas: () => {
-    const deltas = textDeltas;
-    textDeltas = [];
-    return deltas;
-  },
   // Remote edits, as another device would make them.
   edit: (id: string, index: number, deleteCount: number, insert: string) =>
     editNodeText(remote, id, index, deleteCount, insert),
@@ -81,13 +65,10 @@ const harness = {
     translateSubtree(remote, id, new Map([[id, { x, y }]]), { x: 0, y: 0 }),
   // Previous documents and their replicas stay linked after a project switch.
   editRetired: (id: string, insert: string) =>
-    retiredRemotes.map((doc) => editNodeText(doc, id, 0, 0, insert)),
-  retiredObservers: () =>
-    retired.map(
-      (doc) =>
-        (doc.getMap("project") as unknown as { _dEH: { l: unknown[] } })._dEH.l
-          .length,
-    ),
+    retiredRemotes
+      .filter((doc) => doc.view().nodes.some((node) => node.id === id))
+      .map((doc) => editNodeText(doc, id, 0, 0, insert)),
+  retiredObservers: () => retired.map((doc) => doc.observerCount),
 };
 export type Harness = typeof harness;
 

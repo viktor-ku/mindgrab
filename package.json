@@ -3,12 +3,16 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "backend",
     "shared",
     "webapp",
     "e2e"
   ],
   "scripts": {
     "check": "mise run check"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2"
   }
 }

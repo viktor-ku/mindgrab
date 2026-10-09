@@ -1,2 +1,0 @@
-DROP TABLE IF EXISTS pnode;
-DROP TABLE IF EXISTS project;

@@ -1,47 +1,37 @@
 import { batch, createSignal, onCleanup } from "solid-js";
 import type { Accessor, Setter } from "solid-js";
-import * as Y from "yjs";
 import type { MindMapNode } from "./mind-map";
 import {
-  LIMITS,
   projectMindMap,
   readProject,
   savingPreferences,
 } from "./project-document";
-import type { ProjectState } from "./project-document";
-
-// A read-only reactive view of one project document. Writes go through the
-// document commands; the view follows every transaction, local or remote.
+import type {
+  ProjectDocument,
+  ProjectState,
+  SavingPreferences,
+} from "./project-document";
 export interface ProjectView {
   status: Accessor<ProjectState["status"]>;
   name: Accessor<string>;
-  saving: Accessor<import("./project-document").SavingPreferences>;
-  // Hierarchy, colors, and positions. Its `text` fields refresh only with
-  // structural changes, so render text through `text(id)`.
+  saving: Accessor<SavingPreferences>;
   forest: Accessor<MindMapNode[]>;
   text(id: string): string;
 }
-
-// Observes the document until the current reactive owner is disposed. Each
-// transaction updates the view once: text-only transactions update just the
-// edited nodes' signals, and anything else re-projects the tree.
-export function createProjectView(doc: Y.Doc): ProjectView {
+export function createProjectView(doc: ProjectDocument): ProjectView {
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
-  const [saving, setSaving] = createSignal(savingPreferences(doc));
   const [name, setName] = createSignal("");
+  const [saving, setSaving] = createSignal(savingPreferences(doc));
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
-  let ready = false;
-
+  let structure = "";
   function textSignal(id: string) {
     const signal = texts.get(id) ?? createSignal("");
     texts.set(id, signal);
     return signal;
   }
-
   function refresh() {
     const state = readProject(doc);
-    ready = state.status === "ready";
     batch(() => {
       setStatus(state.status);
       setSaving(savingPreferences(doc));
@@ -49,36 +39,20 @@ export function createProjectView(doc: Y.Doc): ProjectView {
         setForest([]);
         return;
       }
-      const { content } = state;
-      setName(content.metadata.name);
-      for (const [id, node] of Object.entries(content.nodes))
-        if (!node.deleted) textSignal(id)[1](node.text);
-      setForest(projectMindMap(content));
+      setName(state.view.name);
+      for (const node of state.view.nodes) textSignal(node.id)[1](node.text);
+      const next = JSON.stringify([
+        state.view.roots,
+        state.view.nodes.map(({ text, ...node }) => node),
+      ]);
+      if (next !== structure) {
+        structure = next;
+        setForest(projectMindMap(state.view));
+      }
     });
   }
-
-  const root = doc.getMap("project");
-  const observer = (events: Y.YEvent<Y.AbstractType<unknown>>[]) => {
-    const textOnly = events.every(
-      (event) =>
-        event.target instanceof Y.Text && event.target.length <= LIMITS.text,
-    );
-    if (!ready || !textOnly) return refresh();
-    batch(() => {
-      // Paths are relative to the root: ["nodes", nodeId, "text"].
-      for (const event of events)
-        texts.get(String(event.path[1]))?.[1](event.target.toString());
-    });
-  };
-  root.observeDeep(observer);
-  onCleanup(() => root.unobserveDeep(observer));
+  doc.on("snapshot", refresh);
+  onCleanup(() => doc.off("snapshot", refresh));
   refresh();
-
-  return {
-    status,
-    name,
-    saving,
-    forest,
-    text: (id) => textSignal(id)[0](),
-  };
+  return { status, name, saving, forest, text: (id) => textSignal(id)[0]() };
 }

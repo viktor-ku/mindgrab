@@ -1,5 +1,4 @@
-import * as Y from "yjs";
-import { CrdtApi, SyncError } from "./crdt-api";
+import { LoroApi, SyncError } from "./loro-api";
 import { ORIGIN, savingPreferences } from "./project-document";
 import { accountNamespace, ANONYMOUS_NAMESPACE } from "./project-repository";
 import type { ProjectRepository } from "./project-repository";
@@ -18,13 +17,13 @@ export async function claimCandidates(
 
 // The source marker commits before copying or registration. Targets remain
 // hidden from cloud/background workers until their local copy and registration
-// have committed. Every retry merges the exact Yjs bytes, including causal gaps.
+// have committed. Every retry merges the exact Loro snapshot history.
 export async function claimAnonymousProjects(
   source: ProjectRepository,
   destination: ProjectRepository,
   ownerId: number,
   signal: AbortSignal,
-  api = new CrdtApi(undefined, undefined, ownerId),
+  api = new LoroApi(undefined, undefined, ownerId),
 ) {
   if (
     source.scope.namespace !== ANONYMOUS_NAMESPACE ||
@@ -65,11 +64,7 @@ export async function claimAnonymousProjects(
           const target = await destination.open(targetId, { remember: false });
           try {
             signal.throwIfAborted();
-            Y.applyUpdate(
-              target.doc,
-              Y.encodeStateAsUpdate(original.doc),
-              ORIGIN.import,
-            );
+            target.doc.merge(original.doc.snapshot(), ORIGIN.import);
             await target.flush();
             signal.throwIfAborted();
             await target.refreshMetadata();

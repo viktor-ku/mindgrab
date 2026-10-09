@@ -1,7 +1,7 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
 import { queryClient } from "../webapp/src/query-client";
 import { render } from "solid-js/web";
-import * as Y from "yjs";
+import type { ProjectDocument } from "../webapp/src/project-document";
 import { App } from "../webapp/src/App";
 import { AuthSession, authStorageKey } from "../webapp/src/auth-session";
 import { claimAnonymousProjects } from "../webapp/src/anonymous-claims";
@@ -12,8 +12,8 @@ import {
 import * as project from "../webapp/src/project-document";
 import "../webapp/src/index.css";
 
-let current: Y.Doc;
-const retired: Y.Doc[] = [];
+let current: ProjectDocument;
+const retired: ProjectDocument[] = [];
 const channels = new Set<BroadcastChannel>();
 const Channel = window.BroadcastChannel;
 window.BroadcastChannel = class extends Channel {
@@ -32,6 +32,7 @@ window.BroadcastChannel = class extends Channel {
 const sockets = new Set<Socket>();
 class Socket {
   static OPEN = 1;
+  static CLOSING = 2;
   readonly url: string;
   readyState = 0;
   binaryType = "arraybuffer";
@@ -72,7 +73,7 @@ for (const method of ["add", "put"] as const) {
       request.addEventListener("success", () => this.transaction.abort());
     if (
       writesFail &&
-      this.name === "updates" &&
+      this.name === "snapshots" &&
       this.transaction.db.name === failedProject &&
       (args[0] as Uint8Array).byteLength > 2
     )
@@ -94,9 +95,8 @@ async function repository(namespace: string) {
 }
 const accountHarness = {
   project,
-  Y,
-  content: () => project.materializeProject(current),
-  id: () => current.guid,
+  content: () => current.view(),
+  id: () => current.id,
   channels: () => [...channels].map((channel) => channel.name),
   sockets: () => [...sockets].map((socket) => socket.url),
   failWrites(value: boolean) {
@@ -108,7 +108,7 @@ const accountHarness = {
       failedProject = storageNames({
         deployment: location.origin,
         namespace: hint.user ? `account-${hint.user.id}` : "anonymous",
-      }).project(current.guid);
+      }).project(current.id);
     }
   },
   failProjectWrites(namespace: string, id: string) {
@@ -125,12 +125,11 @@ const accountHarness = {
     authDatabaseFail = value;
   },
   editRetired(id: string) {
-    const doc = retired.find((doc) => doc.guid === id);
+    const doc = retired.find((doc) => doc.id === id);
     if (!doc) throw new Error("Missing retired document");
-    const root = Object.keys(project.materializeProject(doc).nodes)[0];
+    const root = doc.view().roots[0];
     project.replaceNodeText(doc, root, "Late old account update");
-    return (doc.getMap("project") as unknown as { _dEH: { l: unknown[] } })._dEH
-      .l.length;
+    return doc.observerCount;
   },
   async catalog(namespace: string, includeClaims = false) {
     const repo = await repository(namespace);
@@ -144,32 +143,28 @@ const accountHarness = {
     const repo = await repository(namespace);
     const handle = await repo.open(id, { remember: false });
     try {
-      return [...Y.encodeStateAsUpdate(handle.doc)];
+      return [...handle.doc.snapshot()];
     } finally {
       await handle.close();
       await repo.close();
     }
   },
-  // Direct repository fixture creates a causal gap that visible JSON cannot
-  // preserve, then exercises the same claim service the production UI uses.
-  async pendingClaim(ownerId: number) {
+  // Claims preserve the complete Loro history under the destination account.
+  async historyClaim(ownerId: number) {
     const source = await repository("anonymous");
     const destination = await repository(`account-${ownerId}`);
     const handle = await source.create({
-      name: "Causal gap",
+      name: "Loro history",
       root: { text: "Root" },
     });
     const id = handle.id;
-    const root = Object.keys(project.materializeProject(handle.doc).nodes)[0];
-    const replica = project.openProjectDocument(id, [
-      Y.encodeStateAsUpdate(handle.doc),
-    ]);
+    const root = handle.doc.view().roots[0];
+    const replica = project.openProjectDocument(id, [handle.doc.snapshot()]);
     project.editNodeText(replica, root, 0, 0, "Missing ");
-    const vector = Y.encodeStateVector(replica);
     project.editNodeText(replica, root, 3, 0, "dependent ");
-    Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(replica, vector));
+    handle.doc.merge(replica.snapshot());
     await handle.flush();
-    const before = [...Y.encodeStateAsUpdate(handle.doc)];
+    const before = [...handle.doc.snapshot()];
     const ids = await claimAnonymousProjects(
       source,
       destination,
@@ -178,14 +173,14 @@ const accountHarness = {
     );
     if (!ids.includes(id)) throw new Error("Claim did not preserve its UUID");
     const target = await destination.open(id, { remember: false });
-    const after = [...Y.encodeStateAsUpdate(target.doc)];
-    const pending = target.doc.store.pendingStructs !== null;
+    const after = [...target.doc.snapshot()];
+    const equal = target.doc.version() === handle.doc.version();
     await target.close();
     await handle.close();
     await source.close();
     await destination.close();
     replica.destroy();
-    return { before, after, pending };
+    return { before, after, equal };
   },
   async logoutElsewhere() {
     const auth = new AuthSession(location.origin);

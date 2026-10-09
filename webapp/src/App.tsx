@@ -17,7 +17,8 @@ import {
   untrack,
 } from "solid-js";
 import { createShortcut } from "@solid-primitives/keyboard";
-import * as Y from "yjs";
+import type { ProjectDocument } from "./project-document";
+import { EditHistory } from "./undo-history";
 import {
   connectionPath,
   findNode,
@@ -43,7 +44,6 @@ import {
 } from "./project-document";
 import { createProjectView } from "./project-view";
 import { bindTextarea } from "./text-binding";
-import { retainUndoHistory } from "./undo-history";
 import {
   ProjectRepository,
   accountNamespace,
@@ -67,7 +67,7 @@ import { AccountControls } from "./AccountControls";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
 import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
-import { CrdtApi, SyncError } from "./crdt-api";
+import { LoroApi, SyncError } from "./loro-api";
 import type {
   LayoutAnchor,
   MindMapNode,
@@ -87,7 +87,7 @@ const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   ]);
 
 function NodeEditor(props: {
-  doc: Y.Doc;
+  doc: ProjectDocument;
   id: string;
   onFinish: () => void;
   onSelectionChange: (selection: TextSelection) => void;
@@ -172,7 +172,7 @@ interface UndoSelection {
 }
 
 function Node(props: {
-  doc: Y.Doc;
+  doc: ProjectDocument;
   id: string;
   text: string;
   color?: NodeColor;
@@ -293,7 +293,7 @@ interface ContextMenuState {
   rootPosition?: NodePosition;
 }
 
-export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
+export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const deployment = backendDeployment();
   const queryClient = useQueryClient();
   const auth = new AuthSession(deployment, queryClient);
@@ -686,7 +686,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         owner,
         userId,
         abort.signal,
-        new CrdtApi(undefined, undefined, userId, queryClient),
+        new LoroApi(undefined, undefined, userId, queryClient),
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
       setClaimMessage(
@@ -728,34 +728,25 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     const current = doc();
     const handle = activeHandle?.doc === current ? activeHandle : undefined;
     const view = createProjectView(current);
-    const undo = new Y.UndoManager(current.getMap("project"), {
-      trackedOrigins: new Set([ORIGIN.local]),
-      // Commands are separate steps; typing groups for one focus session.
-      captureTimeout: Number.POSITIVE_INFINITY,
-    });
-    const releaseHistoryLimit = retainUndoHistory(undo);
+    const undo = new EditHistory<UndoSelection>(current);
     let selectionBefore: UndoSelection = { writing: false };
     const captureSelection = (): UndoSelection => ({
       id: selectedId(),
       writing: writing(),
       ...(editorSelection && { text: { ...editorSelection } }),
     });
-    const beforeTransaction = () => {
+    const beforeChange = () => {
       selectionBefore = captureSelection();
     };
-    current.on("beforeTransaction", beforeTransaction);
-    undo.on("stack-item-added", ({ stackItem }) => {
+    current.on("beforeChange", beforeChange);
+    undo.onRecord((entry) => {
       setHistoryRevision((n) => n + 1);
-      stackItem.meta.set("selection-before", selectionBefore);
-      queueMicrotask(() =>
-        stackItem.meta.set("selection-after", captureSelection()),
-      );
+      entry.before = selectionBefore;
+      queueMicrotask(() => (entry.after = captureSelection()));
     });
-    undo.on("stack-item-popped", ({ stackItem, type }) => {
+    undo.onRestore(({ entry, direction }) => {
       setHistoryRevision((n) => n + 1);
-      const selection = stackItem.meta.get(
-        type === "undo" ? "selection-before" : "selection-after",
-      ) as UndoSelection | undefined;
+      const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
       setSelectedId(selection.id);
       setWriting(selection.writing);
@@ -779,12 +770,10 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
         });
       }
     });
-    undo.on("stack-cleared", () => setHistoryRevision((n) => n + 1));
     untrack(() => props.onDocument?.(current));
     onCleanup(() => {
       undo.destroy();
-      releaseHistoryLimit();
-      current.off("beforeTransaction", beforeTransaction);
+      current.off("beforeChange", beforeChange);
       // Handle lifetime belongs to the workspace; failed writes stay recoverable.
       if (!handle) current.destroy();
     });
@@ -794,13 +783,13 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   const forest = () => view().forest();
 
   // Each command is its own undo step, never merged with typing around it.
-  function command<T>(action: (doc: Y.Doc) => T): T {
+  function command<T>(action: (doc: ProjectDocument) => T): T {
     const { doc, undo } = session();
-    undo.stopCapturing();
+    undo.finishGroup();
     try {
       return action(doc);
     } finally {
-      undo.stopCapturing();
+      undo.finishGroup();
     }
   }
 
@@ -1051,7 +1040,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       const state = handle.state();
       setStorageMessage(
         state.status === "ready"
-          ? `Loaded “${state.content.metadata.name}”.`
+          ? `Loaded “${state.view.name}”.`
           : "Project is still loading.",
       );
     } catch (error) {
@@ -1143,8 +1132,8 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     else {
       const owner = repository;
       const current = doc();
-      const handle = await owner.open(current.guid);
-      Y.applyUpdate(handle.doc, Y.encodeStateAsUpdate(current), ORIGIN.import);
+      const handle = await owner.open(current.id);
+      handle.doc.merge(current.snapshot(), ORIGIN.import);
       await handle.flush();
       await handle.refreshMetadata();
       await activate(handle, owner);
@@ -1265,10 +1254,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       if (owner !== repository || disposed) return;
       const handle = await owner.importContent({
         ...content,
-        metadata: {
-          ...content.metadata,
-          saving: content.metadata.saving ?? view().saving(),
-        },
+        saving: preferences?.saving ?? view().saving(),
       });
       if (owner !== repository || disposed) {
         await handle.close();
@@ -1281,13 +1267,19 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
             top: 0,
             zoom: 1,
             ...preferences.viewport,
-            ...(preferences.anchor && { anchor: preferences.anchor }),
+            ...(preferences.anchor &&
+              handle.importedIds?.get(preferences.anchor.id) && {
+                anchor: {
+                  ...preferences.anchor,
+                  id: handle.importedIds.get(preferences.anchor.id),
+                },
+              }),
           })
           .catch(() => {});
       await activate(handle, owner);
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
-      setStorageMessage(`Imported “${content.metadata.name}”.`);
+      setStorageMessage(`Imported “${content.name}”.`);
     } catch (error) {
       if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -1304,14 +1296,14 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   // Reverts this session's own changes only; remote edits are preserved.
   function undo() {
     const { undo } = session();
-    undo.stopCapturing();
+    undo.finishGroup();
     undo.undo();
     canvas.focus({ preventScroll: true });
   }
 
   function redo() {
     const { undo } = session();
-    undo.stopCapturing();
+    undo.finishGroup();
     undo.redo();
     canvas.focus({ preventScroll: true });
   }
@@ -1368,7 +1360,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
   function finishWriting() {
     if (!writing()) return;
     setWriting(false);
-    session().undo.stopCapturing();
+    session().undo.finishGroup();
     canvas.focus({ preventScroll: true });
   }
 
@@ -1378,7 +1370,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
     revealNode(id);
     if (selectedId() !== id) setColorScope("node");
     setSelectedId(id);
-    session().undo.stopCapturing();
+    session().undo.finishGroup();
     setWriting(true);
   }
 
@@ -1751,7 +1743,7 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
       event.preventDefault();
       if (textEditor) {
         const manager = session().undo;
-        manager.stopCapturing();
+        manager.finishGroup();
         if (action === "undo") manager.undo();
         else manager.redo();
       } else if (action === "undo") undo();
@@ -2024,13 +2016,6 @@ export function App(props: { onDocument?: (doc: Y.Doc) => void }) {
               </For>
             </ul>
           </div>
-        </Show>
-        <Show when={view().status() === "unsupported"}>
-          <p role="alert" class="px-2 text-xs text-stone-600">
-            This project needs a newer application version. Its local data is
-            retained. Reconnect, wait for Saved locally, then close all Mindgrab
-            tabs and reopen to update. Do not clear browser storage.
-          </p>
         </Show>
         <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
           {storageMessage()}

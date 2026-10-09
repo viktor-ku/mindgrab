@@ -36,7 +36,19 @@ afterAll(() => browser?.close());
 // Production shell caching/cold reopening is covered by offline-shell.browser.ts.
 async function newContext() {
   const context = await browser.newContext();
-  await context.route(`${ORIGIN}/**`, (route) => {
+  await context.route(`${ORIGIN}/**`, async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith(".wasm"))
+      return route.fulfill({
+        contentType: "application/wasm",
+        body: Buffer.from(
+          await Bun.file(
+            new URL(
+              "../webapp/src/generated/mindgrab-state/mindgrab_state_bg.wasm",
+              import.meta.url,
+            ),
+          ).arrayBuffer(),
+        ),
+      });
     const script = new URL(route.request().url()).pathname === "/harness.js";
     return route.fulfill({
       contentType: script ? "text/javascript" : "text/html",
@@ -86,7 +98,7 @@ describe("IndexedDB project repository", () => {
           Object.assign(globalThis, { handle });
           return {
             state: handle.state().status,
-            structs: handle.doc.store.clients.size,
+            structs: Number(handle.doc.ready),
             listed: (await repo.list()).length,
           };
         }, id);
@@ -136,7 +148,7 @@ describe("IndexedDB project repository", () => {
           const statuses: string[] = [];
           handle.onDurability(({ status }) => statuses.push(status));
           const [root] = project.projectForest(mg.content(handle));
-          mg.failWrites("/project/", "updates");
+          mg.failWrites("/project/", "snapshots");
           project.replaceNodeText(handle.doc, root.id, "Kept in memory");
           const unsaved = await mg.until(handle, "unsaved");
           project.createChild(handle.doc, root.id, { text: "Also kept" });
@@ -203,7 +215,10 @@ describe("IndexedDB project repository", () => {
           const unsaved = await mg.until(handle, "unsaved");
           return {
             reason: unsaved.status === "unsaved" && unsaved.error.reason,
-            length: mg.content(handle).nodes[root.id].text.length,
+            length: mg
+              .content(handle)
+              .nodes.find((node: { id: string }) => node.id === root.id)?.text
+              .length,
           };
         });
         expect(failed).toEqual({ reason: "quota", length: 60_000 });
@@ -220,7 +235,7 @@ describe("IndexedDB project repository", () => {
           return {
             status: handle.durability().status,
             content: mg.content(handle),
-            stateVector: [...mg.Y.encodeStateVector(handle.doc)],
+            version: [...handle.doc.native().version()],
           };
         });
         expect(confirmed.status).toBe("saved");
@@ -230,12 +245,12 @@ describe("IndexedDB project repository", () => {
           const handle = await mg.open().open(id);
           return {
             content: mg.content(handle),
-            stateVector: [...mg.Y.encodeStateVector(handle.doc)],
+            version: [...handle.doc.native().version()],
           };
         }, id);
         expect(reopened).toEqual({
           content: confirmed.content,
-          stateVector: confirmed.stateVector,
+          version: confirmed.version,
         });
       }),
     TIMEOUT,
@@ -427,16 +442,15 @@ test(
         const db = await new Promise<IDBDatabase>((resolve) => {
           const open = indexedDB.open(repo.names.project(id));
           open.onupgradeneeded = () => {
-            open.result.createObjectStore("updates", { autoIncrement: true });
-            open.result.createObjectStore("custom");
+            open.result.createObjectStore("snapshots", { autoIncrement: true });
           };
           open.onsuccess = () => resolve(open.result);
         });
-        const write = db.transaction(["updates"], "readwrite");
+        const write = db.transaction(["snapshots"], "readwrite");
         const saved = new Promise<void>((resolve) => {
           write.oncomplete = () => resolve();
         });
-        write.objectStore("updates").add(mg.Y.encodeStateAsUpdate(seed));
+        write.objectStore("snapshots").add(seed.snapshot());
         await saved;
         db.close();
         seed.destroy();
@@ -463,7 +477,7 @@ test(
 
 // Import publication has its own rollback path: cover both document and catalog COMMIT failures.
 for (const [database, store] of [
-  ["/project/", "updates"],
+  ["/project/", "snapshots"],
   ["/catalog", "projects"],
 ]) {
   test(
@@ -578,7 +592,7 @@ describe("project saving preferences", () => {
             return {
               projects,
               preferences,
-              name: mg.project.materializeProject(handle.doc).metadata.name,
+              name: handle.doc.view().name,
               durability: handle.durability().status,
             };
           }, id);
@@ -627,14 +641,12 @@ describe("project saving preferences", () => {
           const reopened = await mg.open().open(imported.id);
           return {
             before,
-            content: mg.project.materializeProject(reopened.doc),
+            content: reopened.doc.view(),
           };
         });
         expect(result.before).toEqual([]);
-        expect(result.content.metadata).toEqual({
-          name: "Explicitly saved",
-          saving: { local: true, cloud: false },
-        });
+        expect(result.content.name).toBe("Explicitly saved");
+        expect(result.content.saving).toEqual({ local: true, cloud: false });
         expect(Object.values(result.content.nodes)[0].text).toBe("Secret");
       }),
     TIMEOUT,
@@ -653,9 +665,9 @@ describe("project saving preferences", () => {
           );
           mg.project.setSavingPreferences(seed, { local: false, cloud: true });
           const repo = mg.open();
-          const handle = await repo.open(seed.guid, {
+          const handle = await repo.open(seed.id, {
             remember: false,
-            initialUpdate: mg.Y.encodeStateAsUpdate(seed),
+            initialSnapshot: seed.snapshot(),
           });
           await handle.flush();
           await handle.refreshMetadata();
@@ -732,7 +744,7 @@ test(
           root: { text: "Keep this" },
           saving: { local: false, cloud: false },
         });
-        mg.failWrites("/project/", "updates");
+        mg.failWrites("/project/", "snapshots");
         let failed = false;
         try {
           await repo.updateSaving(handle, { local: true, cloud: false });

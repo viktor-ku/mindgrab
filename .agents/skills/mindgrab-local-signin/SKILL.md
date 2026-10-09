@@ -9,14 +9,14 @@ Use this skill when an agent needs an authenticated session in the locally runni
 
 ## Requirements
 
-- The local API and webapp must be running. The webapp is expected at `http://localhost:5173` and proxies `/api`, `/auth` and `/sync` to the API at `http://localhost:3000`.
-- The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `webapp/.env` should set `VITE_BACKEND_URL=http://localhost:3000`.
+- The local API and webapp must be running. The webapp is expected at `http://localhost:5173` and proxies `/api`, `/auth` and `/sync` to the Rust API. Its port is configured in `mise.local.toml` (`PORT` and `VITE_BACKEND_URL`), defaulting to 3000.
+- The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `VITE_BACKEND_URL` must point to the Rust API port.
 - The WorkOS application must allow these local URLs:
   - Redirect URI: `http://localhost:5173/api/auth/callback`
   - Initiate login URI: `http://localhost:5173/`
   - Default sign-out URI: `http://localhost:5173/`
 - The person signing in needs an account enabled for the configured WorkOS authentication methods.
-- On local server startup, migrations run first and then the matching profile is inserted into the loopback `mindgrab` database if absent. This does not create a session; sign-in still needs the WorkOS browser flow below.
+- On local Rust server startup, the fresh Loro schema is created if absent. A successful WorkOS callback creates the local profile and session. No migrations or preseeded production profiles are required.
 
 Do not print, copy into chat, or include secret values from `.env` in tool output. To check configuration, test whether the variables are present without displaying their values. Never place provider credentials in frontend environment variables or browser JavaScript.
 
@@ -43,7 +43,7 @@ Enter the credentials only into the expected WorkOS AuthKit sign-in form reached
 ## Troubleshooting
 
 - **Preview opens but inspection times out:** Check preview status and retry. If the tab remains unavailable, open a fresh collaborative tab with `reuseExistingTab=false`, then start sign-in from the local app in that tab.
-- **Cannot connect / API unavailable:** Confirm Postgres, the Bun backend on port 3000, and Vite on port 5173 are running. Check `/checkhealth` in the local app for API and database reachability.
+- **Cannot connect / API unavailable:** Confirm Postgres, the Rust backend at the configured API port, and Vite on port 5173 are running. Check `/checkhealth` in the local app for API and database reachability.
 - **Sign-in did not complete:** Check the browser stayed on `localhost:5173`, and confirm the WorkOS redirect URI exactly matches `http://localhost:5173/api/auth/callback`. Restart by returning to the app and clicking **Sign in** again; login state is short-lived and one-use.
 - **Sign-in temporarily unavailable:** Check that the API can reach WorkOS and that Postgres is available. Retry after the underlying service recovers.
 - **WorkOS reports a redirect or client configuration error:** Check the client ID, API key presence, enabled sign-in methods, and all three local URLs in the WorkOS application settings. Do not expose credential values while diagnosing.

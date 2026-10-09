@@ -12,9 +12,8 @@ import type { Browser, BrowserContext, Page, Route } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
-import * as Y from "yjs";
+import type { ProjectDocument } from "../webapp/src/project-document";
 import type { User } from "../webapp/src/auth-session";
-import { digest } from "../webapp/src/crdt-api";
 import { openProjectDocument } from "../webapp/src/project-document";
 import type { AccountHarness } from "./accounts-harness";
 
@@ -52,7 +51,7 @@ class Backend {
   leaveCookieOnLogout = false;
   loginRequests = 0;
   logoutRequests = 0;
-  projects = new Map<string, { ownerId: number; doc: Y.Doc }>();
+  projects = new Map<string, { ownerId: number; doc: ProjectDocument }>();
   registrations: string[] = [];
   uploads: {
     projectId: string;
@@ -115,16 +114,21 @@ class Backend {
         return route.abort("failed");
       }
       return route.fulfill({
-        json: { projectId, protocolVersion: 1, schemaVersion: 1, name: null },
+        json: {
+          projectId,
+          format: "mindgrab-loro-v1",
+          schemaVersion: 1,
+          name: null,
+        },
       });
     }
     if (url.pathname === "/api/listProjects") {
       this.catalogStarted = true;
       const projects = [...this.projects]
-        .filter(([, entry]) => entry.ownerId === owner.id)
+        .filter(([, entry]) => entry.ownerId === owner.id && entry.doc.ready)
         .map(([projectId]) => ({
           projectId,
-          protocolVersion: 1,
+          format: "mindgrab-loro-v1",
           schemaVersion: 1,
           name: null,
         }));
@@ -138,43 +142,27 @@ class Backend {
       return route.fulfill({ json: { deleted: true } });
     }
     const operation = url.pathname;
-    const { projectId: id, updateId } =
-      operation === "/api/submitProjectUpdate"
+    const { projectId: id } =
+      operation === "/api/mergeProject"
         ? Object.fromEntries(url.searchParams)
         : request.postDataJSON();
     const record = this.projects.get(id);
     if (!record || record.ownerId !== owner.id)
       return error(404, "project_not_found");
-    if (operation === "/api/getProjectBaseline")
-      return route.fulfill({
-        json: {
-          schemaVersion: 1,
-          lastSequence: "1",
-          validation: "valid",
-          encoding: "yjs-v1",
-          data: base64(Y.encodeStateAsUpdate(record.doc)),
-          stateVector: base64(Y.encodeStateVector(record.doc)),
-        },
-      });
-    if (operation === "/api/getProjectStatus")
-      return route.fulfill({
-        json: { schemaVersion: 1, lastSequence: "1", validation: "valid" },
-      });
-    if (operation === "/api/submitProjectUpdate") {
+    const response = () => ({
+      projectId: id,
+      revision: "1",
+      encoding: "loro-snapshot",
+      data: base64(record.doc.snapshot()),
+      durable: true,
+    });
+    if (operation === "/api/getProjectSnapshot")
+      return route.fulfill({ json: response() });
+    if (operation === "/api/mergeProject") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
-      Y.applyUpdate(record.doc, bytes);
+      record.doc.merge(bytes);
       this.uploads.push({ projectId: id, ownerId: owner.id, expected });
-      return route.fulfill({
-        json: {
-          protocolVersion: 1,
-          projectId: id,
-          updateId,
-          sequence: "1",
-          sha256: await digest(bytes),
-          durable: true,
-          validation: "valid",
-        },
-      });
+      return route.fulfill({ json: response() });
     }
     return error(404, "not_found");
   }
@@ -277,7 +265,7 @@ async function cloudSaved() {
   await page.getByText("Saved to cloud", { exact: true }).waitFor();
 }
 
-test("lost registration and repeated/concurrent claims reuse one target and retain pending Yjs bytes", async () => {
+test("lost registration and repeated/concurrent claims reuse one target and retain Loro history", async () => {
   await rename("Interrupted anonymous claim");
   const id = await call("id");
   await login();
@@ -314,8 +302,8 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
     (await call("catalog", "anonymous", true)).find((entry) => entry.id === id)
       ?.claim?.phase,
   ).toBe("complete");
-  const pending = await call("pendingClaim", A.id);
-  expect(pending.pending).toBe(true);
+  const pending = await call("historyClaim", A.id);
+  expect(pending.equal).toBe(true);
   expect(pending.after).toEqual(pending.before);
 });
 

@@ -12,13 +12,22 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       proxy: {
         "/api": {
-          target: env.VITE_BACKEND_URL || "http://localhost:3000",
+          target:
+            process.env.VITE_BACKEND_URL ||
+            env.VITE_BACKEND_URL ||
+            "http://localhost:3000",
         },
         "/auth": {
-          target: env.VITE_BACKEND_URL || "http://localhost:3000",
+          target:
+            process.env.VITE_BACKEND_URL ||
+            env.VITE_BACKEND_URL ||
+            "http://localhost:3000",
         },
         "/sync": {
-          target: env.VITE_BACKEND_URL || "http://localhost:3000",
+          target:
+            process.env.VITE_BACKEND_URL ||
+            env.VITE_BACKEND_URL ||
+            "http://localhost:3000",
           ws: true,
         },
       },

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { onlineManager } from "@tanstack/solid-query";
-import { CrdtApi, SyncError } from "../src/crdt-api";
+import { LoroApi, SyncError } from "../src/loro-api";
 import { createQueryClient, executeMutation } from "../src/query-client";
 
 const clients: ReturnType<typeof createQueryClient>[] = [];
@@ -15,12 +15,14 @@ afterEach(() => {
 });
 const endpoint = (path: string) => `https://query.test${path}`;
 const id = "10000000-0000-4000-8000-000000000000";
-const status = (lastSequence: string) =>
+const status = (revision: string) =>
   new Response(
     JSON.stringify({
-      schemaVersion: 1,
-      lastSequence,
-      validation: "valid",
+      projectId: id,
+      revision,
+      encoding: "loro-snapshot",
+      data: "",
+      durable: true,
     }),
   );
 function deferred<T>() {
@@ -61,7 +63,7 @@ test("local reads and writes finish offline; failed writes are never replayed au
 test("cloud reads deduplicate within a lifetime and fetch fresh state on the next read", async () => {
   const response = deferred<Response>();
   let requests = 0;
-  const api = new CrdtApi(
+  const api = new LoroApi(
     endpoint,
     async () => {
       requests++;
@@ -71,13 +73,13 @@ test("cloud reads deduplicate within a lifetime and fetch fresh state on the nex
     client(),
   );
   const signal = new AbortController().signal;
-  const first = api.status(id, signal);
-  const second = api.status(id, signal);
+  const first = api.snapshot(id, signal);
+  const second = api.snapshot(id, signal);
   expect(requests).toBe(1);
   response.resolve(status("1"));
-  expect((await first).lastSequence).toBe("1");
-  expect((await second).lastSequence).toBe("1");
-  expect((await api.status(id, signal)).lastSequence).toBe("2");
+  expect((await first).revision).toBe("1");
+  expect((await second).revision).toBe("1");
+  expect((await api.snapshot(id, signal)).revision).toBe("2");
   expect(requests).toBe(2);
 });
 
@@ -87,7 +89,7 @@ test("a canceled lifetime cannot populate its replacement with a late response",
   let requests = 0;
   let requestSignal: AbortSignal | undefined;
   const queries = client();
-  const api = new CrdtApi(
+  const api = new LoroApi(
     endpoint,
     async (_url, init) => {
       requests++;
@@ -101,7 +103,7 @@ test("a canceled lifetime cannot populate its replacement with a late response",
     queries,
   );
   const old = new AbortController();
-  const pending = api.status(id, old.signal);
+  const pending = api.snapshot(id, old.signal);
   const rejection = pending.then(
     () => undefined,
     (error: unknown) => error,
@@ -110,9 +112,9 @@ test("a canceled lifetime cannot populate its replacement with a late response",
   old.abort();
   expect(await rejection).toBeInstanceOf(Error);
   expect(requestSignal?.aborted).toBe(true);
-  expect(
-    (await api.status(id, new AbortController().signal)).lastSequence,
-  ).toBe("2");
+  expect((await api.snapshot(id, new AbortController().signal)).revision).toBe(
+    "2",
+  );
   response.resolve(status("1"));
   await Promise.resolve();
   expect(
@@ -121,8 +123,8 @@ test("a canceled lifetime cannot populate its replacement with a late response",
       .findAll()
       .some(
         (query) =>
-          (query.state.data as { lastSequence?: string } | undefined)
-            ?.lastSequence === "1",
+          (query.state.data as { revision?: string } | undefined)?.revision ===
+          "1",
       ),
   ).toBe(false);
 });
@@ -137,18 +139,18 @@ test("shared query clients keep accounts separate and enforce ownership headers"
   };
   const signal = new AbortController().signal;
   const [a, b] = await Promise.all([
-    new CrdtApi(endpoint, fetcher, 1, queries).status(id, signal),
-    new CrdtApi(endpoint, fetcher, 2, queries).status(id, signal),
+    new LoroApi(endpoint, fetcher, 1, queries).snapshot(id, signal),
+    new LoroApi(endpoint, fetcher, 2, queries).snapshot(id, signal),
   ]);
-  expect(a.lastSequence).toBe("1");
-  expect(b.lastSequence).toBe("2");
+  expect(a.revision).toBe("1");
+  expect(b.revision).toBe("2");
   expect(owners).toEqual(["1", "2"]);
 });
 
 test("cloud registration is a mutation with explicit retries and the original UUID", async () => {
   const queries = client();
   const ids: string[] = [];
-  const api = new CrdtApi(
+  const api = new LoroApi(
     endpoint,
     async (_url, init) => {
       ids.push(JSON.parse(String(init?.body)).projectId);
@@ -157,7 +159,7 @@ test("cloud registration is a mutation with explicit retries and the original UU
         : new Response(
             JSON.stringify({
               projectId: id,
-              protocolVersion: 1,
+              format: "mindgrab-loro-v1",
               schemaVersion: 1,
               name: null,
             }),

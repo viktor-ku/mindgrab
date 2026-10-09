@@ -12,7 +12,7 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "lint:ts": "tsc -b && tsc -p tsconfig.interop.json",
+    "lint:ts": "tsc -b",
     "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts",
     "test:offline": "bun --bun run --cwd ../e2e test:offline"
   },
@@ -20,14 +20,9 @@
     "@solid-primitives/keyboard": "1.3.1",
     "@tanstack/solid-query": "5.104.1",
     "@tanstack/solid-router": "=1.170.36",
-    "fractional-indexing": "4.0.0",
-    "lib0": "0.2.119",
     "solid-js": "=1.9.15",
-    "y-indexeddb": "9.0.12",
-    "y-websocket": "3.1.0",
-    "yjs": "13.6.33",
     "zod": "^4",
-    "@mindgrab/document": "workspace:*"
+    "@mindgrab/ui": "workspace:*"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",

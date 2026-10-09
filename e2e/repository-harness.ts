@@ -1,5 +1,4 @@
 // Browser-side helpers for project-repository.test.ts; bundled per test run.
-import * as Y from "yjs";
 import * as project from "../webapp/src/project-document";
 import * as storage from "../webapp/src/project-repository";
 import * as files from "../webapp/src/project-import-export";
@@ -42,7 +41,7 @@ globalThis.BroadcastChannel = class extends Channel {
 };
 
 // Aborts matching write transactions after their requests succeed, which is
-// exactly the case y-indexeddb reports as stored. The listener is added late so
+// a request succeeding before its transaction aborts. The listener is added late so
 // the code under test sees success first, as it would before a failed commit.
 const faults: { database: string; store: string }[] = [];
 for (const method of ["add", "put"] as const) {
@@ -68,7 +67,6 @@ for (const method of ["add", "put"] as const) {
 }
 
 const harness = {
-  Y,
   project,
   storage,
   files,
@@ -89,16 +87,9 @@ const harness = {
   },
   connections: () => Object.fromEntries(connections),
   channels: () => [...channels].map((channel) => channel.name).sort(),
-  observers: (doc: Y.Doc) =>
-    Object.fromEntries(
-      [...doc._observers].map(([name, set]) => [name, set.size]),
-    ),
-  content: (handle: storage.ProjectHandle) =>
-    project.materializeProject(handle.doc),
-  liveNodes: (handle: storage.ProjectHandle) =>
-    Object.values(project.materializeProject(handle.doc).nodes).filter(
-      (node) => !node.deleted,
-    ).length,
+  observers: (doc: project.ProjectDocument) => ({ update: doc.observerCount }),
+  content: (handle: storage.ProjectHandle) => handle.doc.view(),
+  liveNodes: (handle: storage.ProjectHandle) => handle.doc.view().nodes.length,
   until(handle: storage.ProjectHandle, status: storage.Durability["status"]) {
     return new Promise<storage.Durability>((resolve) => {
       if (handle.durability().status === status)

@@ -21,6 +21,6 @@
     }
   },
   "files": {
-    "includes": ["**", "!public", "!tests/fixtures/yjs"]
+    "includes": ["**", "!public", "!src/generated"]
   }
 }

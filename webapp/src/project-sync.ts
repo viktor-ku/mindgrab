@@ -1,17 +1,18 @@
 import { QueryObserver } from "@tanstack/solid-query";
 import type { QueryClient } from "@tanstack/solid-query";
-import { WebsocketProvider } from "y-websocket";
-import * as Y from "yjs";
 import { backendEndpoint } from "./backend";
-import { CrdtApi, decodeBase64, SyncError } from "./crdt-api";
-import { ORIGIN, readProject, savingPreferences } from "./project-document";
-import { updateBatches } from "./update-batches";
+import { LoroApi, decodeBase64, SyncError } from "./loro-api";
+import {
+  ORIGIN,
+  openProjectDocument,
+  savingPreferences,
+} from "./project-document";
+import type { ProjectDocument } from "./project-document";
 import type { ProjectHandle, ProjectRepository } from "./project-repository";
 
 export type CloudStatus =
   | { status: "saving" | "saved" | "offline" | "disabled" | "deleting" }
   | { status: "retrying" | "auth" | "blocked"; message: string };
-
 export interface SyncProvider {
   connect(): void;
   disconnect(): void;
@@ -22,71 +23,72 @@ export interface SyncProvider {
     listener: (event: CloseEvent | null) => void,
   ): void;
 }
-
+// Sockets carry commit notifications only. Every document merge goes through
+// the authenticated, transactional HTTP API and the same shared Rust core.
 export function websocketProvider(
   id: string,
-  doc: Y.Doc,
+  _doc: ProjectDocument,
   ownerId?: number,
 ): SyncProvider {
-  const url = new URL(backendEndpoint("/sync/v1"));
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  const provider = new WebsocketProvider(url.href, id, doc, {
-    connect: false,
-    // The repository relay is scoped by deployment/account/UUID, even offline.
-    // y-websocket's URL-only BroadcastChannel would cross account namespaces.
-    disableBc: true,
-    maxBackoffTime: 30_000,
-    shouldReconnect: () => false,
-    params: ownerId ? { ownerId: String(ownerId) } : {},
-  });
-  provider.awareness.setLocalState(null);
-  return provider;
+  let socket: WebSocket | undefined;
+  let destroyed = false;
+  const listeners = new Map<string, (event: never) => void>();
+  return {
+    connect() {
+      if (destroyed || (socket && socket.readyState < WebSocket.CLOSING))
+        return;
+      const url = new URL(backendEndpoint(`/sync/loro/${id}`));
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("ownerId", String(ownerId));
+      const current = new WebSocket(url);
+      socket = current;
+      current.onmessage = () => {
+        if (socket === current) listeners.get("sync")?.(true as never);
+      };
+      current.onclose = (event) => {
+        if (socket === current) {
+          socket = undefined;
+          listeners.get("connection-close")?.(event as never);
+        }
+      };
+    },
+    disconnect() {
+      const current = socket;
+      socket = undefined;
+      current?.close();
+    },
+    destroy() {
+      destroyed = true;
+      this.disconnect();
+      listeners.clear();
+    },
+    on(name: string, listener: (event: never) => void) {
+      listeners.set(name, listener);
+    },
+  };
 }
-
-// Vectors omit deletes. Compare deletion intervals with the committed baseline.
-export function missingUpdate(doc: Y.Doc, committed: Uint8Array) {
-  const update = Y.encodeStateAsUpdate(
-    doc,
-    Y.encodeStateVectorFromUpdate(committed),
-  );
-  const candidate = Y.decodeUpdate(update);
-  if (candidate.structs.some((struct) => !(struct instanceof Y.Skip)))
-    return update;
-  const known = Y.decodeUpdate(committed).ds.clients;
-  for (const [client, ranges] of candidate.ds.clients) {
-    const covered = known.get(client) ?? [];
-    for (const range of ranges) {
-      let clock = range.clock;
-      for (const interval of covered) {
-        if (interval.clock > clock) break;
-        clock = Math.max(clock, interval.clock + interval.len);
-        if (clock >= range.clock + range.len) break;
-      }
-      if (clock < range.clock + range.len) return update;
-    }
+export function pendingSnapshot(doc: ProjectDocument, committed: Uint8Array) {
+  if (!doc.ready) return undefined;
+  if (!committed.length) return doc.snapshot();
+  const remote = openProjectDocument(doc.id, [committed]);
+  try {
+    return remote.version() === doc.version() ? undefined : doc.snapshot();
+  } finally {
+    remote.destroy();
   }
-  return undefined;
 }
-
 export interface SyncOptions {
-  api?: CrdtApi;
-  provider?: (id: string, doc: Y.Doc) => SyncProvider;
+  api?: LoroApi;
+  provider?: (id: string, doc: ProjectDocument) => SyncProvider;
   online?: () => boolean;
   debounceMs?: number;
   retryMs?: number;
   onStatus?: (status: CloudStatus) => void;
 }
-interface Batch {
-  id: string;
-  bytes: Uint8Array;
-  generation: number;
-}
-
-// One hydrated document and one account/project lifetime per controller.
 export class ProjectSync {
   readonly handle: ProjectHandle;
   readonly repository: ProjectRepository;
-  readonly api: CrdtApi;
+  readonly api: LoroApi;
   readonly #options: SyncOptions;
   readonly #abort = new AbortController();
   #provider?: SyncProvider;
@@ -94,20 +96,16 @@ export class ProjectSync {
   #registrationChecked = false;
   #deleted = false;
   #registrationStarted = false;
-  #needsBaseline = true;
-  #baseline: Uint8Array = new Uint8Array([0, 0]);
+  #snapshot = new Uint8Array();
   #generation = 0;
-  #acknowledged = -1;
-  #batches: Batch[] = [];
+  #pending?: { bytes: Uint8Array; generation: number };
   #running?: Promise<void>;
   #requested = false;
   #timer?: ReturnType<typeof setTimeout>;
   #attempt = 0;
-  #connectionAttempt = 0;
   #paused = false;
   #authPaused = false;
   #status: CloudStatus = { status: "saving" };
-
   constructor(
     handle: ProjectHandle,
     repository: ProjectRepository,
@@ -115,15 +113,15 @@ export class ProjectSync {
   ) {
     this.handle = handle;
     this.repository = repository;
+    this.#options = options;
     this.api =
       options.api ??
-      new CrdtApi(
+      new LoroApi(
         undefined,
         undefined,
         Number(repository.scope.namespace.replace("account-", "")),
       );
-    this.#options = options;
-    handle.doc.on("update", this.#onUpdate);
+    handle.doc.on("snapshot", this.#onSnapshot);
     globalThis.window?.addEventListener("online", this.#wake);
     globalThis.window?.addEventListener("offline", this.#offline);
     globalThis.document?.addEventListener("visibilitychange", this.#visible);
@@ -147,17 +145,16 @@ export class ProjectSync {
       throw new DOMException("Disposed", "AbortError");
   }
   #setStatus(status: CloudStatus) {
-    if (this.destroyed) return;
-    this.#status = status;
-    this.#options.onStatus?.(status);
+    if (!this.destroyed) {
+      this.#status = status;
+      this.#options.onStatus?.(status);
+    }
   }
-  #onUpdate = (_bytes: Uint8Array, origin: unknown) => {
+  #onSnapshot = (_bytes: Uint8Array, origin: unknown) => {
     if (!savingPreferences(this.handle.doc).cloud) {
-      // Remove the websocket listener synchronously, before it can send this
-      // update (or subsequent private edits) to the backend.
       this.#provider?.destroy();
       this.#provider = undefined;
-      this.#batches = [];
+      this.#pending = undefined;
       this.#requested = true;
       this.#schedule(0);
       return;
@@ -165,31 +162,28 @@ export class ProjectSync {
     if (this.#deleted) {
       this.#deleted = false;
       this.#registered = false;
-      this.#needsBaseline = true;
-      this.#baseline = new Uint8Array([0, 0]);
+      this.#snapshot = new Uint8Array();
     }
     if (origin === ORIGIN.remote || origin === this.#provider) return;
     this.#generation++;
-    if (this.#paused) return;
-    this.#setStatus({ status: this.#online() ? "saving" : "offline" });
-    this.#schedule(this.#options.debounceMs ?? 250);
+    if (!this.#paused) {
+      this.#setStatus({ status: this.#online() ? "saving" : "offline" });
+      this.#schedule(this.#options.debounceMs ?? 250);
+    }
   };
-  #wake = () => {
-    this.#needsBaseline = true;
-    this.retry();
-  };
+  #wake = () => this.retry();
   #offline = () => {
     this.#provider?.disconnect();
     this.#setStatus(
-      !savingPreferences(this.handle.doc).cloud
-        ? this.#deleted
+      savingPreferences(this.handle.doc).cloud
+        ? { status: "offline" }
+        : this.#deleted
           ? { status: "disabled" }
           : {
               status: "retrying",
               message:
                 "Cloud deletion pending. Reconnect to delete the existing cloud copy.",
-            }
-        : { status: "offline" },
+            },
     );
   };
   #visible = () => {
@@ -203,8 +197,7 @@ export class ProjectSync {
     this.#setStatus({ status: "auth", message });
   }
   retry() {
-    if (this.destroyed) return;
-    if (this.#authPaused) return;
+    if (this.destroyed || this.#authPaused) return;
     this.#paused = false;
     this.#attempt = 0;
     this.#schedule(0);
@@ -220,8 +213,7 @@ export class ProjectSync {
   async syncNow(): Promise<void> {
     if (this.destroyed || this.#paused) return;
     clearTimeout(this.#timer);
-    this.#timer = undefined;
-    if (!this.#online() && savingPreferences(this.handle.doc).cloud) {
+    if (!this.#online()) {
       this.#offline();
       return;
     }
@@ -229,7 +221,6 @@ export class ProjectSync {
       this.#requested = true;
       return this.#running;
     }
-    // Serialize registration/deletion across controllers and browser tabs.
     const work = globalThis.navigator?.locks
       ? navigator.locks.request(
           `${this.repository.names.catalog}/cloud/${this.handle.id}`,
@@ -258,21 +249,15 @@ export class ProjectSync {
           this.#provider?.disconnect();
           this.#setStatus({ status: failure.kind, message: failure.message });
         } else {
-          this.#setStatus(
-            !savingPreferences(this.handle.doc).cloud
-              ? {
-                  status: "retrying",
-                  message:
-                    "Cloud deletion pending. Keep this tab open and reconnect to finish deleting the cloud copy.",
-                }
-              : this.#online()
-                ? { status: "retrying", message: failure.message }
-                : { status: "offline" },
-          );
-          this.#needsBaseline = true;
+          this.#setStatus({
+            status: "retrying",
+            message: !savingPreferences(this.handle.doc).cloud
+              ? "Cloud deletion pending. Reconnect to finish deleting the cloud copy."
+              : failure.message,
+          });
           this.#schedule(
             Math.min(
-              30_000,
+              30000,
               (this.#options.retryMs ?? 1000) *
                 2 ** Math.min(this.#attempt++, 5),
             ),
@@ -303,9 +288,7 @@ export class ProjectSync {
         await this.repository.markUnregistered(this.handle.id);
         this.#registered = false;
         this.#registrationStarted = false;
-        this.#needsBaseline = true;
-        this.#baseline = new Uint8Array([0, 0]);
-        this.#acknowledged = -1;
+        this.#snapshot = new Uint8Array();
       }
       this.#deleted = true;
       this.#setStatus({ status: "disabled" });
@@ -323,128 +306,74 @@ export class ProjectSync {
       this.#alive();
       await this.api.register(this.handle.id, signal);
       this.#alive();
-      await this.handle.flush();
-      this.#alive();
-      await this.handle.refreshMetadata();
-      this.#alive();
       await this.repository.markRegistered(this.handle.id);
       this.#alive();
       this.#registered = true;
     }
-    if (this.#needsBaseline) {
-      const baseline = await this.api.baseline(this.handle.id, signal);
+    const snapshot = await this.api.snapshot(this.handle.id, signal);
+    this.#alive();
+    this.#snapshot = decodeBase64(snapshot.data);
+    this.handle.doc.merge(this.#snapshot, ORIGIN.remote);
+    await this.handle.flush();
+    this.#alive();
+    await this.handle.refreshMetadata();
+    this.#alive();
+    if (!this.#pending) {
+      const bytes = pendingSnapshot(this.handle.doc, this.#snapshot);
+      if (bytes) this.#pending = { bytes, generation: this.#generation };
+    }
+    if (this.#pending) {
+      const pending = this.#pending;
+      const receipt = await this.api.merge(
+        this.handle.id,
+        pending.bytes,
+        signal,
+      );
       this.#alive();
-      const bytes = decodeBase64(baseline.data);
-      Y.applyUpdate(this.handle.doc, bytes, ORIGIN.remote);
+      const bytes = decodeBase64(receipt.data);
+      this.handle.doc.merge(bytes, ORIGIN.remote);
+      this.#snapshot = bytes;
+      this.#pending = undefined;
       await this.handle.flush();
       this.#alive();
       await this.handle.refreshMetadata();
       this.#alive();
-      await this.repository.markRegistered(this.handle.id);
-      this.#alive();
-      this.#baseline = bytes;
-      this.#needsBaseline = false;
-    }
-    const state = readProject(this.handle.doc);
-    if (state.status === "invalid" || state.status === "unsupported")
-      throw new SyncError(
-        "This project needs a compatible app or recovery before cloud saving.",
-        "blocked",
-      );
-    if (!this.#batches.length) {
-      const bytes = missingUpdate(this.handle.doc, this.#baseline);
-      if (bytes) {
-        const generation = this.#generation;
-        this.#batches = updateBatches(bytes).map((bytes) => ({
-          id: crypto.randomUUID(),
-          bytes,
-          generation,
-        }));
-      } else this.#acknowledged = this.#generation;
-    }
-    if (this.#batches.length) {
-      await this.handle.flush();
-      this.#alive();
-      while (this.#batches.length) {
-        const batch = this.#batches[0];
-        const receipt = await this.api.submit(
-          this.handle.id,
-          batch.id,
-          batch.bytes,
-          signal,
-        );
-        this.#alive();
-        if (receipt.validation === "quarantined")
-          throw new SyncError(
-            "Cloud content needs recovery. Your local work is retained.",
-            "blocked",
-          );
-        this.#baseline = Y.mergeUpdates([this.#baseline, batch.bytes]);
-        this.#batches.shift();
-        if (!this.#batches.length) this.#acknowledged = batch.generation;
-      }
     }
     if (!this.#provider) {
       const provider = this.#options.provider
         ? this.#options.provider(this.handle.id, this.handle.doc)
         : websocketProvider(this.handle.id, this.handle.doc, this.api.ownerId);
       this.#provider = provider;
-      provider.on("sync", (synced) => {
-        // Socket sync is a wakeup, never a durability acknowledgement.
-        if (synced && !this.destroyed) {
-          this.#connectionAttempt = 0;
-          this.#schedule(0);
-        }
+      provider.on("sync", () => {
+        if (!this.destroyed) this.#schedule(0);
       });
       provider.on("connection-close", (event) => {
         if (this.destroyed || this.#paused || !event) return;
-        this.#needsBaseline = true;
-        if (event.code === 1008 || event.code === 1009) {
+        if (event.code === 1008) {
           this.#paused = true;
           this.#authPaused = event.reason === "Sign in again";
-          this.#setStatus(
-            event.reason === "Sign in again"
-              ? {
-                  status: "auth",
-                  message: "Sign in again to resume cloud saving.",
-                }
-              : {
-                  status: "blocked",
-                  message:
-                    "Cloud sync needs attention. Your local work is retained.",
-                },
+          this.#setStatus({
+            status: this.#authPaused ? "auth" : "blocked",
+            message: event.reason,
+          });
+        } else
+          this.#schedule(
+            Math.min(30000, 1000 * 2 ** Math.min(this.#attempt++, 5)),
           );
-          return;
-        }
-        this.#schedule(
-          Math.min(30_000, 1000 * 2 ** Math.min(this.#connectionAttempt++, 5)),
-        );
       });
     }
     this.#provider.connect();
-    const status = await this.api.status(this.handle.id, signal);
-    this.#alive();
-    if (status.validation === "quarantined")
-      throw new SyncError(
-        "Cloud content needs recovery. Your local work is retained.",
-        "blocked",
-      );
-    if (status.validation !== "valid") {
-      this.#needsBaseline = true;
-      throw new SyncError("Waiting for complete cloud content. Retrying…");
-    }
     this.#attempt = 0;
-    if (this.#generation !== this.#acknowledged) {
+    if (pendingSnapshot(this.handle.doc, this.#snapshot)) {
       this.#setStatus({ status: "saving" });
       this.#schedule(this.#options.debounceMs ?? 250);
     } else this.#setStatus({ status: "saved" });
   }
-  // Fence immediately, before any asynchronous handle/repository cleanup.
   destroy() {
     if (this.destroyed) return;
     this.#abort.abort();
     clearTimeout(this.#timer);
-    this.handle.doc.off("update", this.#onUpdate);
+    this.handle.doc.off("snapshot", this.#onSnapshot);
     this.#provider?.destroy();
     globalThis.window?.removeEventListener("online", this.#wake);
     globalThis.window?.removeEventListener("offline", this.#offline);
@@ -452,10 +381,10 @@ export class ProjectSync {
   }
 }
 
-// Merge discovery into local content. Empty UUIDs never receive a default root.
+// Merge discovery into local content. Uninitialized projects never receive a default root.
 export async function discoverProjects(
   repository: ProjectRepository,
-  api: CrdtApi,
+  api: LoroApi,
   signal: AbortSignal,
 ) {
   const projects = await api.list(signal);
@@ -466,12 +395,12 @@ export async function discoverProjects(
     signal.throwIfAborted();
     const known = knownProjects.get(project.projectId);
     if (known?.saving?.cloud === false) continue;
-    const baseline = await api.baseline(project.projectId, signal);
+    const snapshot = await api.snapshot(project.projectId, signal);
     signal.throwIfAborted();
     // Inspect cloud preferences before opening any writable local database.
     const handle = await repository.open(project.projectId, {
       remember: false,
-      initialUpdate: decodeBase64(baseline.data),
+      initialSnapshot: decodeBase64(snapshot.data),
     });
     try {
       signal.throwIfAborted();
@@ -497,7 +426,7 @@ const silentProvider = (): SyncProvider => ({
 // persisted edits. Only the active project keeps a live socket.
 export class CloudWorkspace {
   readonly repository: ProjectRepository;
-  readonly api: CrdtApi;
+  readonly api: LoroApi;
   readonly #abort = new AbortController();
   readonly #onStatus: (status: CloudStatus | undefined) => void;
   readonly #onCatalog: () => void;
@@ -512,13 +441,13 @@ export class CloudWorkspace {
     repository: ProjectRepository,
     onStatus: (status: CloudStatus | undefined) => void,
     onCatalog: () => void,
-    api?: CrdtApi,
+    api?: LoroApi,
     queryClient?: QueryClient,
   ) {
     this.repository = repository;
     this.api =
       api ??
-      new CrdtApi(
+      new LoroApi(
         undefined,
         undefined,
         Number(repository.scope.namespace.replace("account-", "")),

@@ -1,5 +1,6 @@
 [tools]
 bun = "1.4.2"
+rust = "1.96.0"
 
 [tasks.golive]
 description = "Make origin/live reference current local main"
@@ -22,38 +23,36 @@ description = "Install locked workspace dependencies"
 run = "bun --bun install --frozen-lockfile"
 
 [tasks."backend:dev"]
-description = "Run the Bun backend with hot reload"
-depends = ["install"]
-dir = "backend"
-run = "bun --bun run dev"
+description = "Run the Rust API and production static-file server"
+run = "cargo run --locked -p mindgrab-backend"
 
-[tasks."backend:rebuild-read-models"]
-description = "Rebuild inspection indexes from canonical Yjs storage"
-depends = ["install"]
-dir = "backend"
-run = "bun --bun src/main.ts rebuild-read-models"
+[tasks."backend:build"]
+description = "Build the native Rust backend"
+run = "cargo build --locked --release -p mindgrab-backend"
 
 [tasks."backend:test"]
-description = "Run backend tests against isolated local Postgres databases"
-depends = ["install"]
-dir = "backend"
-run = "bun --bun run test"
+description = "Test Rust authentication and persistent Loro sync against isolated Postgres databases"
+depends = ["db"]
+run = "cargo test --locked -p mindgrab-backend"
 
 [tasks."backend:check"]
-description = "Check backend and shared code formatting, lint and types"
+description = "Check all Rust code"
+depends = ["state:check"]
+
+[tasks."tooling:check"]
+description = "Check browser-neutral helpers and Bun build tooling"
 depends = ["install"]
-dir = "backend"
-run = "bun --bun run check"
+run = ["bun --bun node_modules/.bin/biome check shared tooling", "bun --bun node_modules/.bin/tsc -p tsconfig.tooling.json"]
 
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "webapp"
 run = "bun --bun run dev"
 
 [tasks."webapp:test"]
 description = "Run webapp tests"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "webapp"
 run = "bun --bun test --conditions browser"
 
@@ -63,7 +62,7 @@ depends = ["e2e:test"]
 
 [tasks."e2e:test"]
 description = "Run webapp interaction tests in headless Chromium"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "e2e"
 run = "bun --bun run test"
 
@@ -73,44 +72,50 @@ depends = ["e2e:test:offline"]
 
 [tasks."e2e:test:offline"]
 description = "Verify production shell caching, cold offline reopen and safe upgrades"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "e2e"
 run = "bun --bun run test:offline"
 
 [tasks."e2e:check"]
 description = "Run e2e lint, formatting and type checks"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "e2e"
 run = "bun --bun run check"
 
 [tasks."webapp:build"]
 description = "Build the webapp"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "webapp"
 run = "bun --bun run build"
 
 [tasks."webapp:check"]
 description = "Run webapp lint, formatting and type checks"
-depends = ["install"]
+depends = ["install", "state:build"]
 dir = "webapp"
 run = "bun --bun run check"
 
 [tasks.check]
-description = "Run backend, shared document, webapp and e2e checks"
-depends = ["tooling:test", "backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build"]
+description = "Verify the Rust/Loro app, browser behavior, and offline shell"
+depends = ["tooling:test", "tooling:check", "backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build", "state:test", "state:check", "state:interop"]
 
-[tasks."crdt:test"]
-description = "Run client/backend Yjs interoperability tests"
-depends = ["install"]
-dir = "webapp"
-run = "bun --bun test --conditions browser tests/project-interop.test.ts"
+[tasks."state:setup"]
+description = "Install the Rust WASM target and matching binding generator"
+run = ["rustup target add wasm32-unknown-unknown", "cargo install wasm-bindgen-cli --version 0.2.129 --locked"]
 
-[tasks."crdt:check"]
-description = "Check shared document and interoperability code"
-depends = ["webapp:check", "backend:check"]
+[tasks."state:build"]
+description = "Compile the Rust document core to browser WASM and generate types"
+run = "bun --bun tooling/build-state.ts"
 
-[tasks."crdt:fixtures"]
-description = "Regenerate reviewed Yjs binary and JSON golden fixtures"
-depends = ["install"]
-dir = "webapp"
-run = "bun --bun tests/fixtures/generate-yjs.ts"
+[tasks."state:test"]
+description = "Test shared Rust document rules and CRDT convergence"
+run = "cargo test --locked -p mindgrab-state"
+
+[tasks."state:check"]
+description = "Check shared Rust code formatting and warnings"
+run = ["cargo fmt --all --check", "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings"]
+
+[tasks."state:interop"]
+description = "Verify native Rust and browser WASM document interoperability"
+depends = ["install", "state:build", "db"]
+dir = "e2e"
+run = "bun --bun test ./rust-state.browser.ts"

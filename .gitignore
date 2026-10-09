@@ -25,3 +25,7 @@ dist-ssr
 
 .env
 mise.local.toml
+
+# Native builds and generated browser bindings.
+/target/
+/webapp/src/generated/mindgrab-state/

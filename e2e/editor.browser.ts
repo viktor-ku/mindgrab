@@ -16,7 +16,7 @@ import { createServer } from "vite";
 import { NODE_COLORS } from "../shared/src/node-colors";
 import type { Harness } from "./harness";
 
-// Interaction tests for the Yjs-bound editor in headless Chromium. The harness
+// Interaction tests for the Rust/WASM-bound editor in headless Chromium. The harness
 // page mounts the app with a linked in-process replica acting as another device.
 setDefaultTimeout(30_000);
 const webapp = fileURLToPath(new URL("../webapp", import.meta.url));
@@ -301,21 +301,12 @@ describe("text editing", () => {
     const id = await rootId();
     await edit(id);
     await page.keyboard.press("End");
-    await call("takeTextDeltas");
     await page.keyboard.type("!?");
     await page.keyboard.press("Shift+Enter");
     await page.keyboard.insertText("😀");
     await page.keyboard.press("Backspace");
     await page.evaluate(() => navigator.clipboard.writeText("pasted"));
     await page.keyboard.press("Control+V");
-    expect(await call("takeTextDeltas")).toEqual([
-      [{ retain: 8 }, { insert: "!" }],
-      [{ retain: 9 }, { insert: "?" }],
-      [{ retain: 10 }, { insert: "\n" }],
-      [{ retain: 11 }, { insert: "😀" }],
-      [{ retain: 11 }, { delete: 2 }],
-      [{ retain: 11 }, { insert: "pasted" }],
-    ]);
     expect(await call("text", id)).toBe("New idea!?\npasted");
     await page.keyboard.press("Enter");
     await editor().waitFor({ state: "detached" });
@@ -390,7 +381,11 @@ describe("node colors", () => {
 
   test("the default fill and every palette swatch render with a background", async () => {
     const root = await rootId();
-    expect((await call("content")).nodes[root].color).toBe("blue");
+    expect(
+      (await call("content")).nodes.find(
+        (node: { id: string }) => node.id === root,
+      )?.color,
+    ).toBe("blue");
     expect(await background(root)).not.toBe("rgba(0, 0, 0, 0)");
     await node(root).click();
     const fills = new Set<string>();
@@ -404,7 +399,11 @@ describe("node colors", () => {
       expect(swatch).not.toBe("rgba(0, 0, 0, 0)");
       await choice.click();
       expect(await background(root)).toBe(swatch);
-      expect((await call("content")).nodes[root].color).toBe(color.value);
+      expect(
+        (await call("content")).nodes.find(
+          (node: { id: string }) => node.id === root,
+        )?.color,
+      ).toBe(color.value);
       fills.add(swatch);
     }
     expect(fills.size).toBe(NODE_COLORS.length);
@@ -423,7 +422,11 @@ describe("node colors", () => {
     const roseFill = await background(child);
     expect(roseFill).not.toBe(originalFill);
     for (const id of [root, grandchild, sibling]) {
-      expect((await call("content")).nodes[id].color).toBe("blue");
+      expect(
+        (await call("content")).nodes.find(
+          (node: { id: string }) => node.id === id,
+        )?.color,
+      ).toBe("blue");
       expect(await background(id)).toBe(originalFill);
     }
 
@@ -437,18 +440,34 @@ describe("node colors", () => {
     const violetFill = await background(child);
     expect(violetFill).not.toBe(roseFill);
     for (const id of [child, grandchild]) {
-      expect((await call("content")).nodes[id].color).toBe("violet");
+      expect(
+        (await call("content")).nodes.find(
+          (node: { id: string }) => node.id === id,
+        )?.color,
+      ).toBe("violet");
       expect(await background(id)).toBe(violetFill);
     }
     for (const id of [root, sibling]) {
-      expect((await call("content")).nodes[id].color).toBe("blue");
+      expect(
+        (await call("content")).nodes.find(
+          (node: { id: string }) => node.id === id,
+        )?.color,
+      ).toBe("blue");
       expect(await background(id)).toBe(originalFill);
     }
 
     await page.getByRole("button", { name: "Undo", exact: true }).click();
-    expect((await call("content")).nodes[child].color).toBe("rose");
+    expect(
+      (await call("content")).nodes.find(
+        (node: { id: string }) => node.id === child,
+      )?.color,
+    ).toBe("rose");
     expect(await background(child)).toBe(roseFill);
-    expect((await call("content")).nodes[grandchild].color).toBe("blue");
+    expect(
+      (await call("content")).nodes.find(
+        (node: { id: string }) => node.id === grandchild,
+      )?.color,
+    ).toBe("blue");
     expect(await background(grandchild)).toBe(originalFill);
   });
 });
@@ -609,7 +628,7 @@ describe("portable file actions", () => {
     expect(saved.name).toBe("Portable.mindgrab.json");
     const file = JSON.parse(saved.json);
     expect(file.format).toBe("mindgrab-project");
-    expect(file.version).toBe(2);
+    expect(file.version).toBe(3);
     expect(file.project.nodes[0].text).toBe("Offline\nHäid mõtteid 😀 日本語");
     expect(file.project.nodes[0].position).toEqual({ x: -30, y: 80 });
     const originalNodes = await call("ids");

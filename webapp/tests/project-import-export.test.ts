@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { LIMITS, projectForest } from "../src/project-document";
+import {
+  LIMITS,
+  projectForest,
+  importProjectDocument,
+  deleteSubtree,
+} from "../src/project-document";
 import type {
   ProjectFile,
   ProjectFileNode,
@@ -21,7 +26,7 @@ const leaf = (id: string, text = id): ProjectFileNode => ({
 });
 const file = (nodes: ProjectFileNode[] = []): ProjectFile => ({
   format: "mindgrab-project",
-  version: 2,
+  version: 3,
   project: { name: "Planning", nodes },
 });
 const complex = (): ProjectFile => ({
@@ -48,24 +53,20 @@ const complex = (): ProjectFile => ({
 
 test("export contains canonical live content and omits history and stale preferences", () => {
   const { content } = prepareProjectImport(complex());
-  const root = Object.keys(content.nodes)[0];
-  content.nodes[root].deleted = true;
-  const exported = projectFileFromContent(content, {
+  const doc = importProjectDocument(crypto.randomUUID(), content);
+  const root = doc.view().roots[0];
+  deleteSubtree(doc, root);
+  const view = doc.view();
+  doc.destroy();
+  const exported = projectFileFromContent(view, {
     anchor: { id: root, centerY: 10 },
   });
   expect(exported.preferences?.anchor).toBeUndefined();
-  // Promoted children can share ranks with roots; UUIDs break those ties.
-  expect(exported.project.nodes).toEqual(projectForest(content));
-  expect(exported.project.nodes.map((node) => node.text).sort()).toEqual([
+  expect(exported.project.nodes).toEqual(projectForest(view));
+  expect(exported.project.nodes.map((node) => node.text)).toEqual([
     "Another root",
-    "First",
-    "Second",
   ]);
-  expect(
-    exported.project.nodes.find((node) => node.text === "First")?.children[0]
-      .text,
-  ).toBe("\n");
-  const json = serializeProjectFile(content);
+  const json = serializeProjectFile(view);
   for (const forbidden of [
     "owner",
     "credential",

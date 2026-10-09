@@ -1,1 +1,1 @@
-export * from "@mindgrab/document/node-colors";
+export * from "@mindgrab/ui/node-colors";

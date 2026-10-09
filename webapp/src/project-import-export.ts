@@ -1,18 +1,17 @@
-import { generateNKeysBetween } from "fractional-indexing";
 import { z } from "zod";
 import {
   LIMITS,
   SavingPreferencesSchema,
-  materializeProject,
+  DEFAULT_SAVING_PREFERENCES,
   projectForest,
   SCHEMA_VERSION,
 } from "./project-document";
-import type { ProjectContent } from "./project-document";
+import type { ProjectDocument, DocumentView } from "./project-document";
 import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
-export const PROJECT_FILE_VERSION = 2;
+export const PROJECT_FILE_VERSION = 3;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
@@ -151,16 +150,16 @@ function checkedFile(value: unknown): ProjectFile {
 }
 
 export function projectFileFromContent(
-  content: ProjectContent,
+  content: DocumentView,
   preferences?: ProjectFile["preferences"],
 ): ProjectFile {
   const anchor = preferences?.anchor;
-  const localPreferences = (preferences || content.metadata.saving) && {
-    ...(content.metadata.saving && { saving: content.metadata.saving }),
+  const localPreferences = {
+    saving: content.saving,
     ...preferences,
     // A deleted layout anchor is only a stale local preference.
     anchor:
-      anchor && content.nodes[anchor.id] && !content.nodes[anchor.id].deleted
+      anchor && content.nodes.some((node) => node.id === anchor.id)
         ? anchor
         : undefined,
   };
@@ -168,7 +167,7 @@ export function projectFileFromContent(
     format: PROJECT_FILE_FORMAT,
     version: PROJECT_FILE_VERSION,
     project: {
-      name: content.metadata.name,
+      name: content.name,
       nodes: projectForest(content),
     },
     ...(localPreferences && { preferences: localPreferences }),
@@ -176,7 +175,7 @@ export function projectFileFromContent(
 }
 
 export function serializeProjectFile(
-  content: ProjectContent,
+  content: DocumentView,
   preferences?: ProjectFile["preferences"],
 ): string {
   const file = projectFileFromContent(content, preferences);
@@ -218,28 +217,33 @@ export function prepareProjectImport(input: ProjectFile) {
   };
   addIds(file.project.nodes);
 
-  const nodes: ProjectContent["nodes"] = {};
-  const add = (branch: ProjectFileNode[], parent: string | null) => {
-    const ranks = generateNKeysBetween(null, null, branch.length);
-    branch.forEach((node, index) => {
-      const id = ids.get(node.id) as string;
-      nodes[id] = {
+  const nodes: DocumentView["nodes"] = [];
+  const add = (
+    branch: ProjectFileNode[],
+    parent: string | null,
+    depth: number,
+  ) => {
+    for (const node of branch) {
+      const id = ids.get(node.id)!;
+      nodes.push({
+        id,
+        parent,
+        children: node.children.map((child) => ids.get(child.id)!),
+        depth,
         text: node.text,
-        placement: { parent, rank: ranks[index] },
-        ...(node.position && { position: { ...node.position } }),
+        position: node.position ? { ...node.position } : null,
         color: node.color,
-        deleted: false,
-      };
-      add(node.children, id);
-    });
+      });
+      add(node.children, id, depth + 1);
+    }
   };
-  add(file.project.nodes, null);
-  const content: ProjectContent = {
+  add(file.project.nodes, null, 0);
+  const content: DocumentView = {
+    format: "mindgrab-loro-v1",
     schemaVersion: SCHEMA_VERSION,
-    metadata: {
-      name: file.project.name,
-      ...(file.preferences?.saving && { saving: file.preferences.saving }),
-    },
+    name: file.project.name,
+    saving: file.preferences?.saving ?? { ...DEFAULT_SAVING_PREFERENCES },
+    roots: file.project.nodes.map((node) => ids.get(node.id)!),
     nodes,
   };
   const preferences = file.preferences && {
@@ -255,15 +259,11 @@ export function prepareProjectImport(input: ProjectFile) {
 }
 
 export function exportProjectDocument(
-  doc: Parameters<typeof materializeProject>[0],
+  doc: ProjectDocument,
   preferences?: ProjectFile["preferences"],
 ) {
-  // The synchronous transaction captures detached content before any awaits.
-  let json = "";
-  doc.transact(() => {
-    json = serializeProjectFile(materializeProject(doc), preferences);
-  });
-  return json;
+  // Rust returns a detached view synchronously before any awaits.
+  return serializeProjectFile(doc.view(), preferences);
 }
 
 type OpenFilePicker = (options: {

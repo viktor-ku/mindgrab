@@ -1,6 +1,6 @@
-export * from "@mindgrab/document/mind-map";
+export * from "@mindgrab/ui/mind-map";
 
-import type { MindMapNode } from "@mindgrab/document/mind-map";
+import type { MindMapNode } from "@mindgrab/ui/mind-map";
 
 // Folding is a local view of the tree; the document retains every descendant.
 export function visibleMindMap(

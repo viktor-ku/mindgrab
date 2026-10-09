@@ -1,1 +1,1 @@
-export * from "@mindgrab/document/offline-contract";
+export * from "@mindgrab/ui/offline-contract";

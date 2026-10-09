@@ -18,7 +18,7 @@ for path in "${staged_files[@]}"; do
 done
 
 webapp_files=()
-backend_files=()
+tooling_files=()
 e2e_files=()
 for path in "${staged_files[@]}"; do
   [[ -f "$path" ]] || continue
@@ -33,9 +33,9 @@ for path in "${staged_files[@]}"; do
         css|graphql|html|js|json|jsonc|md|mdx|ts|tsx) e2e_files+=("${path#e2e/}") ;;
       esac
       ;;
-    backend/*|shared/*)
+    shared/*|tooling/*)
       case "${path##*.}" in
-        js|json|jsonc|ts|tsx) backend_files+=("../$path") ;;
+        js|json|jsonc|ts|tsx) tooling_files+=("$path") ;;
       esac
       ;;
   esac
@@ -49,10 +49,12 @@ if ((${#e2e_files[@]} > 0)); then
   mise -C e2e exec -- bun --bun node_modules/.bin/biome format --write -- "${e2e_files[@]}"
   git add -- "${e2e_files[@]/#/e2e/}"
 fi
-if ((${#backend_files[@]} > 0)); then
-  mise -C backend exec -- bun --bun node_modules/.bin/biome format --write -- "${backend_files[@]}"
-  git add -- "${backend_files[@]/#..\//}"
+if ((${#tooling_files[@]} > 0)); then
+  mise exec -- bun --bun node_modules/.bin/biome format --write -- "${tooling_files[@]}"
+  git add -- "${tooling_files[@]}"
 fi
-mise run backend:check
+mise run tooling:check
 mise run webapp:check
 mise run e2e:check
+cargo fmt --all --check
+mise run state:check
