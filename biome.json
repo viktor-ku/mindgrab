@@ -1,1 +1,16 @@
-{ "$schema":"https://biomejs.dev/schemas/2.5.14/schema.json", "formatter":{"indentStyle":"space","indentWidth":2}, "linter":{"enabled":true,"rules":{"preset":"recommended"}}, "files":{"includes":["shared/**","tooling/**","package.json","tsconfig.tooling.json"]} }
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "files": {
+    "includes": ["tooling/**", "package.json", "tsconfig.tooling.json"]
+  }
+}

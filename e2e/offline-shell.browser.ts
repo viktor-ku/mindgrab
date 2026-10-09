@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import { build } from "vite";
-import { STORAGE_GENERATION } from "../shared/src/offline-contract";
+import { STORAGE_GENERATION } from "../webapp/src/offline-contract";
 
 // Real HTTP + production output; no request interception and no dev harness.
 // A persistent profile also proves reopen after the browser process exits.

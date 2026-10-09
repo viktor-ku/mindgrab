@@ -40,9 +40,9 @@ description = "Check all Rust code"
 depends = ["state:check"]
 
 [tasks."tooling:check"]
-description = "Check browser-neutral helpers and Bun build tooling"
+description = "Check Bun build tooling"
 depends = ["install"]
-run = ["bun --bun node_modules/.bin/biome check shared tooling", "bun --bun node_modules/.bin/tsc -p tsconfig.tooling.json"]
+run = ["bun --bun node_modules/.bin/biome check tooling", "bun --bun node_modules/.bin/tsc -p tsconfig.tooling.json"]
 
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"

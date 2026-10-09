@@ -9,5 +9,5 @@
     "types": ["bun"],
     "allowImportingTsExtensions": true
   },
-  "include": ["shared/src", "tooling"]
+  "include": ["tooling"]
 }

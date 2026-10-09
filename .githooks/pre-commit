@@ -33,7 +33,7 @@ for path in "${staged_files[@]}"; do
         css|graphql|html|js|json|jsonc|md|mdx|ts|tsx) e2e_files+=("${path#e2e/}") ;;
       esac
       ;;
-    shared/*|tooling/*)
+    tooling/*)
       case "${path##*.}" in
         js|json|jsonc|ts|tsx) tooling_files+=("$path") ;;
       esac

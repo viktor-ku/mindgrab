@@ -13,7 +13,7 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
-import { NODE_COLORS } from "../shared/src/node-colors";
+import { NODE_COLORS } from "../webapp/src/node-colors";
 import type { Harness } from "./harness";
 
 // Interaction tests for the Rust/WASM-bound editor in headless Chromium. The harness
