@@ -42,15 +42,15 @@ for path in "${staged_files[@]}"; do
 done
 
 if ((${#webapp_files[@]} > 0)); then
-  mise -C webapp exec -- bun --bun node_modules/.bin/biome format --write -- "${webapp_files[@]}"
+  mise -C webapp exec -- bun --bun run biome format --write -- "${webapp_files[@]}"
   git add -- "${webapp_files[@]/#/webapp/}"
 fi
 if ((${#e2e_files[@]} > 0)); then
-  mise -C e2e exec -- bun --bun node_modules/.bin/biome format --write -- "${e2e_files[@]}"
+  mise -C e2e exec -- bun --bun run biome format --write -- "${e2e_files[@]}"
   git add -- "${e2e_files[@]/#/e2e/}"
 fi
 if ((${#tooling_files[@]} > 0)); then
-  mise exec -- bun --bun node_modules/.bin/biome format --write -- "${tooling_files[@]}"
+  mise exec -- bun --bun run biome format --write -- "${tooling_files[@]}"
   git add -- "${tooling_files[@]}"
 fi
 mise run tooling:check

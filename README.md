@@ -13,7 +13,7 @@ Configure WorkOS in `.env` using `.env.example`. The API key stays on the server
 assigns independent app, API and database ports in `mise.local.toml`.
 
 ```sh
-mise install
+mise install           # pinned Bun, Rust, Biome, and TypeScript
 mise run state:setup   # once: WASM target and matching wasm-bindgen generator
 mise run db
 mise run backend:dev
@@ -38,6 +38,9 @@ mise run webapp:build
 mise run backend:build
 mise run check
 ```
+
+Biome and TypeScript are installed by mise. Bun type declarations remain in the
+webapp/test workspaces; the root package only defines workspace membership.
 
 The release backend serves `webapp/dist` and the API from one origin. Run
 `target/release/mindgrab-backend` with the same database and WorkOS configuration;

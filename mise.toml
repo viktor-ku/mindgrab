@@ -1,6 +1,8 @@
 [tools]
 bun = "1.4.2"
 rust = "1.96.0"
+"npm:@biomejs/biome" = "2.5.14"
+"npm:typescript" = "7.0.2"
 
 [tasks.golive]
 description = "Make origin/live reference current local main"
@@ -42,7 +44,7 @@ depends = ["state:check"]
 [tasks."tooling:check"]
 description = "Check Bun build tooling"
 depends = ["install"]
-run = ["bun --bun node_modules/.bin/biome check tooling", "bun --bun node_modules/.bin/tsc -p tsconfig.tooling.json"]
+run = ["bun --bun run biome check tooling", "bun --bun run tsc -p tsconfig.tooling.json"]
 
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"

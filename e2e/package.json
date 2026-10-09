@@ -5,19 +5,17 @@
   "scripts": {
     "test": "bun --bun test ./editor.browser.ts ./project-repository.browser.ts ./accounts.browser.ts ./query.browser.ts",
     "test:offline": "bun --bun test ./offline-shell.browser.ts",
-    "lint": "biome lint .",
-    "format": "biome format --write .",
-    "format:check": "biome format .",
-    "lint:ts": "tsc -p tsconfig.json",
+    "lint": "bun --bun run biome lint .",
+    "format": "bun --bun run biome format --write .",
+    "format:check": "bun --bun run biome format .",
+    "lint:ts": "bun --bun run tsc -p tsconfig.json",
     "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
     "@tanstack/solid-query": "5.104.1",
     "@types/bun": "=1.4.2",
     "playwright": "1.62.0",
     "solid-js": "=1.9.15",
-    "typescript": "=7.0.2",
     "vite": "=8.3.0"
   }
 }
