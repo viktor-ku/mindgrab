@@ -10,7 +10,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mindgrab_backend::{
     Backend,
     auth::{SESSION_COOKIE, hash},
-    config::Config,
+    config::{AuthMode, Config},
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -90,6 +90,9 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new(origin: &str) -> Self {
+        Self::with_auth_mode(origin, AuthMode::WorkOs).await
+    }
+    pub async fn with_auth_mode(origin: &str, auth_mode: AuthMode) -> Self {
         let database = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres@localhost:5432/mindgrab".into());
         let admin = PgPoolOptions::new()
@@ -121,13 +124,19 @@ impl Fixture {
         let provider_url = format!("http://{}", listener.local_addr().unwrap());
         let mock = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
         let config = Config {
+            auth_mode,
             database_url: database.to_string(),
             client_id: "client_test".into(),
             api_key: "test-secret".into(),
             redirect_uri: format!("{origin}/api/auth/callback"),
             app_url: format!("{origin}/"),
             issuer: ISSUER.into(),
-            provider_url,
+            // Local mode must work even when no identity provider is reachable.
+            provider_url: if auth_mode == AuthMode::Local {
+                "http://127.0.0.1:1".into()
+            } else {
+                provider_url
+            },
             secure_cookies: false,
         };
         let backend = Backend::connect(config).await.unwrap();
@@ -169,7 +178,13 @@ impl Fixture {
         self.client
             .post(format!("{}/api/{method}", self.url))
             .header("origin", &self.origin)
-            .header("cookie", format!("{SESSION_COOKIE}={browser}"))
+            .header(
+                "cookie",
+                format!(
+                    "{}={browser}",
+                    self.backend.config.cookie_name(SESSION_COOKIE)
+                ),
+            )
     }
     pub async fn rpc(&self, method: &str, browser: &str, args: Value) -> reqwest::Response {
         self.post(method, browser).json(&args).send().await.unwrap()

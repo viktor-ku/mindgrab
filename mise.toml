@@ -33,8 +33,8 @@ description = "Install locked workspace dependencies"
 run = "bun --bun install --frozen-lockfile"
 
 [tasks."backend:dev"]
-description = "Run the Rust API and production static-file server"
-run = "cargo run --locked -p mindgrab-backend"
+description = "Run the Rust API with local development login (override MINDGRAB_AUTH_MODE=workos for AuthKit)"
+run = "MINDGRAB_ENV=development MINDGRAB_AUTH_MODE=\"${MINDGRAB_AUTH_MODE:-local}\" cargo run --locked -p mindgrab-backend"
 
 [tasks."backend:build"]
 description = "Build the native Rust backend"

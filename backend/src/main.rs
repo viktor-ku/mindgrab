@@ -1,4 +1,7 @@
-use mindgrab_backend::{Backend, config::Config};
+use mindgrab_backend::{
+    Backend,
+    config::{AuthMode, Config},
+};
 use std::{path::PathBuf, time::Duration};
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -8,15 +11,14 @@ async fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let _ = dotenvy::dotenv();
-    if run().await.is_err() {
-        eprintln!(
-            "Rust backend startup failed; check database connectivity and WorkOS configuration"
-        );
+    if let Err(error) = run().await {
+        eprintln!("Rust backend startup failed: {error}");
         std::process::exit(1);
     }
 }
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
+    let local_auth = config.auth_mode == AuthMode::Local;
     let app = Backend::connect(config).await?;
     let changes = tokio::spawn(app.clone().listen_changes());
     let cleanup = tokio::spawn(app.clone().cleanup());
@@ -29,12 +31,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".into())
         .parse()?;
-    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".into());
-    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
+    let host = std::env::var("HOST")
+        .unwrap_or_else(|_| if local_auth { "127.0.0.1" } else { "0.0.0.0" }.into());
+    let listener = tokio::net::TcpListener::bind((host.trim_matches(['[', ']']), port)).await?;
     println!(
         "Mindgrab Rust API listening on http://{}",
         listener.local_addr()?
     );
+    if local_auth {
+        println!(
+            "Local development authentication enabled: Sign in creates a local Boba Tee session without WorkOS"
+        );
+    }
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),

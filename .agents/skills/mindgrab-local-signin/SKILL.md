@@ -1,15 +1,30 @@
 ---
 name: mindgrab-local-signin
-description: Sign in to a locally running Mindgrab app through its WorkOS AuthKit flow, then verify the browser session. Use when an agent needs an authenticated local Mindgrab session.
+description: Sign in or out of a local Mindgrab worktree using development login, then verify the browser session. Use when an agent needs to test authenticated or anonymous local app behavior; supports explicitly configured WorkOS AuthKit too.
 ---
 
 # Sign in to local Mindgrab
 
-Use this skill when an agent needs an authenticated session in the locally running Mindgrab app. Authentication is a browser flow through WorkOS AuthKit; the local app keeps the session in an HttpOnly cookie.
+Use this skill when an agent needs to test signed-in or anonymous behavior in a local Mindgrab worktree. The default development flow stays on the local app and creates a real HttpOnly browser session without contacting WorkOS.
+
+## Default local development flow
+
+1. Read this worktree's `mise.local.toml` for `APP_URL`, `WEBAPP_PORT`, `PORT`, and `VITE_BACKEND_URL`. Use the exact `APP_URL` host and port; worktrees have different ports. If settings are missing, run `mise run worktree:bootstrap`. Do not print credentials from `.env`.
+2. Check whether the API and webapp already run on those ports. Start missing services with `mise run db`, `mise run backend:dev`, and `mise run webapp:dev`. Avoid duplicate servers. `backend:dev` defaults to `MINDGRAB_AUTH_MODE=local` and sets `MINDGRAB_ENV=development`; startup reports local development authentication. This mode needs a debug build and loopback addresses, and no WorkOS credentials or callback registration.
+3. Use the available collaborative browser preview. Check preview status first, open a tab if needed, and navigate to `APP_URL` in the browser profile used for the task.
+4. A fresh browser session starts signed out. Click **Sign in** to complete the local callback and show **Boba Tee** (`boba.tee@mindgrab.test`, `local_boba_tee`). No credentials or hosted prompts are involved. Local sessions and their account persist in the worktree database; auth cookies include the app port so other worktrees stay independent.
+5. Verify account controls and, if browser tools allow page requests, `POST /api/getMe` in that browser context: expect `200` and `id`, `name`, `email`, `external_id`. Do not use a separate HTTP client to verify the browser session or read/export cookie values.
+6. To test anonymous behavior, use the app's **Sign out** action (found in the account menu) and verify `POST /api/getMe` returns `401`. Cloud APIs must require login while anonymous editing remains usable. Click **Sign in** again to return to the same local account.
+
+Use the actual app actions and server sessions. Do not force frontend auth state, fabricate cookies, or insert auth database rows. The local account is separate from the WorkOS staging account. Local login tests app sessions and permissions; use the hosted flow below only when specifically testing the WorkOS integration.
+
+## Optional hosted WorkOS flow
+
+The remaining instructions apply only when `MINDGRAB_AUTH_MODE=workos` is explicitly configured. The user's request to test local app behavior does not require enabling WorkOS. Substitute this worktree's configured `APP_URL` and callback for the default port below. Hosted testing still needs that exact callback registered with WorkOS.
 
 ## Requirements
 
-- The local API and webapp must be running. The webapp is expected at `http://localhost:5173` and proxies `/api`, `/auth` and `/sync` to the Rust API. Its port is configured in `mise.local.toml` (`PORT` and `VITE_BACKEND_URL`), defaulting to 3000.
+- The local API and webapp must be running at the URLs in this worktree's `mise.local.toml`. The webapp proxies `/api`, `/auth` and `/sync` to the Rust API. `WEBAPP_PORT` is the webapp port; `PORT` and `VITE_BACKEND_URL` configure the backend.
 - The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `VITE_BACKEND_URL` must point to the Rust API port.
 - The WorkOS application must allow these local URLs:
   - Redirect URI: `http://localhost:5173/api/auth/callback`
@@ -51,7 +66,7 @@ Enter the credentials only into the expected WorkOS AuthKit sign-in form reached
 
 ## Security boundaries
 
-- Never bypass AuthKit, fabricate a session, use test fixtures, or write directly to auth tables to sign in.
+- In hosted WorkOS mode, never bypass AuthKit. In either mode, use the app login action; never fabricate a session, use test fixtures, or write directly to auth tables to sign in.
 - Never copy browser cookies, access tokens, refresh tokens, or MFA codes into prompts, logs, source files, or shell commands. The account above is the sole user-authorized exception for this skill; use it only in the expected WorkOS AuthKit form and never repeat or persist it elsewhere.
 - Do not attempt to defeat MFA, CAPTCHA, email verification, or other identity checks. Ask the user to complete the step in the browser when needed.
 - Keep the session in the browser profile used for the task. The app stores provider tokens server-side and does not expose them to JavaScript.

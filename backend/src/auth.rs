@@ -1,5 +1,5 @@
 use crate::{
-    config::Config,
+    config::{AuthMode, Config},
     error::{ApiError, Result},
 };
 use axum::{
@@ -20,6 +20,8 @@ use tokio::sync::Mutex;
 
 pub const SESSION_COOKIE: &str = "mindgrab_session_loro";
 const STATE_COOKIE: &str = "mindgrab_login_loro";
+const LOCAL_USER_ID: &str = "local_boba_tee";
+const LOCAL_TOKEN: &str = "local-development";
 pub fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value))
 }
@@ -50,6 +52,7 @@ pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     }
 }
 fn cookie(config: &Config, name: &str, value: &str, age: u32) -> String {
+    let name = config.cookie_name(name);
     format!(
         "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={age}{}",
         if config.secure_cookies {
@@ -127,6 +130,9 @@ impl Auth {
     }
     fn url(&self, path: &str) -> reqwest::Url {
         reqwest::Url::parse(&format!("{}{path}", self.config.provider_url)).unwrap()
+    }
+    fn browser_cookie(&self, headers: &HeaderMap, name: &str) -> Option<String> {
+        cookie_value(headers, &self.config.cookie_name(name))
     }
     async fn verify(&self, token: &str) -> Result<Claims> {
         let header = decode_header(token).map_err(|_| ApiError::unauthorized())?;
@@ -212,7 +218,7 @@ impl Auth {
         let nonce = token();
         let verifier = token();
         let mut tx = self.pool.begin().await?;
-        if let Some(previous) = cookie_value(headers, STATE_COOKIE) {
+        if let Some(previous) = self.browser_cookie(headers, STATE_COOKIE) {
             sqlx::query("DELETE FROM mindgrab_loro.login_attempts WHERE state_hash=$1")
                 .bind(hash(&previous))
                 .execute(&mut *tx)
@@ -227,6 +233,15 @@ impl Auth {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        if self.config.auth_mode == AuthMode::Local {
+            let mut url = reqwest::Url::parse(&self.config.redirect_uri).unwrap();
+            url.query_pairs_mut()
+                .extend_pairs([("state", nonce.as_str()), ("code", &hash(&verifier))]);
+            return Ok(redirect(
+                url.as_str(),
+                vec![cookie(&self.config, STATE_COOKIE, &nonce, 600)],
+            ));
+        }
         let mut url = self.url("/user_management/authorize");
         url.query_pairs_mut().extend_pairs([
             ("client_id", self.config.client_id.as_str()),
@@ -261,7 +276,10 @@ impl Auth {
         };
         let nonce = get("state").ok_or_else(ApiError::unauthorized)?;
         // SHA-256 hashes are fixed-size; equality does not compare nonce prefixes.
-        if cookie_value(headers, STATE_COOKIE).is_none_or(|v| hash(&v) != hash(nonce)) {
+        if self
+            .browser_cookie(headers, STATE_COOKIE)
+            .is_none_or(|v| hash(&v) != hash(nonce))
+        {
             return Err(ApiError::unauthorized());
         }
         let verifier: Option<String> = sqlx::query_scalar("DELETE FROM mindgrab_loro.login_attempts WHERE state_hash=$1 AND expires_at>now() RETURNING verifier").bind(hash(nonce)).fetch_optional(&self.pool).await?;
@@ -269,8 +287,34 @@ impl Auth {
         if get("error").is_some() {
             return Err(ApiError::unauthorized());
         }
-        let auth = self.authenticate(serde_json::json!({"grant_type":"authorization_code","code":get("code").ok_or_else(ApiError::unauthorized)?,"code_verifier":verifier})).await?;
-        let claims = self.verify(&auth.access_token).await?;
+        let code = get("code").ok_or_else(ApiError::unauthorized)?;
+        let (auth, claims) = if self.config.auth_mode == AuthMode::Local {
+            if code != hash(&verifier) {
+                return Err(ApiError::unauthorized());
+            }
+            (
+                Authentication {
+                    user: ProviderUser {
+                        id: LOCAL_USER_ID.into(),
+                        email: "boba.tee@mindgrab.test".into(),
+                        first_name: Some("Boba".into()),
+                        last_name: Some("Tee".into()),
+                    },
+                    access_token: LOCAL_TOKEN.into(),
+                    refresh_token: LOCAL_TOKEN.into(),
+                },
+                Claims {
+                    sub: LOCAL_USER_ID.into(),
+                    sid: format!("local_{}", token()),
+                    exp: now() + 2592000,
+                    client_id: String::new(),
+                },
+            )
+        } else {
+            let auth = self.authenticate(serde_json::json!({"grant_type":"authorization_code","code":code,"code_verifier":verifier})).await?;
+            let claims = self.verify(&auth.access_token).await?;
+            (auth, claims)
+        };
         if claims.exp <= now() || claims.sub != auth.user.id {
             return Err(ApiError::unauthorized());
         }
@@ -278,7 +322,7 @@ impl Auth {
         let mut tx = self.pool.begin().await?;
         let user = upsert(&mut tx, &auth.user).await?;
         sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&credential)).bind(user.id).bind(claims.sid).bind(auth.access_token).bind(auth.refresh_token).execute(&mut *tx).await?;
-        if let Some(previous) = cookie_value(headers, SESSION_COOKIE) {
+        if let Some(previous) = self.browser_cookie(headers, SESSION_COOKIE) {
             sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1")
                 .bind(hash(&previous))
                 .execute(&mut *tx)
@@ -307,13 +351,25 @@ impl Auth {
         redirect(&destination, cookies)
     }
     pub async fn identify(&self, headers: &HeaderMap) -> Result<User> {
-        let browser = cookie_value(headers, SESSION_COOKIE).ok_or_else(ApiError::unauthorized)?;
+        let browser = self
+            .browser_cookie(headers, SESSION_COOKIE)
+            .ok_or_else(ApiError::unauthorized)?;
         let browser_hash = hash(&browser);
         let mut tx = self.pool.begin().await?;
         let session: Option<Session> = sqlx::query_as("SELECT user_id,provider_session,access_token,refresh_token FROM mindgrab_loro.sessions WHERE browser_hash=$1 AND expires_at>now() FOR UPDATE").bind(&browser_hash).fetch_optional(&mut *tx).await?;
         let session = session.ok_or_else(ApiError::unauthorized)?;
         let result: Result<User> = async {
             let user: User = sqlx::query_as("SELECT id,name,email,external_id FROM mindgrab_loro.users WHERE id=$1").bind(session.user_id).fetch_one(&mut *tx).await?;
+            if self.config.auth_mode == AuthMode::Local {
+                if user.external_id != LOCAL_USER_ID
+                    || !session.provider_session.starts_with("local_")
+                    || session.access_token != LOCAL_TOKEN
+                    || session.refresh_token != LOCAL_TOKEN
+                {
+                    return Err(ApiError::unauthorized());
+                }
+                return Ok(user);
+            }
             let claims = self.verify(&session.access_token).await?;
             if claims.sub!=user.external_id || claims.sid!=session.provider_session { return Err(ApiError::unauthorized()); }
             if claims.exp>now()+30 { return Ok(user); }
@@ -350,9 +406,9 @@ impl Auth {
     pub async fn logout(&self, headers: &HeaderMap) -> Result<Response> {
         self.config.same_origin(headers)?;
         let mut destination = self.config.app_url.clone();
-        if let Some(browser) = cookie_value(headers, SESSION_COOKIE) {
+        if let Some(browser) = self.browser_cookie(headers, SESSION_COOKIE) {
             let sid: Option<String> = sqlx::query_scalar("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1 RETURNING provider_session").bind(hash(&browser)).fetch_optional(&self.pool).await?;
-            if let Some(sid) = sid {
+            if let Some(sid) = sid.filter(|_| self.config.auth_mode == AuthMode::WorkOs) {
                 let mut url = self.url("/user_management/sessions/logout");
                 url.query_pairs_mut().extend_pairs([
                     ("session_id", sid.as_str()),
@@ -361,7 +417,7 @@ impl Auth {
                 destination = url.to_string();
             }
         }
-        if let Some(nonce) = cookie_value(headers, STATE_COOKIE) {
+        if let Some(nonce) = self.browser_cookie(headers, STATE_COOKIE) {
             sqlx::query("DELETE FROM mindgrab_loro.login_attempts WHERE state_hash=$1")
                 .bind(hash(&nonce))
                 .execute(&self.pool)
