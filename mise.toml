@@ -15,6 +15,7 @@ run = "docker compose up -d postgres"
 [tasks."worktree:bootstrap"]
 description = "Create persistent local environment settings for this worktree"
 dir = "{{config_root}}"
+raw = true
 run = '''
 set -eu
 worktree_root="$PWD"
