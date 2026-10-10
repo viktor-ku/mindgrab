@@ -1,15 +1,16 @@
 # Build from the repository root: docker build -f webapp/Dockerfile .
 FROM rust:1.96.0-bookworm AS state
 RUN rustup target add wasm32-unknown-unknown
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+# Railway requires cache IDs scoped to the frontend service.
+RUN --mount=type=cache,id=s/bccf447e-2320-404e-8364-11b5fd92a340-/usr/local/cargo/registry,target=/usr/local/cargo/registry \
     cargo install wasm-bindgen-cli --version 0.2.129 --locked
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY backend ./backend
 COPY tooling ./tooling
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=s/bccf447e-2320-404e-8364-11b5fd92a340-/usr/local/cargo/registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=s/bccf447e-2320-404e-8364-11b5fd92a340-/app/target,target=/app/target \
     cargo build --locked -p mindgrab-state --target wasm32-unknown-unknown --release \
     && mkdir -p /bindings \
     && wasm-bindgen --target web --out-dir /bindings --out-name mindgrab_state \
