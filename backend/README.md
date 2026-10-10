@@ -4,6 +4,22 @@
 Postgres persistence. It uses `mindgrab-state` directly; there is no JavaScript
 server runtime or separate implementation of document rules.
 
+## Railway deployment
+
+Build the backend service from repository root `/`, using Dockerfile path
+`backend/Dockerfile`. Clear custom build/start commands and set the healthcheck
+path to `/checkhealth`. The old `/server` directory is no longer part of this
+repository. Apply these settings through Railway's dashboard or API.
+
+Set `HOST=::` and `PORT=3000` so the API is reachable on Railway's public and
+private networks. Keep `DATABASE_URL` pointing at the project's Postgres
+service. Configure the WorkOS credentials, `APP_URL` and `WORKOS_REDIRECT_URI`
+as described below. Release builds use WorkOS authentication.
+
+The image contains the compiled native API and trusted HTTPS certificates.
+Postgres schema creation runs on startup. GET `/checkhealth` returns 200 when
+the database is reachable and 503 otherwise; no login is required.
+
 ## Local development
 
 Run `mise run worktree:bootstrap`, `mise run db`, `mise run backend:dev` and

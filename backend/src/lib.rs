@@ -59,6 +59,7 @@ impl Backend {
             ])
             .expose_headers([header::HeaderName::from_static("server-timing")]);
         Router::new()
+            .route("/checkhealth", get(projects::health))
             .route("/api/auth/callback", get(projects::callback))
             .route("/api/{method}", post(projects::rpc))
             .route("/sync/loro/{id}", get(projects::socket))

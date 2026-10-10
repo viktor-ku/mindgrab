@@ -7,6 +7,36 @@ use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn deployment_health_reports_database_readiness_without_a_session() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let response = f
+        .client
+        .get(format!("{}/checkhealth", f.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(response.headers().contains_key("server-timing"));
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["database"]["status"], "up");
+    assert_eq!(f.rpc("getHealth", "", json!({})).await.status(), 200);
+
+    f.backend.pool.close().await;
+    let response = f
+        .client
+        .get(format!("{}/checkhealth", f.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["database"]["status"], "down");
+    assert_eq!(f.rpc("getHealth", "", json!({})).await.status(), 503);
+    f.close().await;
+}
+
 async fn baseline(f: &Fixture, browser: &str, id: Uuid) -> (Project, String) {
     let response = f
         .rpc("getProjectSnapshot", browser, json!({"projectId":id}))

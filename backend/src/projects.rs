@@ -72,6 +72,23 @@ pub async fn callback(
         .callback(&headers, &query.unwrap_or_default())
         .await
 }
+pub async fn health(axum::extract::State(app): AppState) -> Response {
+    let started = std::time::Instant::now();
+    let healthy = matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&app.pool)
+        )
+        .await,
+        Ok(Ok(1))
+    );
+    let ms = started.elapsed().as_secs_f64() * 1000.;
+    let mut response = (if healthy {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},Json(json!({"status":if healthy {"ok"} else {"degraded"},"database":{"status":if healthy {"up"} else {"down"},"latency_ms":if healthy {Some(ms)} else {None}}}))).into_response();
+    response
+        .headers_mut()
+        .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
+    response
+}
 pub async fn rpc(
     axum::extract::State(app): AppState,
     Path(method): Path<String>,
@@ -80,23 +97,7 @@ pub async fn rpc(
     body: Bytes,
 ) -> Result<Response> {
     match method.as_str() {
-        "getHealth" => {
-            let started = std::time::Instant::now();
-            let healthy = matches!(
-                tokio::time::timeout(
-                    Duration::from_secs(2),
-                    sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&app.pool)
-                )
-                .await,
-                Ok(Ok(1))
-            );
-            let ms = started.elapsed().as_secs_f64() * 1000.;
-            let mut response = (if healthy {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},Json(json!({"status":if healthy {"ok"} else {"degraded"},"database":{"status":if healthy {"up"} else {"down"},"latency_ms":if healthy {Some(ms)} else {None}}}))).into_response();
-            response
-                .headers_mut()
-                .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
-            return Ok(response);
-        }
+        "getHealth" => return Ok(health(axum::extract::State(app)).await),
         "startLogin" => return app.auth.start(&headers).await,
         "logout" => return app.auth.logout(&headers).await,
         "getMe" => return Ok(Json(app.auth.identify(&headers).await?).into_response()),
