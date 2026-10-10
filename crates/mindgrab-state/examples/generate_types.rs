@@ -5,7 +5,7 @@ use ts_rs::{Config, TS};
 
 fn main() {
     let config = Config::default();
-    println!("// Generated from Rust by tooling/build-state.ts. Do not edit.");
+    println!("// Generated from Rust by mise run state:build. Do not edit.");
     for declaration in [
         Color::decl(&config),
         Position::decl(&config),

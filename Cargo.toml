@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mindgrab-state", "backend"]
+members = ["crates/mindgrab-state", "backend", "tooling/workspace-bootstrap"]
 resolver = "2"
 
 [workspace.package]

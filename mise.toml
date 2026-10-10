@@ -14,11 +14,12 @@ run = "docker compose up -d postgres"
 
 [tasks."worktree:bootstrap"]
 description = "Create persistent local environment settings for this worktree"
-run = "bun tooling/worktree-bootstrap.ts"
+dir = "{{config_root}}"
+run = "cargo run --locked -p workspace-bootstrap -- ."
 
 [tasks."tooling:test"]
 description = "Verify worktree bootstrap isolation and configuration"
-run = "bun --bun test tooling"
+run = "cargo test --locked -p workspace-bootstrap"
 
 [tasks.install]
 description = "Install locked workspace dependencies"
@@ -42,9 +43,8 @@ description = "Check all Rust code"
 depends = ["state:check"]
 
 [tasks."tooling:check"]
-description = "Check Bun build tooling"
-depends = ["install"]
-run = ["bun --bun run biome check tooling", "bun --bun run tsc -p tsconfig.tooling.json"]
+description = "Check Rust workspace tooling"
+run = ["cargo fmt --all --check", "cargo clippy --locked -p workspace-bootstrap --all-targets -- -D warnings"]
 
 [tasks."webapp:dev"]
 description = "Run the Vite dev server"
@@ -106,7 +106,19 @@ run = ["rustup target add wasm32-unknown-unknown", "cargo install wasm-bindgen-c
 
 [tasks."state:build"]
 description = "Compile the Rust document core to browser WASM and generate types"
-run = "bun --bun tooling/build-state.ts"
+dir = "{{config_root}}"
+run = '''
+set -eu
+if ! command -v wasm-bindgen >/dev/null 2>&1; then
+  echo "Run mise run state:setup to install the WASM target and wasm-bindgen CLI." >&2
+  exit 1
+fi
+cargo build --locked -p mindgrab-state --target wasm32-unknown-unknown --release
+mkdir -p webapp/src/generated/mindgrab-state
+wasm-bindgen --target web --out-dir webapp/src/generated/mindgrab-state --out-name mindgrab_state target/wasm32-unknown-unknown/release/mindgrab_state.wasm
+generated_types="$(cargo run --locked --quiet -p mindgrab-state --features bindings --example generate_types)"
+printf '%s\n' "$generated_types" > webapp/src/generated/mindgrab-state/model.ts
+'''
 
 [tasks."state:test"]
 description = "Test shared Rust document rules and CRDT convergence"
