@@ -20,7 +20,7 @@ set -eu
 worktree_root="$PWD"
 workspace_root="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
 cd "$workspace_root"
-cargo run --locked --target-dir "$workspace_root/target" -p workspace-bootstrap -- "$worktree_root"
+cargo run --release --locked --target-dir "$workspace_root/target" -p workspace-bootstrap -- "$worktree_root"
 '''
 
 [tasks."tooling:test"]
