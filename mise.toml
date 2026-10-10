@@ -15,7 +15,13 @@ run = "docker compose up -d postgres"
 [tasks."worktree:bootstrap"]
 description = "Create persistent local environment settings for this worktree"
 dir = "{{config_root}}"
-run = "cargo run --locked -p workspace-bootstrap -- ."
+run = '''
+set -eu
+worktree_root="$PWD"
+workspace_root="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+cd "$workspace_root"
+cargo run --locked --target-dir "$workspace_root/target" -p workspace-bootstrap -- "$worktree_root"
+'''
 
 [tasks."tooling:test"]
 description = "Verify worktree bootstrap isolation and configuration"
