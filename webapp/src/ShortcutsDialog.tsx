@@ -1,0 +1,159 @@
+import { createEffect, For } from "solid-js";
+import { CloseIcon } from "./icons";
+
+export const MOD_LABEL =
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+    ? "⌘"
+    : "Ctrl+";
+
+const GROUPS: { title: string; items: [string, string][] }[] = [
+  {
+    title: "Write",
+    items: [
+      ["Tab", "Add a child idea"],
+      ["Enter", "Add a sibling idea"],
+      ["⇧Tab", "Insert a parent above the idea"],
+      ["F2 · double-click", "Edit the selected idea"],
+      ["Enter · Esc", "Finish editing"],
+      ["⇧Enter", "New line while editing"],
+    ],
+  },
+  {
+    title: "Move and organize",
+    items: [
+      ["Arrow keys", "Select a nearby idea"],
+      ["Ctrl↑ · Ctrl↓", "Reorder among siblings"],
+      ["Ctrl→", "Move under the idea above"],
+      ["Ctrl←", "Move out to the parent's level"],
+      ["Drag onto an idea", "Move under it, or before/after at its edges"],
+      ["G", "Collapse or expand children"],
+      ["Delete", "Delete the idea and its children"],
+    ],
+  },
+  {
+    title: "Find your way",
+    items: [
+      [`${MOD_LABEL}F · /`, "Search; Esc returns to where you were"],
+      ["F", "Focus on the selected branch"],
+      ["⇧1", "Fit the whole map"],
+      ["⇧2", "Fit the selected branch"],
+      [`${MOD_LABEL}+ · ${MOD_LABEL}−`, "Zoom around the selection"],
+      [`${MOD_LABEL}0`, "Zoom to 100%"],
+      ["Esc", "Clear selection, then leave focus"],
+    ],
+  },
+  {
+    title: "Safety",
+    items: [
+      [`${MOD_LABEL}Z`, "Undo"],
+      [`${MOD_LABEL}⇧Z`, "Redo"],
+      [`${MOD_LABEL}S`, "Save now (saving is automatic)"],
+    ],
+  },
+];
+
+export function ShortcutsDialog(props: {
+  open: boolean;
+  onClose: () => void;
+  wheelMode: "pan" | "zoom";
+  onWheelMode: (mode: "pan" | "zoom") => void;
+}) {
+  let dialog!: HTMLDialogElement;
+  createEffect(() => {
+    if (props.open && !dialog.open) dialog.showModal();
+    else if (!props.open && dialog.open) dialog.close();
+  });
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: Clicking the backdrop closes the dialog; Escape is handled natively.
+    <dialog
+      ref={dialog}
+      class="shortcuts-dialog"
+      aria-labelledby="shortcuts-title"
+      data-no-pan
+      onClose={props.onClose}
+      onCancel={props.onClose}
+      onClick={(e) => {
+        if (e.target === dialog) props.onClose();
+      }}
+    >
+      <header class="flex items-center justify-between gap-4 border-b border-stone-200 px-6 py-4">
+        <h2 id="shortcuts-title" class="text-lg font-semibold">
+          Shortcuts and navigation
+        </h2>
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="Close shortcuts"
+          onClick={props.onClose}
+        >
+          <CloseIcon />
+        </button>
+      </header>
+      <div class="grid min-h-0 gap-x-8 gap-y-6 overflow-y-auto px-6 py-5 sm:grid-cols-2">
+        <For each={GROUPS}>
+          {(group) => (
+            <section>
+              <h3 class="mb-2 text-xs font-semibold tracking-wide text-stone-500 uppercase">
+                {group.title}
+              </h3>
+              <dl class="space-y-1.5 text-sm">
+                <For each={group.items}>
+                  {([keys, action]) => (
+                    <div class="flex items-baseline justify-between gap-4">
+                      <dt class="text-stone-700">{action}</dt>
+                      <dd class="shrink-0">
+                        <kbd>{keys}</kbd>
+                      </dd>
+                    </div>
+                  )}
+                </For>
+              </dl>
+            </section>
+          )}
+        </For>
+        <section class="sm:col-span-2">
+          <h3 class="mb-2 text-xs font-semibold tracking-wide text-stone-500 uppercase">
+            Scrolling on the canvas
+          </h3>
+          <fieldset class="grid gap-2 sm:grid-cols-2">
+            <legend class="sr-only">What scrolling does</legend>
+            <label class="choice-card">
+              <input
+                type="radio"
+                name="wheel-mode"
+                checked={props.wheelMode === "pan"}
+                onChange={() => props.onWheelMode("pan")}
+              />
+              <span>
+                <span class="block font-medium text-stone-800">
+                  Scroll moves the map
+                </span>
+                <span class="block text-xs text-stone-500">
+                  Best for trackpads. Pinch or hold {MOD_LABEL.replace("+", "")}{" "}
+                  to zoom.
+                </span>
+              </span>
+            </label>
+            <label class="choice-card">
+              <input
+                type="radio"
+                name="wheel-mode"
+                checked={props.wheelMode === "zoom"}
+                onChange={() => props.onWheelMode("zoom")}
+              />
+              <span>
+                <span class="block font-medium text-stone-800">
+                  Scroll zooms
+                </span>
+                <span class="block text-xs text-stone-500">
+                  Best for mouse wheels. Drag the background to move.
+                </span>
+              </span>
+            </label>
+          </fieldset>
+        </section>
+      </div>
+    </dialog>
+  );
+}

@@ -55,50 +55,68 @@ export function AccountControls(props: {
 
   return (
     <section
-      class="mt-1 border-t border-stone-200 pt-1 text-sm"
+      data-no-pan
+      data-toolbar
+      class="map-toolbar pointer-events-auto flex max-w-72 flex-col gap-1 text-sm cursor-default"
       aria-label="Account"
     >
-      <Show when={props.state.user}>
-        {(user) => (
-          <div class="flex items-center gap-1">
-            <span class="min-w-0 flex-1 truncate px-2" title={user().email}>
-              {user().name || user().email || "Cached account"}
-            </span>
-            <button
-              type="button"
-              class="map-control"
-              disabled={navigating() || props.claiming}
-              onClick={() => void navigate("logout")}
-            >
-              Sign out
-            </button>
-          </div>
-        )}
-      </Show>
-      <Show when={props.state.status === "checking"}>
-        <p role="status" class="px-2 py-2 text-xs text-stone-500">
-          Checking account…
-        </p>
-      </Show>
-      <Show
-        when={
-          props.state.status !== "authenticated" &&
-          props.state.status !== "checking"
-        }
-      >
-        <button
-          type="button"
-          class="map-control block"
-          disabled={navigating() || props.claiming}
-          onClick={() => void navigate("login")}
+      <div class="flex items-center gap-1">
+        <Show when={props.state.user}>
+          {(user) => (
+            <>
+              <span
+                aria-hidden="true"
+                class="ml-1 grid size-7 shrink-0 place-items-center rounded-full bg-stone-800 text-xs font-semibold text-white"
+              >
+                {(user().name || user().email || "?")
+                  .trim()
+                  .charAt(0)
+                  .toUpperCase()}
+              </span>
+              <span
+                class="min-w-0 max-w-36 truncate px-1 text-stone-700"
+                title={user().email}
+              >
+                {user().name || user().email || "Cached account"}
+              </span>
+              <Show when={props.state.status === "authenticated"}>
+                <button
+                  type="button"
+                  class="map-control text-xs! text-stone-500"
+                  disabled={navigating() || props.claiming}
+                  onClick={() => void navigate("logout")}
+                >
+                  Sign out
+                </button>
+              </Show>
+            </>
+          )}
+        </Show>
+        <Show when={props.state.status === "checking"}>
+          <p role="status" class="px-2 py-2 text-xs text-stone-500">
+            Checking account…
+          </p>
+        </Show>
+        <Show
+          when={
+            props.state.status !== "authenticated" &&
+            props.state.status !== "checking"
+          }
         >
-          {props.state.user ? "Sign in again" : "Sign in"}
-        </button>
-      </Show>
+          <button
+            type="button"
+            class="primary-button px-3! py-1.5! text-xs!"
+            disabled={navigating() || props.claiming}
+            onClick={() => void navigate("login")}
+          >
+            {props.state.user ? "Sign in again" : "Sign in"}
+          </button>
+        </Show>
+      </div>
       <Show
         when={props.state.status === "authenticated" && props.claimCount > 0}
       >
-        <div class="px-2 py-1 text-xs">
+        <div class="border-t border-stone-100 px-2 py-1.5 text-xs text-stone-600">
           <p>
             {props.claimCount} anonymous{" "}
             {props.claimCount === 1 ? "project is" : "projects are"} saved
@@ -106,7 +124,7 @@ export function AccountControls(props: {
           </p>
           <button
             type="button"
-            class="map-control mt-1"
+            class="map-control mt-1 -ml-2 text-xs! font-medium text-blue-700"
             disabled={props.claiming || navigating()}
             onClick={props.onClaim}
           >

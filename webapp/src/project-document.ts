@@ -233,11 +233,12 @@ function create(
   doc: ProjectDocument,
   parent: string | null,
   init: NewNode = {},
+  index: number | null = null,
 ) {
   const id = doc.dispatch({
     type: "createNode",
     parent,
-    index: null,
+    index,
     text: init.text ?? "",
     color: init.color ?? "blue",
   }).createdNode!;
@@ -245,6 +246,12 @@ function create(
     doc.dispatch({ type: "setPosition", id, position: init.position });
   return id;
 }
+export const createNodeAt = (
+  doc: ProjectDocument,
+  parent: string | null,
+  index: number,
+  init: NewNode = {},
+) => create(doc, parent, init, index);
 export const createRoot = (doc: ProjectDocument, init: NewNode = {}) =>
   create(doc, null, init);
 export const createChild = (
@@ -293,6 +300,21 @@ export const reorderNode = (
   id: string,
   direction: -1 | 1,
 ) => doc.dispatch({ type: "reorderNode", id, direction }).changed;
+export const moveNode = (
+  doc: ProjectDocument,
+  id: string,
+  parent: string | null,
+  index: number,
+) => doc.dispatch({ type: "moveNode", id, parent, index }).changed;
+// Returns the branch to automatic placement.
+export function clearPositions(doc: ProjectDocument, ids: Iterable<string>) {
+  let changed = false;
+  for (const id of ids)
+    changed =
+      doc.dispatch({ type: "setPosition", id, position: null }).changed ||
+      changed;
+  return changed;
+}
 export const translateSubtree = (
   doc: ProjectDocument,
   id: string,

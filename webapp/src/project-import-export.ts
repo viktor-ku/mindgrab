@@ -29,6 +29,8 @@ export interface ViewportPreference {
   top: number;
   zoom: number;
   anchor?: { id: string; centerY: number };
+  // Folded branches in this browser; ids of nodes that no longer exist are ignored.
+  collapsed?: string[];
 }
 
 export interface ProjectFile {
@@ -288,6 +290,10 @@ const JSON_FILE_TYPE = [
   },
 ];
 
+const MARKDOWN_FILE_TYPE = [
+  { description: "Markdown outline", accept: { "text/markdown": [".md"] } },
+];
+
 function safeFileName(name: string): string {
   return Array.from(name, (character) =>
     /[<>:"/\\|?*]/.test(character) || character.charCodeAt(0) < 32
@@ -317,29 +323,78 @@ export async function readProjectFile(): Promise<File | undefined> {
   });
 }
 
-export async function writeProjectFile(
-  fileName: string,
-  json: string,
+export function writeProjectFile(fileName: string, json: string) {
+  return writeFile(
+    `${safeFileName(fileName)}.mindgrab.json`,
+    json,
+    "application/json",
+    JSON_FILE_TYPE,
+  );
+}
+
+export function writeMarkdownFile(fileName: string, markdown: string) {
+  return writeFile(
+    `${safeFileName(fileName)}.md`,
+    markdown,
+    "text/markdown",
+    MARKDOWN_FILE_TYPE,
+  );
+}
+
+// A readable outline of every node, folded or not. Nested list items keep the
+// hierarchy; line breaks inside a node continue its list item.
+interface OutlineNode {
+  id: string;
+  next?: readonly OutlineNode[];
+}
+
+export function projectMarkdown(
+  name: string,
+  roots: readonly OutlineNode[],
+  text: (id: string) => string,
+) {
+  const lines = [`# ${escapeMarkdown(name.trim() || "Untitled map")}`, ""];
+  const visit = (nodes: readonly OutlineNode[], depth: number) => {
+    for (const node of nodes) {
+      const indent = "  ".repeat(depth);
+      const [first = "", ...rest] = (text(node.id).trim() || "New idea").split(
+        /\r?\n/,
+      );
+      lines.push(`${indent}- ${escapeMarkdown(first)}`);
+      for (const line of rest)
+        lines.push(`${indent}  ${escapeMarkdown(line)}`.trimEnd());
+      visit(node.next ?? [], depth + 1);
+    }
+  };
+  visit(roots, 0);
+  return `${lines.join("\n")}\n`;
+}
+
+// Leading list, heading and quote markers would change the outline structure.
+function escapeMarkdown(line: string) {
+  return line.replace(/^(\s*)([#>+*-]|\d+[.)])(\s)/, "$1\\$2$3");
+}
+
+async function writeFile(
+  suggestedName: string,
+  contents: string,
+  type: string,
+  types: { description: string; accept: Record<string, string[]> }[],
 ): Promise<void> {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker })
     .showSaveFilePicker;
   if (picker) {
-    const handle = await picker.call(window, {
-      suggestedName: `${safeFileName(fileName)}.mindgrab.json`,
-      types: JSON_FILE_TYPE,
-    });
+    const handle = await picker.call(window, { suggestedName, types });
     const writable = await handle.createWritable();
-    await writable.write(json);
+    await writable.write(contents);
     await writable.close();
     return;
   }
 
-  const url = URL.createObjectURL(
-    new Blob([json], { type: "application/json" }),
-  );
+  const url = URL.createObjectURL(new Blob([contents], { type }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${safeFileName(fileName)}.mindgrab.json`;
+  link.download = suggestedName;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
