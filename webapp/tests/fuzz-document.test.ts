@@ -24,7 +24,7 @@ function run(seed: number) {
   const doc = createProjectDocument(crypto.randomUUID(), "Fuzz", {
     text: "root",
   });
-  const history = new EditHistory(doc);
+  let history = new EditHistory(doc);
   // Views before each recorded step, and views undone that redo can restore.
   const past: string[] = [];
   const future: string[] = [];
@@ -44,13 +44,32 @@ function run(seed: number) {
         expect(canonical(doc)).toBe(future.pop() as string);
         past.push(before);
       } else {
-        // One to three edits form one undo step, like typing a word. Edits
-        // that cancel out still record a step, so change is judged by version.
+        // One to three edits form one undo step, like typing a word. Loro
+        // records a step for every net change, and may drop one whose edits
+        // cancel out, so its own step count decides what undo will revert.
+        const steps = doc.native().undoCount();
         const version = doc.version();
         const edits = 1 + (rng.chance(0.2) ? rng.int(3) : 0);
         for (let i = 0; i < edits; i++) log.push(tryEdit(rng, doc));
         history.finishGroup();
-        if (doc.version() !== version) {
+        // At the 100-step cap a new step replaces the oldest, so the count
+        // stays put; any change then counts as recorded.
+        const recorded =
+          doc.native().undoCount() !== steps ||
+          (steps === UNDO_LIMIT && doc.version() !== version);
+        if (canonical(doc) !== before && !recorded)
+          throw new Error("A visible change recorded no undo step");
+        if (canonical(doc) === before && doc.version() !== version) {
+          // Edits that cancel out may or may not leave a step; the editor
+          // never produces them, so start a fresh history instead of guessing.
+          history.destroy();
+          doc.clearHistory();
+          history = new EditHistory(doc);
+          past.length = 0;
+          future.length = 0;
+          continue;
+        }
+        if (recorded) {
           past.push(before);
           if (past.length > UNDO_LIMIT) past.shift();
           future.length = 0;

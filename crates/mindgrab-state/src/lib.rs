@@ -70,6 +70,7 @@ impl Project {
         let mut undo = UndoManager::new(&doc);
         undo.add_exclude_origin_prefix("preferences");
         undo.add_exclude_origin_prefix("note-init");
+        undo.add_exclude_origin_prefix("repair");
         Ok(Self { doc, undo })
     }
 
@@ -446,9 +447,11 @@ impl Project {
             }
             Command::Undo => {
                 self.undo.undo()?;
+                self.remove_blank_nodes()?;
             }
             Command::Redo => {
                 self.undo.redo()?;
+                self.remove_blank_nodes()?;
             }
         }
         self.doc.commit_with(CommitOptions::new().origin(origin));
@@ -506,9 +509,10 @@ impl Project {
             return Err(StateError::ResourceLimit);
         }
         for id in tree.nodes() {
-            // Undoing a step that created and then deleted a node recreates it
-            // as an empty tombstone. It never held data and can never show.
-            if tree.is_node_deleted(&id)? && tree.get_meta(id)?.is_empty() {
+            // Undo can recreate a node without its data: as an empty tombstone
+            // after a step that created and deleted it, or as a live leaf when
+            // it moves a node another replica deleted. Neither has content.
+            if self.is_blank(id)? {
                 continue;
             }
             self.node_data(id)?;
@@ -518,6 +522,9 @@ impl Project {
         let mut nodes = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while let Some((id, depth)) = pending.pop() {
+            if self.is_blank(id)? {
+                continue;
+            }
             let stable = self.stable_id(id)?;
             // Concurrent undo can recreate the same application node twice.
             // Choose the first visible branch in Loro's deterministic order.
@@ -574,6 +581,33 @@ impl Project {
             roots,
             nodes,
         })
+    }
+
+    /// A node with no data and no children, which undo can leave behind.
+    fn is_blank(&self, id: TreeID) -> Result<bool> {
+        let tree = self.tree();
+        Ok(tree.get_meta(id)?.is_empty()
+            && (tree.is_node_deleted(&id)?
+                || tree.children(Some(id)).unwrap_or_default().is_empty()))
+    }
+
+    /// Deletes live blank nodes an undo or redo just recreated, in a commit
+    /// excluded from undo history; they carry nothing a person could see.
+    fn remove_blank_nodes(&mut self) -> Result<()> {
+        let tree = self.tree();
+        let blank: Vec<TreeID> = live_nodes(&tree)
+            .into_iter()
+            .filter(|id| self.is_blank(*id).unwrap_or(false))
+            .collect();
+        if blank.is_empty() {
+            return Ok(());
+        }
+        self.doc.commit();
+        for id in blank {
+            tree.delete(id)?;
+        }
+        self.doc.commit_with(CommitOptions::new().origin("repair"));
+        Ok(())
     }
 
     fn node_data(&self, id: TreeID) -> Result<(String, Color, Option<Position>)> {

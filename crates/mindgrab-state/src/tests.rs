@@ -891,3 +891,36 @@ fn deleted_nodes_do_not_count_toward_the_node_limit() {
     create(&mut project, Some(&root), "still possible");
     assert_eq!(project.view().unwrap().nodes.len(), 2);
 }
+
+#[test]
+fn undoing_a_move_of_a_remotely_deleted_node_leaves_no_blank_idea() {
+    // Loro recreates a deleted node without its data when undo moves it back.
+    for delete_moved in [false, true] {
+        let mut r0 = Project::new("Concurrent").unwrap();
+        let a = create(&mut r0, None, "a");
+        let b = create(&mut r0, None, "b");
+        r0.clear_history();
+        let mut r1 = Project::from_snapshot(&r0.snapshot().unwrap()).unwrap();
+        r0.start_group().unwrap();
+        r0.apply(Command::MoveNode {
+            id: a.clone(),
+            parent: Some(b.clone()),
+            index: 0,
+        })
+        .unwrap();
+        r0.stop_group();
+        r0.start_group().unwrap();
+        r1.merge(&r0.snapshot().unwrap()).unwrap();
+        let deleted = if delete_moved { a.clone() } else { b.clone() };
+        r1.apply(Command::DeleteNode { id: deleted }).unwrap();
+        r0.merge(&r1.snapshot().unwrap()).unwrap();
+        r0.apply(Command::Undo).unwrap();
+        let view = r0.view().unwrap();
+        assert!(view.nodes.iter().all(|node| !node.text.is_empty()));
+        r1.merge(&r0.snapshot().unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(r1.view().unwrap()).unwrap(),
+            serde_json::to_value(view).unwrap()
+        );
+    }
+}
