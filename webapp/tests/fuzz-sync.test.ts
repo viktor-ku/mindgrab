@@ -82,6 +82,10 @@ class Trace {
 interface Touched {
   nodes: Set<string>;
   name: boolean;
+  // Whether this replica deleted a branch, and whether it has undone since,
+  // which can recreate the branch from its old data.
+  deleted?: boolean;
+  recreated?: boolean;
 }
 
 // Records every command a replica dispatches, with shortened node ids, and
@@ -96,6 +100,7 @@ function instrument(
   doc.dispatch = (command) => {
     const { type, ...rest } = command;
     // Branch commands touch every node in the branch as it is now.
+    if (command.type === "deleteNode") touched.deleted = true;
     if (
       command.type === "colorBranch" ||
       command.type === "deleteNode" ||
@@ -399,8 +404,14 @@ function onlyLocalChanges(
 // can keep searching for new ones. Each has a skipped `repro:` test below;
 // delete its entry here once the repro passes.
 const STRICT = !!process.env.FUZZ_STRICT;
-const KNOWN_BUGS: { name: string; matches: (message: string) => boolean }[] =
-  [];
+const KNOWN_BUGS: { name: string; matches: (message: string) => boolean }[] = [
+  {
+    // repro: undoing a delete drops concurrent remote edits to the branch
+    name: "redo/undo round trips are inexact once undo can recreate a deleted branch (Loro)",
+    matches: (message) =>
+      message.includes("[after a delete that undo can recreate]"),
+  },
+];
 const knownHits = new Map<string, number>();
 const SIBLING_ORDER =
   "undo then redo of a create or move can change sibling order after concurrent inserts";
@@ -426,7 +437,32 @@ function sameView(actual: string, expected: string, message: string) {
     knownHits.set(SIBLING_ORDER, (knownHits.get(SIBLING_ORDER) ?? 0) + 1);
     return;
   }
-  expect(actual, message).toBe(expected);
+  throw new Error(`${message}\n${viewDiff(expected, actual)}`);
+}
+
+// Field-level differences between two canonical views, readable even when
+// the views are too large to print.
+function viewDiff(expected: string, actual: string) {
+  type View = Pick<DocumentView, "name" | "roots" | "nodes">;
+  const [e, a] = [JSON.parse(expected) as View, JSON.parse(actual) as View];
+  const out: string[] = [];
+  if (e.name !== a.name) out.push(`name ${e.name} -> ${a.name}`);
+  if (JSON.stringify(e.roots) !== JSON.stringify(a.roots))
+    out.push(`roots ${JSON.stringify(e.roots)} -> ${JSON.stringify(a.roots)}`);
+  for (const id of new Set([...e.nodes, ...a.nodes].map((node) => node.id))) {
+    const x = e.nodes.find((node) => node.id === id);
+    const y = a.nodes.find((node) => node.id === id);
+    if (!x || !y) {
+      out.push(`${id} ${x ? "missing" : "extra"}: ${JSON.stringify(x ?? y)}`);
+      continue;
+    }
+    for (const key of Object.keys(x) as (keyof typeof x)[])
+      if (JSON.stringify(x[key]) !== JSON.stringify(y[key]))
+        out.push(
+          `${id}.${key}: ${JSON.stringify(x[key])} -> ${JSON.stringify(y[key])}`,
+        );
+  }
+  return out.join("\n");
 }
 const totals = {
   operations: 0,
@@ -455,6 +491,7 @@ function undoStep(
     redo,
     roundTrip: wantRoundTrip,
   });
+  if (!redo && replica.touched.deleted) replica.touched.recreated = true;
   const bytes = replica.doc.snapshot();
   const before = replica.doc.view();
   const canUndo = replica.history.canUndo();
@@ -493,6 +530,12 @@ function undoStep(
         nodes: before.nodes,
       });
     if (!visible && (redo ? canRedo : canUndo)) totals.emptySteps++;
+    // Undoing a delete recreates the branch from its old data, possibly as
+    // a second copy that redo/undo can swap with the first, so exact round
+    // trips are not guaranteed once a replica has deleted a branch.
+    const recreated = replicas.some((other) => other.touched.recreated)
+      ? " [after a delete that undo can recreate]"
+      : "";
     if (roundTrip && visible) {
       if (redo) replica.history.undo();
       else replica.history.redo();
@@ -504,14 +547,14 @@ function undoStep(
           roots: before.roots,
           nodes: before.nodes,
         }),
-        `${context}: ${action} then reverse on ${replica.name} did not restore the view`,
+        `${context}: ${action} then reverse on ${replica.name} did not restore the view${recreated}`,
       );
       if (redo) replica.history.redo();
       else replica.history.undo();
       sameView(
         canonical(replica.doc),
         after,
-        `${context}: repeating ${action} on ${replica.name} differs`,
+        `${context}: repeating ${action} on ${replica.name} differs${recreated}`,
       );
     }
   } catch (error) {

@@ -924,3 +924,60 @@ fn undoing_a_move_of_a_remotely_deleted_node_leaves_no_blank_idea() {
         );
     }
 }
+
+#[test]
+fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
+    // Undo may recreate the deleted node with only part of its data, such as
+    // an older color; which way it goes depends on peer ids, so repeat.
+    for grouped in [false, true] {
+        for _ in 0..100 {
+            let mut r0 = Project::new("P").unwrap();
+            let n0 = create(&mut r0, None, "n0");
+            r0.clear_history();
+            let mut r2 = Project::from_snapshot(&r0.snapshot().unwrap()).unwrap();
+            let n1 = r0
+                .apply(Command::CreateSibling {
+                    id: n0.clone(),
+                    text: "n1".into(),
+                    color: Color::Blue,
+                })
+                .unwrap()
+                .created_node
+                .unwrap();
+            r2.merge(&r0.snapshot().unwrap()).unwrap();
+            r2.start_group().unwrap();
+            r2.apply(Command::SetColor {
+                id: n0.clone(),
+                color: Color::Green,
+            })
+            .unwrap();
+            if !grouped {
+                r2.stop_group();
+                r2.start_group().unwrap();
+            }
+            r2.apply(Command::MoveNode {
+                id: n0.clone(),
+                parent: Some(n1.clone()),
+                index: 0,
+            })
+            .unwrap();
+            r2.stop_group();
+            r2.start_group().unwrap();
+            r0.apply(Command::SetColor {
+                id: n1.clone(),
+                color: Color::Green,
+            })
+            .unwrap();
+            r0.apply(Command::DeleteNode { id: n0.clone() }).unwrap();
+            r2.merge(&r0.snapshot().unwrap()).unwrap();
+            r2.apply(Command::Undo).unwrap();
+            let view = r2.view().unwrap();
+            assert!(view.nodes.iter().all(|node| !node.text.is_empty()));
+            r0.merge(&r2.snapshot().unwrap()).unwrap();
+            assert_eq!(
+                serde_json::to_value(r0.view().unwrap()).unwrap(),
+                serde_json::to_value(view).unwrap()
+            );
+        }
+    }
+}

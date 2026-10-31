@@ -583,10 +583,12 @@ impl Project {
         })
     }
 
-    /// A node with no data and no children, which undo can leave behind.
+    /// A childless node without a stable id, which undo can leave behind when
+    /// it recreates a deleted node with none or only part of its data (say,
+    /// just an older color). It has no identity or text a person could see.
     fn is_blank(&self, id: TreeID) -> Result<bool> {
         let tree = self.tree();
-        Ok(tree.get_meta(id)?.is_empty()
+        Ok(tree.get_meta(id)?.get("id").is_none()
             && (tree.is_node_deleted(&id)?
                 || tree.children(Some(id)).unwrap_or_default().is_empty()))
     }
