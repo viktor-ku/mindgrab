@@ -69,6 +69,16 @@ const harness = {
       .filter((doc) => doc.view().nodes.some((node) => node.id === id))
       .map((doc) => editNodeText(doc, id, 0, 0, insert)),
   retiredObservers: () => retired.map((doc) => doc.observerCount),
+  // Read-only view of the local undo stack, for the UI fuzzer's history model.
+  history: () =>
+    local.ready
+      ? {
+          undo: local.native().undoCount(),
+          redo: local.native().redoCount(),
+          canUndo: local.native().canUndo(),
+          canRedo: local.native().canRedo(),
+        }
+      : { undo: 0, redo: 0, canUndo: false, canRedo: false },
 };
 export type Harness = typeof harness;
 

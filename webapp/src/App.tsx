@@ -1407,6 +1407,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   createEffect(() => {
     const id = focusId();
     if (id && !details().has(id)) untrack(exitFocus);
+    // An idea outside the branch (selected by undo, a remote move or search)
+    // would be edited invisibly; show the whole map instead.
+    else if (
+      id &&
+      selectedId() &&
+      !untrack(() => inFocus(selectedId() as string))
+    )
+      untrack(exitFocus);
   });
 
   const [searchOpen, setSearchOpen] = createSignal(false);
@@ -1482,7 +1490,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     canvas.focus({ preventScroll: true });
   }
   createEffect(
-    on([searchResults, searchIndex], ([results, index]) => {
+    // Preview follows the query and the highlighted result only. Edits made
+    // while searching also change the results, but must not move the
+    // selection (or the editor) to another idea.
+    on([searchQuery, searchIndex], ([, index]) => {
+      const results = untrack(searchResults);
       const result = results[Math.min(index, results.length - 1)];
       if (result) untrack(() => previewResult(result.id));
     }),
@@ -2331,6 +2343,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (blockedByFocus(id, "move")) return;
     const parent =
       target.kind === "inside" ? target.id : details().get(target.id)?.parent;
+    // In branch focus a move may only land inside the focused branch.
+    if (focusId() && !(parent && inFocus(parent))) {
+      showNotice({
+        message: "Leave focus to move ideas out of this branch",
+        action: { label: "Leave focus", run: exitFocus },
+      });
+      return;
+    }
     if ((parent ? depthOf(parent) : 0) + branchHeight(id) > MAX_DEPTH)
       return tooDeep();
     const siblings = childrenOf(parent).filter((node) => node.id !== id);
@@ -2352,6 +2372,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         : `Moved “${nodeLabel(id)}” to the top level`,
       action: { label: "Undo", run: undo },
     });
+  }
+
+  // Whether an idea is the focused branch's root or inside it.
+  function inFocus(id: string) {
+    const focus = focusId();
+    if (!focus) return true;
+    for (let at: string | undefined = id; at; at = details().get(at)?.parent)
+      if (at === focus) return true;
+    return false;
   }
 
   // The focused branch's root anchors the view; moving it would take the
@@ -2492,6 +2521,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       (nodeId && writing() && selectedId() === nodeId)
     )
       return;
+    // Working on the map ends an open search, keeping the result in view.
+    if (searchOpen()) closeSearch(true);
     suppressClick = false;
     if (nodeId) {
       finishWriting();
@@ -2877,6 +2908,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         manager.finishGroup();
         if (action === "undo") manager.undo();
         else manager.redo();
+        // If the restored state is not an edit, keep keys working on the map.
+        queueMicrotask(() => {
+          if (!writing() && document.activeElement === document.body)
+            canvas.focus({ preventScroll: true });
+        });
       } else if (action === "undo") undo();
       else redo();
     };
@@ -3807,7 +3843,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </For>
         </nav>
       </Show>
-      <div class="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-20 flex sm:bottom-3 w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+      {/* The notice keeps its place above the selection toolbar's slot, so the
+          toolbar reappearing (when an edit ends on press) never moves it from
+          under the pointer. */}
+      <div class="pointer-events-none absolute bottom-[8.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center sm:bottom-[4.25rem]">
         <Show when={notice()}>
           {(current) => (
             <div
@@ -3840,6 +3879,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             </div>
           )}
         </Show>
+      </div>
+      <div class="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-20 flex sm:bottom-3 w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
         <Show when={selectedId() && !writing() && !drag()}>
           <section
             data-no-pan
