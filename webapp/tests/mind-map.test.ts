@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { MindMapNode } from "../src/mind-map";
 import {
+  branchIds,
   connectionPath,
+  dropTargetAt,
   findNode,
   layoutMindMap,
   translateSubtree,
@@ -150,5 +152,78 @@ describe("layout stability", () => {
     }
     expect(nodeAt(after, "new").x).toBe(parent.x + parent.width + 64);
     expect(nodeAt(after, "new").y).toBeGreaterThan(parent.y);
+  });
+});
+
+describe("drop targets", () => {
+  const nodes = [
+    { id: "a", x: 0, y: 0, width: 100, height: 40 },
+    { id: "b", x: 0, y: 50, width: 100, height: 40 },
+    { id: "far", x: 400, y: 400, width: 100, height: 40 },
+  ];
+  const none = new Set<string>();
+
+  test("the middle of a node is inside, its top and bottom edges are before and after", () => {
+    expect(dropTargetAt(nodes, { x: 50, y: 20 }, none)).toEqual({
+      kind: "inside",
+      id: "a",
+    });
+    expect(dropTargetAt(nodes, { x: 50, y: 2 }, none)).toEqual({
+      kind: "before",
+      id: "a",
+    });
+    expect(dropTargetAt(nodes, { x: 50, y: 38 }, none)).toEqual({
+      kind: "after",
+      id: "a",
+    });
+    expect(dropTargetAt(nodes, { x: 450, y: 420 }, none)).toEqual({
+      kind: "inside",
+      id: "far",
+    });
+  });
+
+  test("a small margin around a node still counts, empty canvas does not", () => {
+    expect(dropTargetAt(nodes, { x: 104, y: 20 }, none)).toEqual({
+      kind: "inside",
+      id: "a",
+    });
+    expect(dropTargetAt(nodes, { x: 50, y: -5 }, none)?.kind).toBe("before");
+    expect(dropTargetAt(nodes, { x: 110, y: 20 }, none)).toBeUndefined();
+    expect(dropTargetAt(nodes, { x: 250, y: 250 }, none)).toBeUndefined();
+    expect(dropTargetAt([], { x: 0, y: 0 }, none)).toBeUndefined();
+  });
+
+  test("between overlapping margins the nearest node wins", () => {
+    // y = 44 lies in a's bottom margin and b's top margin; b's center is nearer.
+    expect(dropTargetAt(nodes, { x: 50, y: 46 }, none)).toEqual({
+      kind: "before",
+      id: "b",
+    });
+    expect(dropTargetAt(nodes, { x: 50, y: 43 }, none)).toEqual({
+      kind: "after",
+      id: "a",
+    });
+  });
+
+  test("short nodes keep a usable middle and excluded nodes are skipped", () => {
+    const short = [{ id: "s", x: 0, y: 0, width: 80, height: 20 }];
+    expect(dropTargetAt(short, { x: 40, y: 10 }, none)?.kind).toBe("inside");
+    expect(dropTargetAt(short, { x: 40, y: 4 }, none)?.kind).toBe("before");
+    expect(dropTargetAt(short, { x: 40, y: 16 }, none)?.kind).toBe("after");
+    expect(
+      dropTargetAt(nodes, { x: 50, y: 20 }, new Set(["a"])),
+    ).toBeUndefined();
+  });
+});
+
+describe("branchIds", () => {
+  test("collects a node and all its descendants", () => {
+    expect([...branchIds(tree(), "a")].sort()).toEqual(["a", "b", "c", "d"]);
+    expect([...branchIds(tree(), "b")].sort()).toEqual(["b", "c"]);
+    expect([...branchIds(tree(), "e")]).toEqual(["e"]);
+  });
+
+  test("an unknown id is an empty branch", () => {
+    expect(branchIds(tree(), "missing").size).toBe(0);
   });
 });

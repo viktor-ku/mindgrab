@@ -137,9 +137,25 @@ export class ProjectDocument {
     return result;
   }
   dispatch(command: Command): CommandResult {
+    if (this.#batching)
+      return JSON.parse(this.native().dispatch(JSON.stringify(command)));
     return this.change(() =>
       JSON.parse(this.native().dispatch(JSON.stringify(command))),
     );
+  }
+  #batching = false;
+  // Applies many commands as one change, so observers (persistence, sync and
+  // the view) process a large paste once instead of once per node.
+  batch<T>(action: () => T): T {
+    if (this.#batching) return action();
+    return this.change(() => {
+      this.#batching = true;
+      try {
+        return action();
+      } finally {
+        this.#batching = false;
+      }
+    });
   }
   merge(bytes: Uint8Array, origin: unknown = ORIGIN.remote) {
     if (!bytes.length) return;

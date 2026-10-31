@@ -15,6 +15,7 @@ import {
   parseProjectFile,
   prepareProjectImport,
   projectFileFromContent,
+  projectMarkdown,
   serializeProjectFile,
 } from "../src/project-import-export";
 
@@ -137,5 +138,61 @@ describe("file validation", () => {
     expect(() => parseProjectFile(JSON.stringify(file([root])))).toThrow(
       "100 levels",
     );
+  });
+});
+
+describe("Markdown outline", () => {
+  const texts = new Map([
+    ["a", "Plan"],
+    ["b", "First line\r\nsecond line\n\n  indented"],
+    ["c", "  "],
+    ["d", "# not a heading"],
+    ["e", "- not a list"],
+    ["f", "1. not numbered"],
+    ["g", "> quote\n* star"],
+    ["h", "Plain #hash and a - dash"],
+  ]);
+  const text = (id: string) => texts.get(id) ?? "";
+
+  test("nests every node as list items under the project title", () => {
+    const roots = [
+      {
+        id: "a",
+        next: [{ id: "b", next: [{ id: "c" }] }, { id: "h" }],
+      },
+      { id: "d" },
+    ];
+    expect(projectMarkdown("Roadmap", roots, text)).toBe(
+      [
+        "# Roadmap",
+        "",
+        "- Plan",
+        "  - First line",
+        "    second line",
+        "",
+        "      indented",
+        "    - New idea",
+        "  - Plain #hash and a - dash",
+        "- \\# not a heading",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  test("escapes leading Markdown markers and names untitled maps", () => {
+    expect(
+      projectMarkdown("  ", [{ id: "e" }, { id: "f" }, { id: "g" }], text),
+    ).toBe(
+      [
+        "# Untitled map",
+        "",
+        "- \\- not a list",
+        "- \\1. not numbered",
+        "- \\> quote",
+        "  \\* star",
+        "",
+      ].join("\n"),
+    );
+    expect(projectMarkdown("# Notes", [], text)).toBe("# \\# Notes\n\n");
   });
 });

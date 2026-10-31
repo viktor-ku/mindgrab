@@ -382,6 +382,19 @@ interface Notice {
   action?: { label: string; run: () => void };
 }
 
+const formatDate = (iso: string) => {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? "earlier"
+    : date.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        ...(date.getFullYear() !== new Date().getFullYear() && {
+          year: "numeric",
+        }),
+      });
+};
+
 const truncate = (text: string, length: number) =>
   text.length > length ? `${text.slice(0, length - 1).trimEnd()}…` : text;
 
@@ -1054,6 +1067,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     return id ? findNode(forest(), id) : undefined;
   });
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
+  const connections = createMemo(
+    () =>
+      new Map(
+        layout().connections.map((connection) => [
+          connection.to.id,
+          connection,
+        ]),
+      ),
+  );
   const [left, setLeft] = createSignal(0);
   const [top, setTop] = createSignal(0);
   const [zoom, setZoom] = createSignal(1);
@@ -1074,6 +1096,23 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
     | undefined;
   let suppressClick = false;
+
+  // Read from a ResizeObserver so following the selection while typing never
+  // forces a synchronous layout of the whole map.
+  const [canvasSize, setCanvasSize] = createSignal({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  onMount(() => {
+    const observer = new ResizeObserver(([entry]) =>
+      setCanvasSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      }),
+    );
+    observer.observe(canvas);
+    onCleanup(() => observer.disconnect());
+  });
 
   // Canvas units map to screen pixels relative to the canvas center through
   // `left/top + zoom * (point - origin)`. The origin keeps the first root
@@ -1114,8 +1153,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     bounds: NonNullable<ReturnType<typeof nodeBounds>>,
     maxZoom: number,
   ) {
-    const width = canvas.clientWidth - viewInsets().left - viewInsets().right;
-    const height = canvas.clientHeight - viewInsets().top - viewInsets().bottom;
+    const width = canvasSize().width - viewInsets().left - viewInsets().right;
+    const height = canvasSize().height - viewInsets().top - viewInsets().bottom;
     const next = Math.min(
       maxZoom,
       ZOOM_MAX,
@@ -1166,8 +1205,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (!node || !canvas) return;
     const origin = viewOrigin();
     const scale = zoom();
-    const halfWidth = canvas.clientWidth / 2;
-    const halfHeight = canvas.clientHeight / 2;
+    const halfWidth = canvasSize().width / 2;
+    const halfHeight = canvasSize().height / 2;
     const screenLeft = left() + scale * (node.x - origin.x);
     const screenTop = top() + scale * (node.y - origin.y);
     const screenRight = screenLeft + scale * node.width;
@@ -1356,6 +1395,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   );
 
   const [menuOpen, setMenuOpen] = createSignal(false);
+  const [mapFilter, setMapFilter] = createSignal("");
+  createEffect(on(showLoad, () => setMapFilter(""), { defer: true }));
+  // Newest first; the filter matches names ignoring case.
+  const listedProjects = createMemo(() => {
+    const query = mapFilter().trim().toLowerCase();
+    return [...savedProjects()]
+      .filter((project) => project.name.toLowerCase().includes(query))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  });
   let projectMenu: HTMLDivElement | undefined;
   createEffect(() => {
     if (menuOpen())
@@ -1428,7 +1476,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
   const viewInsets = () =>
-    outlineOpen() && canvas.clientWidth >= 640
+    outlineOpen() && canvasSize().width >= 640
       ? { ...VIEW_INSETS, left: 316 }
       : VIEW_INSETS;
   // Branches travel through the clipboard as indented Markdown lists, so they
@@ -1438,19 +1486,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const count = outlineSize(entries);
     let first: string | undefined;
     try {
-      command((doc) => {
-        const make = (list: OutlineEntry[], under: string | undefined) => {
-          for (const entry of list) {
-            const init = { text: entry.text.slice(0, LIMITS.text) };
-            const id = under
-              ? createChild(doc, under, init)
-              : createRoot(doc, init);
-            first ??= id;
-            make(entry.children, id);
-          }
-        };
-        make(entries, parent);
-      });
+      command((doc) =>
+        doc.batch(() => {
+          const make = (list: OutlineEntry[], under: string | undefined) => {
+            for (const entry of list) {
+              const init = { text: entry.text.slice(0, LIMITS.text) };
+              const id = under
+                ? createChild(doc, under, init)
+                : createRoot(doc, init);
+              first ??= id;
+              make(entry.children, id);
+            }
+          };
+          make(entries, parent);
+        }),
+      );
     } catch (error) {
       showNotice({
         message:
@@ -2862,16 +2912,29 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 />
               </button>
               <Show when={showLoad()}>
+                <Show when={savedProjects().length > 6}>
+                  <input
+                    type="search"
+                    aria-label="Filter maps"
+                    placeholder="Filter maps"
+                    class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    value={mapFilter()}
+                    onInput={(e) => setMapFilter(e.currentTarget.value)}
+                    onKeyDown={(e) => e.stopPropagation()}
+                  />
+                </Show>
                 <ul
                   id="saved-projects"
                   aria-label="Available projects"
                   class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
                 >
                   <For
-                    each={savedProjects()}
+                    each={listedProjects()}
                     fallback={
                       <li class="px-2 py-2 text-stone-500">
-                        No saved projects yet.
+                        {mapFilter().trim()
+                          ? "No maps match."
+                          : "No saved projects yet."}
                       </li>
                     }
                   >
@@ -2890,12 +2953,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                             load(project.id);
                           }}
                         >
-                          <span class="min-w-0 flex-1 truncate">
-                            {project.name}
+                          <span class="min-w-0 flex-1">
+                            <span class="block truncate">{project.name}</span>
+                            <span class="block text-[11px] font-normal text-stone-400">
+                              {project.id === doc().id
+                                ? "Open now"
+                                : `Created ${formatDate(project.createdAt)}`}
+                            </span>
                           </span>
-                          <Show when={project.id === doc().id}>
-                            <span class="text-xs text-stone-400">Open</span>
-                          </Show>
                         </button>
                       </li>
                     )}
@@ -3580,9 +3645,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
           aria-hidden="true"
         >
-          <For each={layout().connections}>
-            {(connection) => (
-              <path d={connectionPath(connection)} fill="none" />
+          {/* Keyed by child id so a layout change updates path data in place
+              instead of recreating every connection. */}
+          <For each={nodeIds()}>
+            {(id) => (
+              <Show when={connections().get(id)}>
+                {(connection) => (
+                  <path d={connectionPath(connection())} fill="none" />
+                )}
+              </Show>
             )}
           </For>
         </svg>
