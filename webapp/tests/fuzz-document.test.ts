@@ -101,6 +101,11 @@ function run(seed: number) {
   }
 }
 
-test(`random edits, undo and redo keep the document valid and reversible (${SEEDS} seeds × ${STEPS} steps)`, () => {
-  for (let seed = FIRST_SEED; seed < FIRST_SEED + SEEDS; seed++) run(seed);
-}, 600_000);
+// One test per seed, so a slow machine times out one seed rather than hiding
+// how far a long run got.
+for (let seed = FIRST_SEED; seed < FIRST_SEED + SEEDS; seed++)
+  test(
+    `random edits, undo and redo keep the document valid and reversible (seed ${seed}, ${STEPS} steps)`,
+    () => run(seed),
+    120_000,
+  );
