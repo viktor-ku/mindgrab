@@ -93,6 +93,13 @@ impl Fixture {
         Self::with_auth_mode(origin, AuthMode::WorkOs).await
     }
     pub async fn with_auth_mode(origin: &str, auth_mode: AuthMode) -> Self {
+        Self::with_posthog(origin, auth_mode, None).await
+    }
+    pub async fn with_posthog(
+        origin: &str,
+        auth_mode: AuthMode,
+        posthog: Option<mindgrab_backend::config::PostHogConfig>,
+    ) -> Self {
         let database = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres@localhost:5432/mindgrab".into());
         let admin = PgPoolOptions::new()
@@ -138,6 +145,7 @@ impl Fixture {
                 provider_url
             },
             secure_cookies: false,
+            posthog,
         };
         let backend = Backend::connect(config).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

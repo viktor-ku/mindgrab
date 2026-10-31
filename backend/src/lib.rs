@@ -1,10 +1,11 @@
+pub mod analytics;
 pub mod auth;
 pub mod config;
 pub mod error;
 mod limits;
 mod projects;
 
-use crate::{auth::Auth, config::Config, error::Result};
+use crate::{analytics::Analytics, auth::Auth, config::Config, error::Result};
 use axum::{
     Router,
     extract::{DefaultBodyLimit, Request, State},
@@ -25,6 +26,7 @@ pub struct Backend {
     limits: limits::RateLimits,
     pub pool: PgPool,
     pub auth: Auth,
+    pub analytics: Analytics,
     pub config: Config,
     pub changes: broadcast::Sender<String>,
 }
@@ -42,6 +44,7 @@ impl Backend {
         let app = Arc::new(Self {
             limits: limits::RateLimits::default(),
             auth: Auth::new(pool.clone(), config.clone()),
+            analytics: Analytics::new(config.posthog.clone()),
             pool,
             config,
             changes,
@@ -62,6 +65,10 @@ impl Backend {
             .route("/api/auth/callback", get(projects::callback))
             .route("/api/{method}", post(projects::rpc))
             .route("/sync/loro/{id}", get(projects::socket))
+            .route(
+                "/ingest/{*path}",
+                get(analytics::ingest).post(analytics::ingest),
+            )
             .layer(DefaultBodyLimit::max(
                 mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
             ))

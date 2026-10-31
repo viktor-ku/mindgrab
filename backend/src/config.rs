@@ -18,6 +18,42 @@ pub struct Config {
     pub issuer: String,
     pub provider_url: String,
     pub secure_cookies: bool,
+    /// Product analytics; unset sends nothing and disables the /ingest proxy.
+    pub posthog: Option<PostHogConfig>,
+}
+#[derive(Clone, Debug)]
+pub struct PostHogConfig {
+    /// The project's public API key (the same one the webapp uses).
+    pub key: String,
+    /// Ingestion host, e.g. https://eu.i.posthog.com.
+    pub host: Url,
+    /// Static SDK assets (session replay recorder, remote config).
+    pub assets_host: Url,
+}
+impl PostHogConfig {
+    fn from_values(
+        key: Option<String>,
+        host: Option<String>,
+    ) -> std::result::Result<Option<Self>, &'static str> {
+        let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let host = Url::parse(host.as_deref().unwrap_or("https://eu.i.posthog.com"))
+            .map_err(|_| "Invalid POSTHOG_HOST")?;
+        if host.scheme() != "https" && !is_loopback(host.host_str().unwrap_or_default()) {
+            return Err("POSTHOG_HOST requires HTTPS");
+        }
+        let assets_host = match host.host_str() {
+            Some("eu.i.posthog.com") => Url::parse("https://eu-assets.i.posthog.com").unwrap(),
+            Some("us.i.posthog.com") => Url::parse("https://us-assets.i.posthog.com").unwrap(),
+            _ => host.clone(),
+        };
+        Ok(Some(Self {
+            key: key.trim().to_owned(),
+            host,
+            assets_host,
+        }))
+    }
 }
 impl Config {
     pub fn from_env() -> std::result::Result<Self, &'static str> {
@@ -111,6 +147,7 @@ impl Config {
             issuer,
             provider_url: "https://api.workos.com".into(),
             secure_cookies: app.scheme() == "https",
+            posthog: PostHogConfig::from_values(get("POSTHOG_KEY"), get("POSTHOG_HOST"))?,
         })
     }
     pub fn cookie_name(&self, base: &str) -> String {
@@ -255,5 +292,42 @@ mod tests {
         assert_eq!(c.auth_mode, AuthMode::WorkOs);
         assert_eq!(c.app_url, "https://mindgrab.example/");
         assert_eq!(c.cookie_name("session"), "session");
+        assert!(c.posthog.is_none());
+    }
+
+    #[test]
+    fn posthog_defaults_to_the_eu_region_and_its_asset_host() {
+        let local = [
+            ("MINDGRAB_AUTH_MODE", "local"),
+            ("MINDGRAB_ENV", "development"),
+        ];
+        let posthog = config(&[local[0], local[1], ("POSTHOG_KEY", "phc_test")], true)
+            .unwrap()
+            .posthog
+            .unwrap();
+        assert_eq!(posthog.key, "phc_test");
+        assert_eq!(posthog.host.as_str(), "https://eu.i.posthog.com/");
+        assert_eq!(
+            posthog.assets_host.as_str(),
+            "https://eu-assets.i.posthog.com/"
+        );
+        assert!(
+            config(
+                &[
+                    local[0],
+                    local[1],
+                    ("POSTHOG_KEY", "phc_test"),
+                    ("POSTHOG_HOST", "http://posthog.example")
+                ],
+                true
+            )
+            .is_err()
+        );
+        assert!(
+            config(&[local[0], local[1], ("POSTHOG_KEY", " ")], true)
+                .unwrap()
+                .posthog
+                .is_none()
+        );
     }
 }
