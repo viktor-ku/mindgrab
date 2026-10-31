@@ -11,13 +11,14 @@ import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
-export const PROJECT_FILE_VERSION = 3;
+export const PROJECT_FILE_VERSION = 4;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
 export interface ProjectFileNode {
   id: string;
   text: string;
+  note?: string;
   color: NodeColor;
   position?: { x: number; y: number };
   children: ProjectFileNode[];
@@ -70,6 +71,13 @@ function nodeSchema(depth: number): z.ZodType<ProjectFileNode> {
     z.strictObject({
       id: z.string().min(1).max(128),
       text: z.string().max(LIMITS.text),
+      note: z
+        .string()
+        .refine(
+          (note) => note.length <= LIMITS.note,
+          `Note must be at most ${LIMITS.note} UTF-16 units.`,
+        )
+        .optional(),
       color: z.custom<NodeColor>(isNodeColor, "Invalid node color."),
       position: PositionSchema.optional(),
       children:
@@ -201,11 +209,11 @@ export function parseProjectFile(json: string): ProjectFile {
   const header = value as { format?: unknown; version?: unknown };
   if (header.format !== PROJECT_FILE_FORMAT)
     throw new ProjectFileError("File is not a Mindgrab project.");
-  if (header.version !== PROJECT_FILE_VERSION)
+  if (header.version !== 3 && header.version !== PROJECT_FILE_VERSION)
     throw new ProjectFileError(
       `Unsupported Mindgrab project version: ${String(header.version)}.`,
     );
-  return checkedFile(value);
+  return checkedFile({ ...value, version: PROJECT_FILE_VERSION });
 }
 
 export function prepareProjectImport(input: ProjectFile) {
@@ -233,6 +241,7 @@ export function prepareProjectImport(input: ProjectFile) {
         children: node.children.map((child) => ids.get(child.id)!),
         depth,
         text: node.text,
+        note: node.note ?? "",
         position: node.position ? { ...node.position } : null,
         color: node.color,
       });
@@ -345,6 +354,7 @@ export function writeMarkdownFile(fileName: string, markdown: string) {
 // hierarchy; line breaks inside a node continue its list item.
 interface OutlineNode {
   id: string;
+  note?: string;
   next?: readonly OutlineNode[];
 }
 
@@ -352,6 +362,7 @@ export function projectMarkdown(
   name: string,
   roots: readonly OutlineNode[],
   text: (id: string) => string,
+  note?: (id: string) => string,
 ) {
   const lines = [`# ${escapeMarkdown(name.trim() || "Untitled map")}`, ""];
   const visit = (nodes: readonly OutlineNode[], depth: number) => {
@@ -363,6 +374,10 @@ export function projectMarkdown(
       lines.push(`${indent}- ${escapeMarkdown(first)}`);
       for (const line of rest)
         lines.push(`${indent}  ${escapeMarkdown(line)}`.trimEnd());
+      const details = note ? note(node.id) : node.note;
+      if (details)
+        for (const line of details.split(/\r?\n/))
+          lines.push(`${indent}  > ${escapeMarkdown(line)}`.trimEnd());
       visit(node.next ?? [], depth + 1);
     }
   };

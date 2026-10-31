@@ -61,6 +61,7 @@ pub struct Node {
     pub parent: Option<String>,
     pub children: Vec<String>,
     pub text: String,
+    pub note: String,
     pub color: Color,
     pub position: Option<Position>,
     pub depth: usize,
@@ -131,6 +132,16 @@ pub enum Command {
         text: String,
     },
     EditText {
+        id: String,
+        index: usize,
+        delete_count: usize,
+        insert: String,
+    },
+    SetNote {
+        id: String,
+        note: String,
+    },
+    EditNote {
         id: String,
         index: usize,
         delete_count: usize,

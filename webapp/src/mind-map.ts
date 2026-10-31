@@ -3,6 +3,7 @@ import type { NodeColor } from "./node-colors";
 export interface MindMapNode {
   id: string;
   text: string;
+  note?: string;
   color?: NodeColor;
   position?: NodePosition;
   next?: MindMapNode[];

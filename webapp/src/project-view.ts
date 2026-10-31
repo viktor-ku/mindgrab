@@ -17,6 +17,7 @@ export interface ProjectView {
   saving: Accessor<SavingPreferences>;
   forest: Accessor<MindMapNode[]>;
   text(id: string): string;
+  note(id: string): string;
 }
 export function createProjectView(doc: ProjectDocument): ProjectView {
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
@@ -24,10 +25,16 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
   const [saving, setSaving] = createSignal(savingPreferences(doc));
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
+  const notes = new Map<string, [Accessor<string>, Setter<string>]>();
   let structure = "";
   function textSignal(id: string) {
     const signal = texts.get(id) ?? createSignal("");
     texts.set(id, signal);
+    return signal;
+  }
+  function noteSignal(id: string) {
+    const signal = notes.get(id) ?? createSignal("");
+    notes.set(id, signal);
     return signal;
   }
   function refresh() {
@@ -40,7 +47,10 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
         return;
       }
       setName(state.view.name);
-      for (const node of state.view.nodes) textSignal(node.id)[1](node.text);
+      for (const node of state.view.nodes) {
+        textSignal(node.id)[1](node.text);
+        noteSignal(node.id)[1](node.note);
+      }
       const next = JSON.stringify([
         state.view.roots,
         state.view.nodes.map(({ text, ...node }) => node),
@@ -54,5 +64,12 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
   doc.on("snapshot", refresh);
   onCleanup(() => doc.off("snapshot", refresh));
   refresh();
-  return { status, name, saving, forest, text: (id) => textSignal(id)[0]() };
+  return {
+    status,
+    name,
+    saving,
+    forest,
+    text: (id) => textSignal(id)[0](),
+    note: (id) => noteSignal(id)[0](),
+  };
 }

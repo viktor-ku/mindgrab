@@ -27,7 +27,7 @@ const leaf = (id: string, text = id): ProjectFileNode => ({
 });
 const file = (nodes: ProjectFileNode[] = []): ProjectFile => ({
   format: "mindgrab-project",
-  version: 3,
+  version: 4,
   project: { name: "Planning", nodes },
 });
 const complex = (): ProjectFile => ({
@@ -195,4 +195,77 @@ describe("Markdown outline", () => {
     );
     expect(projectMarkdown("# Notes", [], text)).toBe("# \\# Notes\n\n");
   });
+});
+
+test("version 4 notes round-trip through project files and newly identified documents", () => {
+  const input = file([
+    {
+      ...leaf("root"),
+      note: "Details 🦀\n\nSecond paragraph",
+      children: [{ ...leaf("child"), note: "child details" }],
+    },
+    leaf("empty"),
+  ]);
+  const { content } = prepareProjectImport(
+    parseProjectFile(JSON.stringify(input)),
+  );
+  const doc = importProjectDocument(crypto.randomUUID(), content);
+  try {
+    const exported = parseProjectFile(serializeProjectFile(doc.view()));
+    expect(exported.version).toBe(4);
+    expect(exported.project.nodes[0].note).toBe(input.project.nodes[0].note);
+    expect(exported.project.nodes[0].children[0].note).toBe("child details");
+    expect(exported.project.nodes[1]).not.toHaveProperty("note");
+    expect(doc.view().nodes[2].note).toBe("");
+  } finally {
+    doc.destroy();
+  }
+});
+
+test("version 3 files without notes still import and export as version 4", () => {
+  const old = { ...file([leaf("old")]), version: 3 };
+  const parsed = parseProjectFile(JSON.stringify(old));
+  expect(parsed.version).toBe(4);
+  const { content } = prepareProjectImport(parsed);
+  expect(content.nodes[0].note).toBe("");
+  expect(projectFileFromContent(content).version).toBe(4);
+});
+
+test("import validates note type and UTF-16 limit", () => {
+  for (const note of [null, 42, "😀".repeat(LIMITS.note / 2 + 1)]) {
+    expect(() =>
+      parseProjectFile(
+        JSON.stringify(file([{ ...leaf("root"), note } as ProjectFileNode])),
+      ),
+    ).toThrow();
+  }
+  const note = "😀".repeat(LIMITS.note / 2);
+  expect(
+    parseProjectFile(JSON.stringify(file([{ ...leaf("root"), note }]))).project
+      .nodes[0].note,
+  ).toBe(note);
+});
+
+test("Markdown includes multiline notes under their list item with nested notes", () => {
+  const roots = [
+    {
+      id: "root",
+      note: "First\n\n# details",
+      next: [{ id: "child", note: "Child details" }],
+    },
+  ];
+  expect(projectMarkdown("Plan", roots, (id) => id)).toBe(
+    "# Plan\n\n- root\n  > First\n  >\n  > \\# details\n  - child\n    > Child details\n",
+  );
+  expect(
+    projectMarkdown(
+      "Plan",
+      [{ id: "root" }],
+      () => "root",
+      () => "Live note",
+    ),
+  ).toContain("  > Live note\n");
+  expect(projectMarkdown("Plan", [{ id: "root" }], () => "root")).toBe(
+    "# Plan\n\n- root\n",
+  );
 });

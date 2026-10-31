@@ -6,8 +6,8 @@ mod model;
 mod wasm;
 
 use loro::{
-    CommitOptions, Container, ContainerTrait, ExportMode, LoroDoc, LoroMap, LoroText, LoroTree,
-    ToJson, TreeID, UndoManager, ValueOrContainer,
+    CommitOptions, Container, ContainerID, ContainerTrait, ContainerType, ExportMode, LoroDoc,
+    LoroMap, LoroText, LoroTree, ToJson, TreeID, UndoManager, ValueOrContainer,
 };
 use loro_internal::cursor::{Cursor, Side};
 pub use model::*;
@@ -69,6 +69,7 @@ impl Project {
         doc.get_tree("nodes").enable_fractional_index(8);
         let mut undo = UndoManager::new(&doc);
         undo.add_exclude_origin_prefix("preferences");
+        undo.add_exclude_origin_prefix("note-init");
         Ok(Self { doc, undo })
     }
 
@@ -120,7 +121,17 @@ impl Project {
     }
 
     pub fn cursor(&self, id: &str, index: usize, after: bool) -> Result<Vec<u8>> {
-        let text = self.text(id)?;
+        self.field_cursor(id, index, after, false)
+    }
+    pub fn note_cursor(&self, id: &str, index: usize, after: bool) -> Result<Vec<u8>> {
+        self.field_cursor(id, index, after, true)
+    }
+    fn field_cursor(&self, id: &str, index: usize, after: bool, note: bool) -> Result<Vec<u8>> {
+        let text = self.field_text(id, note)?;
+        if !text.is_attached() {
+            cursor_index("", index)?;
+            return Ok(Cursor::new(None, self.note_container(id)?, Side::Left, 0).encode());
+        }
         let value = text.to_string();
         let index = cursor_index(&value, index)?;
         let cursor = if after {
@@ -135,9 +146,30 @@ impl Project {
             .ok_or_else(|| StateError::Invalid("Invalid cursor".into()))
     }
     pub fn resolve_cursor(&self, id: &str, bytes: &[u8]) -> Result<usize> {
+        self.resolve_field_cursor(id, bytes, false)
+    }
+    pub fn resolve_note_cursor(&self, id: &str, bytes: &[u8]) -> Result<usize> {
+        self.resolve_field_cursor(id, bytes, true)
+    }
+    fn resolve_field_cursor(&self, id: &str, bytes: &[u8], note: bool) -> Result<usize> {
         let cursor =
             Cursor::decode(bytes).map_err(|_| StateError::Invalid("Invalid cursor".into()))?;
-        let text = self.text(id)?;
+        let text = self.field_text(id, note)?;
+        let container = if text.is_attached() {
+            text.id()
+        } else {
+            self.note_container(id)?
+        };
+        if cursor.container != container {
+            return invalid("Cursor belongs to another text field");
+        }
+        if !text.is_attached() {
+            return if cursor.id.is_none() {
+                Ok(0)
+            } else {
+                invalid("Cursor no longer exists")
+            };
+        }
         let position = self
             .doc
             .get_cursor_pos(&cursor)
@@ -154,21 +186,54 @@ impl Project {
     /// Apply a textarea edit against the exact document the user saw. Stable
     /// cursors rebase an IME draft over remote changes received while composing.
     pub fn edit_draft(&mut self, id: &str, base: &[u8], next: &str, caret: usize) -> Result<usize> {
+        self.edit_field_draft(id, base, next, caret, false)
+    }
+    pub fn edit_note_draft(
+        &mut self,
+        id: &str,
+        base: &[u8],
+        next: &str,
+        caret: usize,
+    ) -> Result<usize> {
+        self.edit_field_draft(id, base, next, caret, true)
+    }
+    fn edit_field_draft(
+        &mut self,
+        id: &str,
+        base: &[u8],
+        next: &str,
+        caret: usize,
+        note: bool,
+    ) -> Result<usize> {
         let source = Self::from_snapshot(base)?;
-        let old = source.text(id)?.to_string();
+        let old = source.field_text(id, note)?.to_string();
         let (index, delete, insert) = text_diff(&old, next, Some(caret));
-        let start = self.resolve_cursor(id, &source.cursor(id, index, true)?)?;
+        let start =
+            self.resolve_field_cursor(id, &source.field_cursor(id, index, true, note)?, note)?;
         let end = if delete == 0 {
             start
         } else {
-            self.resolve_cursor(id, &source.cursor(id, index + delete, false)?)?
+            self.resolve_field_cursor(
+                id,
+                &source.field_cursor(id, index + delete, false, note)?,
+                note,
+            )?
         };
         let inserted = insert.encode_utf16().count();
-        self.apply(Command::EditText {
-            id: id.into(),
-            index: start,
-            delete_count: end.saturating_sub(start),
-            insert,
+        self.apply(if note {
+            Command::EditNote {
+                id: id.into(),
+                index: start,
+                delete_count: end.saturating_sub(start),
+                insert,
+            }
+        } else {
+            Command::EditText {
+                id: id.into(),
+                index: start,
+                delete_count: end.saturating_sub(start),
+                insert,
+            }
         })?;
         Ok(start + inserted)
     }
@@ -333,6 +398,20 @@ impl Project {
             } => {
                 edit_text(&self.text(&id)?, index, delete_count, &insert)?;
             }
+            Command::SetNote { id, note } => {
+                validate_text(&note)?;
+                let current = self.field_text(&id, true)?.to_string();
+                let (index, delete, insert) = text_diff(&current, &note, None);
+                self.edit_note(&id, index, delete, &insert)?;
+            }
+            Command::EditNote {
+                id,
+                index,
+                delete_count,
+                insert,
+            } => {
+                self.edit_note(&id, index, delete_count, &insert)?;
+            }
             Command::SetColor { id, color } => {
                 let node = self.node(&id)?;
                 if self.node_data(node)?.1 != color {
@@ -438,6 +517,7 @@ impl Project {
             let (text, color, position) = self.node_data(id)?;
             let children = tree.children(id).unwrap_or_default();
             pending.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+            let note = self.note_data(id)?;
             nodes.push(Node {
                 id: stable,
                 parent: tree
@@ -447,6 +527,7 @@ impl Project {
                     .transpose()?,
                 children: Vec::new(),
                 text,
+                note,
                 color,
                 position,
                 depth,
@@ -493,13 +574,14 @@ impl Project {
             .ok_or_else(|| StateError::Invalid("Expected node metadata".into()))?;
         if fields
             .keys()
-            .any(|key| !["id", "text", "color", "position"].contains(&key.as_str()))
+            .any(|key| !["id", "text", "note", "color", "position"].contains(&key.as_str()))
         {
             return invalid("Unexpected node metadata");
         }
         self.stable_id(id)?;
         let text = shared_text(&meta)?.to_string();
         validate_text(&text)?;
+        validate_text(&self.note_data(id)?)?;
         let color: Color = serde_json::from_value(value["color"].clone())?;
         let position: Option<Position> = value
             .get("position")
@@ -554,6 +636,55 @@ impl Project {
     fn parent(&self, value: Option<&str>) -> Result<Option<TreeID>> {
         value.map(|value| self.node(value)).transpose()
     }
+    fn note_data(&self, id: TreeID) -> Result<String> {
+        let meta = self.tree().get_meta(id)?;
+        match meta.get("note") {
+            None => Ok(String::new()),
+            Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text.to_string()),
+            _ => invalid("Expected shared node note"),
+        }
+    }
+    fn field_text(&self, id: &str, note: bool) -> Result<LoroText> {
+        if !note {
+            return self.text(id);
+        }
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        match meta.get("note") {
+            Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text),
+            // A detached empty value keeps reads and no-op edits read-only.
+            None => Ok(LoroText::new()),
+            _ => invalid("Expected shared node note"),
+        }
+    }
+    fn note_container(&self, id: &str) -> Result<ContainerID> {
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        Ok(ContainerID::new_mergeable(
+            &meta.id(),
+            "note",
+            ContainerType::Text,
+        ))
+    }
+    fn edit_note(&self, id: &str, index: usize, delete: usize, insert: &str) -> Result<()> {
+        let text = self.field_text(id, true)?;
+        if !text_edit_changed(&text.to_string(), index, delete, insert)? {
+            return Ok(());
+        }
+        // Deterministic identity preserves concurrent first edits on old nodes.
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        let text = match meta.get("note") {
+            Some(ValueOrContainer::Container(Container::Text(text))) => text,
+            _ => {
+                let text = meta.ensure_mergeable_text("note")?;
+                // Keep activation when content is undone. Undoing/recreating a
+                // mergeable map reference can hide remote edits or duplicate
+                // restored content. Only the following text delta is undoable.
+                self.doc
+                    .commit_with(CommitOptions::new().origin("note-init"));
+                text
+            }
+        };
+        edit_text(&text, index, delete, insert)
+    }
     fn text(&self, value: &str) -> Result<LoroText> {
         shared_text(&self.tree().get_meta(self.node(value)?)?)
     }
@@ -598,11 +729,10 @@ fn validate_position(position: Position) -> Result<()> {
         invalid("Position must contain finite coordinates")
     }
 }
-fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Result<()> {
+fn text_edit_changed(current: &str, index: usize, delete: usize, insert: &str) -> Result<bool> {
     let end = index
         .checked_add(delete)
         .ok_or_else(|| StateError::Invalid("Invalid text range".into()))?;
-    let current = text.to_string();
     let mut boundaries = std::collections::HashSet::from([0]);
     let mut length = 0;
     for ch in current.chars() {
@@ -621,6 +751,12 @@ fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Resu
         .take(delete)
         .eq(insert.encode_utf16())
     {
+        return Ok(false);
+    }
+    Ok(true)
+}
+fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Result<()> {
+    if !text_edit_changed(&text.to_string(), index, delete, insert)? {
         return Ok(());
     }
     if delete > 0 {

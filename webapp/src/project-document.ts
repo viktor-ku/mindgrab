@@ -32,7 +32,12 @@ await init(
     : undefined,
 );
 export const SCHEMA_VERSION = 1;
-export const LIMITS = { nodes: 10_000, text: 65_536, nameBytes: 200 } as const;
+export const LIMITS = {
+  nodes: 10_000,
+  text: 65_536,
+  note: 65_536,
+  nameBytes: 200,
+} as const;
 export const ORIGIN = {
   create: Symbol("create"),
   local: Symbol("local"),
@@ -61,12 +66,14 @@ export type ProjectState =
   | { status: "invalid"; message: string };
 export interface NewNode {
   text?: string;
+  note?: string;
   color?: NodeColor;
   position?: NodePosition;
 }
 export interface ForestNode {
   id: string;
   text: string;
+  note?: string;
   color: NodeColor;
   position?: NodePosition;
   children: ForestNode[];
@@ -228,6 +235,7 @@ export function projectMindMap(view: DocumentView): MindMapNode[] {
     entries.set(node.id, {
       id: node.id,
       text: node.text,
+      ...(node.note && { note: node.note }),
       color: node.color,
       ...(node.position && { position: node.position }),
     });
@@ -258,6 +266,7 @@ function create(
     text: init.text ?? "",
     color: init.color ?? "blue",
   }).createdNode!;
+  if (init.note) setNodeNote(doc, id, init.note);
   if (init.position)
     doc.dispatch({ type: "setPosition", id, position: init.position });
   return id;
@@ -280,12 +289,14 @@ export function createSibling(
   id: string,
   init: NewNode = {},
 ) {
-  return doc.dispatch({
+  const sibling = doc.dispatch({
     type: "createSibling",
     id,
     text: init.text ?? "",
     color: init.color ?? "blue",
   }).createdNode!;
+  if (init.note) setNodeNote(doc, sibling, init.note);
+  return sibling;
 }
 export const renameProject = (doc: ProjectDocument, name: string) =>
   doc.dispatch({ type: "rename", name }).changed;
@@ -301,6 +312,15 @@ export const replaceNodeText = (
   id: string,
   text: string,
 ) => doc.dispatch({ type: "setText", id, text }).changed;
+export const setNodeNote = (doc: ProjectDocument, id: string, note: string) =>
+  doc.dispatch({ type: "setNote", id, note }).changed;
+export const editNodeNote = (
+  doc: ProjectDocument,
+  id: string,
+  index: number,
+  deleteCount: number,
+  insert: string,
+) => doc.dispatch({ type: "editNote", id, index, deleteCount, insert }).changed;
 export const deleteSubtree = (doc: ProjectDocument, id: string) =>
   doc.dispatch({ type: "deleteNode", id }).changed;
 export const setNodeColor = (

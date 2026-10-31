@@ -54,3 +54,16 @@ Run `mise run state:test`, `mise run state:check` and `mise run state:interop`.
 The interoperability suite opens the main app with the real Rust backend and
 Postgres, not a separate playground. See the [root README](../../README.md) to
 run the complete application.
+
+Each node also exposes a `note` string (empty when absent). `SetNote { id, note }`
+and `EditNote { id, index, delete_count, insert }` share the text limit and UTF-16
+indexing rules. The optional `note` metadata key is activated on the first
+non-empty edit using a deterministic LoroText container, so concurrent first
+edits merge and old snapshots need no migration. Activation is excluded from
+undo; undo/redo applies to note content and preserves remote edits.
+
+`note_cursor`, `resolve_note_cursor` and `edit_note_draft` mirror the existing
+text APIs, including read-only cursors for absent notes. Browser bindings expose
+these as `noteCursor`, `resolveNoteCursor` and `editNoteDraft`. Use
+`bindTextarea(input, doc, id, onValue, "note")` in the webapp, and dispose the
+returned binding when the editor closes. Existing callers default to `"text"`.
