@@ -605,3 +605,25 @@ kbd {
     transparent
   );
 }
+/* The narrowest phones keep the selection toolbar on one line; branch focus
+   stays available from the More menu. */
+@media (max-width: 400px) {
+  .narrow-hide {
+    display: none;
+  }
+}
+@media (max-width: 400px) and (pointer: coarse) {
+  .icon-button,
+  .tool-button {
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+  }
+}
+@media (pointer: coarse) {
+  .menu-item {
+    min-height: 2.75rem;
+  }
+  .color-scope {
+    min-height: 2.75rem;
+  }
+}

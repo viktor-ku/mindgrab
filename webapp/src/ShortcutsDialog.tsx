@@ -39,12 +39,13 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
   {
     title: "Find your way",
     items: [
-      [`${MOD_LABEL}F · /`, "Search; Esc returns to where you were"],
+      [`${MOD_LABEL}F`, "Search; Esc returns to where you were"],
+      ["/ · ?", "Search · shortcuts (when no idea is selected)"],
       [`${ALT_LABEL}F`, "Focus on the selected branch"],
       [`${ALT_LABEL}N`, "Open notes for the selected idea"],
       [`${ALT_LABEL}O`, "Show or hide the outline"],
-      ["⇧1", "Fit the whole map"],
-      ["⇧2", "Fit the selected branch"],
+      [`${ALT_LABEL}1`, "Fit the whole map"],
+      [`${ALT_LABEL}2`, "Fit the selected branch"],
       [`${MOD_LABEL}+ · ${MOD_LABEL}−`, "Zoom around the selection"],
       [`${MOD_LABEL}0`, "Zoom to 100%"],
       ["Esc", "Clear selection, then leave focus"],

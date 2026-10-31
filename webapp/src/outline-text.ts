@@ -1,8 +1,55 @@
 import type { MindMapNode } from "./mind-map";
+import { isNodeColor } from "./node-colors";
+import type { NodeColor } from "./node-colors";
 
 export interface OutlineEntry {
   text: string;
+  // Only branches copied from Mindgrab carry notes and colors.
+  note?: string;
+  color?: NodeColor;
   children: OutlineEntry[];
+}
+
+// Alongside plain text, copies carry the full branch so notes and colors
+// survive cut and paste inside Mindgrab.
+export const BRANCH_MIME = "application/x-mindgrab-branch";
+
+export function branchEntry(
+  node: MindMapNode,
+  text: (id: string) => string,
+): OutlineEntry {
+  return {
+    text: text(node.id),
+    ...(node.note && { note: node.note }),
+    ...(node.color && { color: node.color }),
+    children: (node.next ?? []).map((child) => branchEntry(child, text)),
+  };
+}
+
+// Undefined unless the data is a well-formed copied branch.
+export function parseBranchEntry(data: string): OutlineEntry | undefined {
+  const parse = (value: unknown, depth: number): OutlineEntry | undefined => {
+    if (depth > 10_000 || !value || typeof value !== "object") return;
+    const { text, note, color, children } = value as Record<string, unknown>;
+    if (typeof text !== "string" || !Array.isArray(children)) return;
+    const parsed: OutlineEntry[] = [];
+    for (const child of children) {
+      const entry = parse(child, depth + 1);
+      if (!entry) return;
+      parsed.push(entry);
+    }
+    return {
+      text,
+      ...(typeof note === "string" && note && { note }),
+      ...(isNodeColor(color) && { color }),
+      children: parsed,
+    };
+  };
+  try {
+    return parse(JSON.parse(data), 0);
+  } catch {
+    return undefined;
+  }
 }
 
 // Bullets and numbering that mark list items in pasted outlines.
@@ -25,6 +72,8 @@ export function parseOutline(text: string): OutlineEntry[] {
       ? heading[1].length - 100
       : expanded.length - expanded.trimStart().length;
     if (heading) content = content.slice(heading[0].length);
+    // A marker with nothing after it (trimmed "- ") is an empty item.
+    if (/^(?:[-*+•◦▪‣]|\d+[.)]|\[[ xX]\])$/.test(content)) continue;
     content = content
       .replace(MARKER, "")
       .replace(/^\\([#>+*-])/, "$1")

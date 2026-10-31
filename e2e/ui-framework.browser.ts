@@ -343,7 +343,7 @@ describe("search", () => {
 
   test("previewing results unfolds and selects them, Escape restores folds and selection", async () => {
     const { root, a, b, needle, second } = await foldedTree();
-    await page.keyboard.press("/");
+    await page.keyboard.press("ControlOrMeta+f");
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.waitFor();
     await field.fill("needle");
@@ -385,7 +385,7 @@ describe("search", () => {
       ),
     ).toBe("Mind map canvas");
 
-    await page.keyboard.press("/");
+    await page.keyboard.press("ControlOrMeta+f");
     await field.fill("nothing like this");
     await page.getByText("No ideas match", { exact: false }).waitFor();
     await field.press("Enter");
@@ -468,7 +468,7 @@ describe("view controls", () => {
     expect(await insideViewport(near)).toBe(true);
     expect(await insideViewport(far)).toBe(false);
 
-    await page.keyboard.press("Shift+Digit1");
+    await page.keyboard.press("Alt+Digit1");
     expect(await zoomLabel()).toBe(`${fitted}%`);
     await page.keyboard.press("ControlOrMeta+0");
     expect(await zoomLabel()).toBe("100%");
@@ -662,6 +662,16 @@ describe("capture flow", () => {
     await page.keyboard.press("Escape");
     expect(await parentOf((await idWithText("Second")) as string)).toBe(root);
     expect((await call("content")).roots).toHaveLength(1);
+
+    // With an idea selected even shortcut characters type into it; with
+    // nothing selected "/" opens search.
+    await node(root).click();
+    await page.keyboard.type("/?!");
+    await page.keyboard.press("Escape");
+    expect(await textOf(root)).toBe("/?!");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("/");
+    await page.getByRole("searchbox", { name: "Search ideas" }).waitFor();
   });
 
   test("letters edit instead of running commands; Option shortcuts open the outline and notes", async () => {
@@ -736,6 +746,28 @@ describe("clipboard", () => {
     await node(child).click();
     await clipboard("cut");
     expect(await idWithText("Trip")).toBeUndefined();
+  });
+
+  test("cut and paste keep notes and colors", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Carry");
+    await node(child).click();
+    await page.keyboard.press("Alt+n");
+    await page.getByRole("textbox", { name: "Idea notes" }).fill("keep me");
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Color" }).click();
+    await page.getByRole("button", { name: /^Violet/ }).click();
+    await page.keyboard.press("Escape");
+    await clipboard("cut");
+    expect(await idWithText("Carry")).toBeUndefined();
+    await node(root).click();
+    // Plain text only, as when a browser drops the custom clipboard type.
+    await clipboard("paste", "- Carry");
+    const pasted = (await idWithText("Carry")) as string;
+    expect(await nodeData(pasted)).toMatchObject({
+      note: "keep me",
+      color: "violet",
+    });
   });
 
   test("notices go away once history moves past them", async () => {

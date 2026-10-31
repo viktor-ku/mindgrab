@@ -100,7 +100,10 @@ export function ProjectPreferences(props: {
           Sign in to save in Mindgrab Cloud.
         </p>
       </Show>
-      <Show when={!props.saving.local && !props.saving.cloud}>
+      {/* Without an account cloud saving cannot run, so local off means memory only. */}
+      <Show
+        when={!props.saving.local && (!props.saving.cloud || !props.signedIn)}
+      >
         <div class="mt-8 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
           <p class="font-semibold">This project lives only in memory.</p>
           <p>
@@ -116,7 +119,7 @@ export function ProjectPreferences(props: {
           </button>
         </div>
       </Show>
-      <Show when={!props.saving.local && props.saving.cloud}>
+      <Show when={!props.saving.local && props.saving.cloud && props.signedIn}>
         <p class="mt-8 text-sm leading-6 text-stone-600">
           Wait for “Saved to cloud” before leaving, or export a copy. This
           browser will not keep an offline copy.

@@ -11,7 +11,8 @@ export function Outline(props: {
   text: (id: string) => string;
   selectedId?: string;
   collapsed: ReadonlySet<string>;
-  onSelect: (id: string) => void;
+  // `pointer` when a row was clicked; keyboard movement reports `keyboard`.
+  onSelect: (id: string, via: "pointer" | "keyboard") => void;
   onToggle: (id: string) => void;
   onEdit: (id: string) => void;
   onClose: () => void;
@@ -39,7 +40,10 @@ export function Outline(props: {
     const id = props.selectedId;
     if (!id) return;
     tree
-      .querySelector<HTMLElement>(`[data-outline-id="${CSS.escape(id)}"]`)
+      // The row, not the whole item: an expanded item also contains its children.
+      .querySelector<HTMLElement>(
+        `[data-outline-id="${CSS.escape(id)}"] > .outline-row`,
+      )
       ?.scrollIntoView({ block: "nearest" });
   });
 
@@ -50,7 +54,7 @@ export function Outline(props: {
     const item = items[current];
     const go = (id?: string) => {
       if (!id) return;
-      props.onSelect(id);
+      props.onSelect(id, "keyboard");
       queueMicrotask(() => focusItem(id));
     };
     switch (e.key) {
@@ -113,7 +117,7 @@ export function Outline(props: {
             class="outline-item"
             onFocus={(e) => {
               if (e.target === e.currentTarget && !selected())
-                props.onSelect(node.id);
+                props.onSelect(node.id, "keyboard");
             }}
           >
             {/* biome-ignore lint/a11y/useKeyWithClickEvents: The tree handles keyboard selection on the focused treeitem. */}
@@ -121,7 +125,7 @@ export function Outline(props: {
             <div
               class="outline-row"
               style={{ "padding-left": `${(branch.level - 1) * 14 + 4}px` }}
-              onClick={() => props.onSelect(node.id)}
+              onClick={() => props.onSelect(node.id, "pointer")}
               onDblClick={() => props.onEdit(node.id)}
             >
               <Show
