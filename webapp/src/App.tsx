@@ -2885,14 +2885,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
       />
-      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-12.5rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-14.75rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
         <section
           data-no-pan
           data-toolbar
           aria-label="Project"
           class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
         >
-          <BrandMark class="mx-1 size-6 shrink-0" />
+          <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
           <input
             type="text"
             required
