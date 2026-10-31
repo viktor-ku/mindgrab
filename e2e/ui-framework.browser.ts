@@ -141,7 +141,12 @@ async function dragTo(id: string, to: { x: number; y: number }) {
 function pressLayoutKey(
   key: string,
   code: string,
-  modifiers: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean } = {},
+  modifiers: {
+    ctrlKey?: boolean;
+    metaKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  } = {},
 ) {
   return page.evaluate(
     ([key, code, modifiers]) =>
@@ -329,7 +334,7 @@ describe("search", () => {
     const second = await addChild(b, "Needle two");
     for (const id of [a, b]) {
       await node(id).click();
-      await page.keyboard.press("g");
+      await page.keyboard.press("Alt+g");
     }
     await node(root).click();
     await node(needle).waitFor({ state: "detached" });
@@ -396,7 +401,7 @@ describe("branch focus", () => {
     const a1 = await addChild(a, "Alpha one");
     const b = await addChild(root, "Beta");
     await node(a).click();
-    await page.keyboard.press("f");
+    await page.keyboard.press("Alt+f");
     const breadcrumbs = page.getByRole("navigation", { name: "Branch focus" });
     await breadcrumbs.waitFor();
     expect(
@@ -570,7 +575,7 @@ describe("persistence and layouts", () => {
     const b = await addChild(root, "Beta");
     await addChild(b, "Beta one");
     await node(a).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(a1).waitFor({ state: "detached" });
     const project = await call("projectId");
     // The view preference is written shortly after the last change.
@@ -603,9 +608,140 @@ describe("persistence and layouts", () => {
     expect(await call("deleted", child)).toBe(false);
 
     await node(root).click();
-    await pressLayoutKey("п", "KeyG");
+    await pressLayoutKey("©", "KeyG", { altKey: true });
     expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    await pressLayoutKey("п", "KeyG");
+    await pressLayoutKey("©", "KeyG", { altKey: true });
     expect(await node(root).getAttribute("data-collapsed")).toBe("false");
+  });
+});
+
+const nodeData = async (id: string) =>
+  (await call("content")).nodes.find((node) => node.id === id);
+const textOf = async (id: string) => (await nodeData(id))?.text;
+const idWithText = async (text: string) =>
+  (await call("content")).nodes.find((node) => node.text === text)?.id;
+function clipboard(type: "copy" | "cut" | "paste", text = "") {
+  return page.evaluate(
+    ([type, text]) => {
+      const data = new DataTransfer();
+      if (text) data.setData("text/plain", text);
+      document.querySelector("[aria-label='Mind map canvas']")?.dispatchEvent(
+        new ClipboardEvent(type, {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      return data.getData("text/plain");
+    },
+    [type, text] as const,
+  );
+}
+
+describe("capture flow", () => {
+  test("typing replaces the selected idea, Tab and Shift+Tab keep capturing, and Enter on a central idea adds a child", async () => {
+    const root = await rootId();
+    expect(await selected()).toBe(root);
+    await page.keyboard.type("Plan");
+    await editor().waitFor();
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("Step");
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.type("Phase");
+    await page.keyboard.press("Escape");
+    expect(await textOf(root)).toBe("Plan");
+    const phase = (await idWithText("Phase")) as string;
+    const step = (await idWithText("Step")) as string;
+    expect(await parentOf(phase)).toBe(root);
+    expect(await parentOf(step)).toBe(phase);
+
+    await node(root).click();
+    await page.keyboard.press("Enter");
+    await editor().waitFor();
+    await page.keyboard.type("Second");
+    await page.keyboard.press("Escape");
+    expect(await parentOf((await idWithText("Second")) as string)).toBe(root);
+    expect((await call("content")).roots).toHaveLength(1);
+  });
+
+  test("letters edit instead of running commands; Option shortcuts open the outline and notes", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    await addChild(child, "Grandchild");
+    await node(child).click();
+    await page.keyboard.type("go");
+    await page.keyboard.press("Enter");
+    expect(await textOf(child)).toBe("go");
+    expect(await node(child).getAttribute("data-collapsed")).toBe("false");
+    expect(await page.getByRole("tree").count()).toBe(0);
+
+    await page.keyboard.press("Alt+o");
+    const tree = page.getByRole("tree", { name: "Map outline" });
+    await tree.waitFor();
+    expect(
+      await tree
+        .getByRole("treeitem", { name: "go", exact: true })
+        .getAttribute("aria-selected"),
+    ).toBe("true");
+    await tree
+      .getByRole("treeitem", { name: "Grandchild", exact: true })
+      .locator(".outline-row")
+      .click();
+    expect(await selected()).toBe((await idWithText("Grandchild")) as string);
+    await page.keyboard.press("ArrowLeft");
+    expect(await selected()).toBe(child);
+
+    await node(child).click();
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("textbox", { name: "Idea notes" });
+    await notes.waitFor();
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
+    );
+    await page.keyboard.type("Details here");
+    expect((await nodeData(child))?.note).toBe("Details here");
+    await page.keyboard.press("Escape");
+    await notes.waitFor({ state: "detached" });
+    await node(child).getByRole("button", { name: "Open notes" }).click();
+    expect(await notes.inputValue()).toBe("Details here");
+  });
+});
+
+describe("clipboard", () => {
+  test("branches copy as outlines and indented text pastes as a branch", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Trip");
+    await addChild(child, "Flights");
+    await node(child).click();
+    expect(await clipboard("copy")).toBe("- Trip\n  - Flights");
+
+    await node(root).click();
+    await clipboard("paste", "# Packing\n- Clothes\n  - Socks\n- Camera");
+    await notice(/Pasted 4 ideas under/).waitFor();
+    const packing = (await idWithText("Packing")) as string;
+    expect(await parentOf(packing)).toBe(root);
+    expect(await parentOf((await idWithText("Clothes")) as string)).toBe(
+      packing,
+    );
+    expect(await parentOf((await idWithText("Socks")) as string)).toBe(
+      await idWithText("Clothes"),
+    );
+    await page.keyboard.press("ControlOrMeta+z");
+    expect(await idWithText("Packing")).toBeUndefined();
+
+    await node(child).click();
+    await clipboard("cut");
+    expect(await idWithText("Trip")).toBeUndefined();
+  });
+
+  test("notices go away once history moves past them", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Short lived");
+    await node(child).click();
+    await page.keyboard.press("Backspace");
+    await notice(/Deleted “Short lived”/).waitFor();
+    await page.keyboard.press("ControlOrMeta+z");
+    await notice(/Deleted “Short lived”/).waitFor({ state: "detached" });
+    expect(await idWithText("Short lived")).toBe(child);
   });
 });

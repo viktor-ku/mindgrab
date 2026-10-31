@@ -1473,7 +1473,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (menuOpen())
       queueMicrotask(() =>
         projectMenu
-          ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+          ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
           ?.focus(),
       );
   });
@@ -2714,6 +2714,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     onCleanup(() => window.removeEventListener("keydown", shortcuts));
     window.addEventListener("keydown", keydown);
     const dismissContextMenu = (e: PointerEvent) => {
+      // Menus close on any press outside them, like native menus.
+      if (
+        menuOpen() &&
+        e.target instanceof Element &&
+        !e.target.closest('[aria-label="Project menu"]')
+      )
+        setMenuOpen(false);
       if (
         !(e.target instanceof Element) ||
         !e.target.closest("[data-context-menu]")

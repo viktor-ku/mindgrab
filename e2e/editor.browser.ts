@@ -154,7 +154,7 @@ describe("collapsing branches", () => {
     await node(root).click();
     const content = await call("content");
     const updates = await call("localUpdates");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     expect(await node(root).getAttribute("data-collapsed")).toBe("true");
     expect(await node(root).getAttribute("data-selected")).toBe("true");
     expect(await page.locator("[data-node-id]").count()).toBe(1);
@@ -168,10 +168,10 @@ describe("collapsing branches", () => {
     expect(await call("localUpdates")).toBe(updates);
     await page.keyboard.press("ArrowRight");
     expect(await node(root).getAttribute("data-selected")).toBe("true");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     for (const id of [child, grandchild, sibling]) await node(id).waitFor();
     expect(await page.locator("svg.pointer-events-none path").count()).toBe(3);
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(root)
       .getByRole("button", { name: "Expand 3 hidden nodes" })
       .click();
@@ -201,9 +201,9 @@ describe("collapsing branches", () => {
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await call("edit", grandchild, 0, 10, "Updated");
     const added = await addChild(child, "Remote child");
     expect(
@@ -211,31 +211,33 @@ describe("collapsing branches", () => {
         .getByRole("button", { name: "Expand 4 hidden nodes" })
         .count(),
     ).toBe(1);
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(sibling).waitFor();
     expect(await node(child).getAttribute("data-collapsed")).toBe("true");
     expect(await node(grandchild).count()).toBe(0);
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(added).waitFor();
     expect(await node(grandchild).textContent()).toBe("Updated");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await call("remove", grandchild);
     await call("remove", added);
     expect(await node(child).getAttribute("data-collapsed")).toBe("false");
   });
 
-  test("G ignores typing, modifiers, repeated keydowns, leaves, and no selection", async () => {
+  test("Option+G ignores typing, other modifiers, repeated keydowns, leaves, and no selection", async () => {
     const root = await rootId();
     const child = await addChild(root, "Child");
-    await page.keyboard.press("g");
+    // New maps open with the first idea selected; start from no selection.
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Alt+g");
     await node(child).waitFor();
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     expect(await node(child).getAttribute("data-collapsed")).toBe("false");
     await node(child).click({ button: "right" });
     expect(
@@ -247,14 +249,16 @@ describe("collapsing branches", () => {
     expect(await call("text", root)).toBe("g");
     await node(child).waitFor();
     await page.keyboard.press("Enter");
-    for (const key of ["Control+g", "Meta+g", "Alt+g"])
+    for (const key of ["Control+Alt+g", "Meta+Alt+g", "Alt+Shift+g"])
       await page.keyboard.press(key);
     expect(await node(root).getAttribute("data-collapsed")).toBe("false");
+    await page.keyboard.down("Alt");
     await page.keyboard.down("g");
     await page.keyboard.down("g");
     await page.keyboard.up("g");
+    await page.keyboard.up("Alt");
     expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(child).waitFor();
   });
 
@@ -262,7 +266,7 @@ describe("collapsing branches", () => {
     const root = await rootId();
     const child = await addChild(root, "Child");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await page.keyboard.press("Tab");
     await editor().waitFor();
     await page.keyboard.type("Added");
@@ -273,7 +277,7 @@ describe("collapsing branches", () => {
     ) as string;
     await page.keyboard.press("Delete");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await page.keyboard.press("Control+z");
     await node(added).waitFor();
     expect(await node(added).getAttribute("data-selected")).toBe("true");
@@ -287,7 +291,7 @@ describe("collapsing branches", () => {
     await call("place", child, 220, 65);
     await call("place", grandchild, 370, 120);
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     // The wider stack must finish its ResizeObserver layout before dragging.
     await frame();
     await frame();
@@ -296,7 +300,7 @@ describe("collapsing branches", () => {
     await page.mouse.up();
     expect(await call("position", child)).toEqual({ x: 310, y: 135 });
     expect(await call("position", grandchild)).toEqual({ x: 460, y: 190 });
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(grandchild).waitFor();
     expect(await translation(grandchild)).toEqual({ x: 460, y: 190 });
   });

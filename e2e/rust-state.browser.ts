@@ -268,3 +268,86 @@ test("a failed upload retries without losing unsent local edits", async () => {
   })) as ProjectView;
   expect(view.nodes[0].text).toBe("Retained across retries 🦀");
 });
+
+test("note commands and textarea drafts round-trip between browser WASM and native Rust", async () => {
+  await login(page);
+  await saved(page);
+  const projectId = crypto.randomUUID();
+  await rpc(page, "createProject", { projectId, schemaVersion: 1 });
+  const result = await page.evaluate(async (projectId) => {
+    const documentPath = "/src/project-document.ts";
+    const bindingPath = "/src/text-binding.ts";
+    const { createProjectDocument } = await import(documentPath);
+    const { bindTextarea } = await import(bindingPath);
+    const doc = createProjectDocument(projectId, "Interop notes", {
+      text: "idea",
+    });
+    const id = doc.view().roots[0];
+    const input = document.createElement("textarea");
+    document.body.append(input);
+    const unbind = bindTextarea(input, doc, id, undefined, "note");
+    try {
+      input.value = "Browser 🌲 note";
+      input.setSelectionRange(input.value.length, input.value.length);
+      input.dispatchEvent(new Event("input"));
+      const response = await fetch(`/api/mergeProject?projectId=${projectId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: doc.snapshot(),
+      });
+      if (!response.ok) throw new Error(`Merge: ${response.status}`);
+      return { id, note: doc.view().nodes[0].note };
+    } finally {
+      unbind();
+      input.remove();
+      doc.destroy();
+    }
+  }, projectId);
+  expect(result.note).toBe("Browser 🌲 note");
+  const nativeView = (await rpc(page, "getProjectState", {
+    projectId,
+  })) as ProjectView;
+  expect(nativeView.nodes[0].note).toBe(result.note);
+  await rpc(page, "commandProject", {
+    projectId,
+    command: {
+      type: "editNote",
+      id: result.id,
+      index: 0,
+      deleteCount: 0,
+      insert: "Native ",
+    },
+  });
+  const snapshot = await rpc(page, "getProjectSnapshot", { projectId });
+  const restored = await page.evaluate(
+    async ({ projectId, data }) => {
+      const documentPath = "/src/project-document.ts";
+      const bindingPath = "/src/text-binding.ts";
+      const { openProjectDocument } = await import(documentPath);
+      const { bindTextarea } = await import(bindingPath);
+      const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      const doc = openProjectDocument(projectId, [bytes]);
+      const id = doc.view().roots[0];
+      const input = document.createElement("textarea");
+      document.body.append(input);
+      const unbind = bindTextarea(input, doc, id, undefined, "note");
+      try {
+        return { note: input.value, text: doc.view().nodes[0].text };
+      } finally {
+        unbind();
+        input.remove();
+        doc.destroy();
+      }
+    },
+    { projectId, data: snapshot.data as string },
+  );
+  expect(restored).toEqual({ note: "Native Browser 🌲 note", text: "idea" });
+  await rpc(page, "commandProject", {
+    projectId,
+    command: { type: "setNote", id: result.id, note: "" },
+  });
+  const cleared = (await rpc(page, "getProjectState", {
+    projectId,
+  })) as ProjectView;
+  expect(cleared.nodes[0].note).toBe("");
+});
