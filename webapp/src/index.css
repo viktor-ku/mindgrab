@@ -320,7 +320,7 @@ kbd {
 .menu-item kbd {
   border: 0;
   background: none;
-  color: #a8a29e;
+  color: #78716c;
 }
 .notice {
   max-width: min(32rem, calc(100vw - 1.5rem));
@@ -578,4 +578,35 @@ kbd {
   min-height: 0;
   padding: 0;
   overflow: hidden;
+}
+/* Ideas dim while dragged over a target so the target stays readable. */
+.map-layer[data-dropping] .map-node-dragging {
+  opacity: 0.35;
+}
+@media (pointer: coarse) {
+  /* Comfortable touch targets without changing the visual density. */
+  .icon-button,
+  .tool-button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  .map-node::before {
+    content: "";
+    position: absolute;
+    inset: -6px;
+  }
+  .notice-action {
+    padding: 0.55rem 0.8rem;
+  }
+  .keyboard-hint {
+    display: none;
+  }
+}
+/* Hints that a panel continues below the fold. */
+.scroll-fade {
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 2.5rem),
+    transparent
+  );
 }

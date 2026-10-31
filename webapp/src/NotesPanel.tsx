@@ -1,5 +1,6 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { CloseIcon } from "./icons";
+import { ALT_LABEL } from "./ShortcutsDialog";
 import type { ProjectDocument } from "./project-document";
 import { bindTextarea } from "./text-binding";
 
@@ -56,7 +57,7 @@ export function NotesPanel(props: {
           type="button"
           class="icon-button size-8!"
           aria-label="Close notes"
-          title="Close notes (N)"
+          title={`Close notes (${ALT_LABEL}N)`}
           onClick={props.onClose}
         >
           <CloseIcon class="size-4" />
@@ -74,11 +75,11 @@ export function NotesPanel(props: {
           ref={input}
           aria-label="Idea notes"
           placeholder="Add details, links, or context…"
-          class="min-h-0 flex-1 resize-none bg-transparent px-3 py-2.5 text-sm leading-6 text-stone-800 outline-none select-text placeholder:text-stone-400"
+          class="min-h-0 flex-1 resize-none bg-transparent px-3 py-2.5 text-sm leading-6 text-stone-800 outline-none select-text placeholder:text-stone-500"
           onFocus={props.onFocusChange}
           onBlur={props.onFocusChange}
         />
-        <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-400">
+        <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
           {length()
             ? `${length().toLocaleString()} characters · saved with the map`
             : "Notes are saved with the map and included in exports."}

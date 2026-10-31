@@ -194,6 +194,16 @@ export function navigationTarget(
 }
 
 export function connectionPath({ from, to }: Connection) {
+  // Children laid out to the right connect side to side with a smooth S-curve,
+  // so every branch leaves its parent at the same point.
+  if (to.x >= from.x + from.width) {
+    const startX = from.x + from.width;
+    const startY = from.y + from.height / 2;
+    const endX = to.x;
+    const endY = to.y + to.height / 2;
+    const middle = (startX + endX) / 2;
+    return `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`;
+  }
   const dx = to.x + to.width / 2 - (from.x + from.width / 2);
   const dy = to.y + to.height / 2 - (from.y + from.height / 2);
   // Attach to the facing borders, even when a child is above or left of its parent.

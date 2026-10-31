@@ -70,7 +70,7 @@ import {
   writeMarkdownFile,
   writeProjectFile,
 } from "./project-import-export";
-import { MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
+import { ALT_LABEL, MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
 import { Outline } from "./Outline";
 import { NotesPanel } from "./NotesPanel";
 import { branchOutline, outlineSize, parseOutline } from "./outline-text";
@@ -134,7 +134,7 @@ function matchesLetter(event: KeyboardEvent, letter: string) {
   );
 }
 
-const ZOOM_MIN = 0.25;
+const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 2.5;
 // A device-wide input preference: what a plain scroll wheel does on the canvas.
 type WheelMode = "pan" | "zoom";
@@ -181,6 +181,7 @@ function NodeEditor(props: {
   doc: ProjectDocument;
   id: string;
   onFinish: () => void;
+  onTab: (shift: boolean) => void;
   onSelectionChange: (selection: TextSelection) => void;
 }) {
   let input!: HTMLTextAreaElement;
@@ -219,7 +220,7 @@ function NodeEditor(props: {
         aria-label="Node text"
         rows={1}
         maxLength={LIMITS.text}
-        class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-center outline-none select-text cursor-text"
+        class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-left outline-none select-text cursor-text"
         onBlur={props.onFinish}
         onInput={reportSelection}
         onSelect={reportSelection}
@@ -241,6 +242,11 @@ function NodeEditor(props: {
           ) {
             e.preventDefault();
             props.onFinish();
+          } else if (e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            // Keep capturing: Tab adds a child and Shift+Tab a parent, both
+            // already in writing mode, instead of moving focus away.
+            e.preventDefault();
+            props.onTab(e.shiftKey);
           }
         }}
       />
@@ -282,6 +288,7 @@ function Node(props: {
   onSelect: () => void;
   onWrite: () => void;
   onFinish: () => void;
+  onTab: (shift: boolean) => void;
   onSelectionChange: (selection: TextSelection) => void;
   onPointerDown: (event: PointerEvent) => void;
 }) {
@@ -320,7 +327,7 @@ function Node(props: {
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
       }}
-      title={`Click to select · Double-click to write · Drag to move${props.descendants ? " · G to collapse or expand children" : ""}`}
+      title={`Click to select · Double-click to write · Drag to move${props.descendants ? ` · ${ALT_LABEL}G to collapse or expand children` : ""}`}
     >
       <Show when={props.collapsed}>
         <span
@@ -344,8 +351,8 @@ function Node(props: {
               type="button"
               aria-pressed={props.selected}
               aria-expanded={props.descendants ? !props.collapsed : undefined}
-              aria-keyshortcuts={props.descendants ? "g" : undefined}
-              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere cursor-pointer outline-none"
+              aria-keyshortcuts={props.descendants ? "Alt+G" : undefined}
+              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer outline-none"
             >
               {props.text || "New idea"}
             </button>
@@ -355,6 +362,7 @@ function Node(props: {
             doc={props.doc}
             id={props.id}
             onFinish={props.onFinish}
+            onTab={props.onTab}
             onSelectionChange={props.onSelectionChange}
           />
         </Show>
@@ -363,7 +371,7 @@ function Node(props: {
             type="button"
             class="note-badge"
             aria-label="Open notes"
-            title="Has notes · open them (N)"
+            title={`Has notes · open them (${ALT_LABEL}N)`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -378,7 +386,7 @@ function Node(props: {
             type="button"
             class="rounded px-1.5 text-[10px] leading-4 font-medium whitespace-nowrap cursor-pointer bg-white/35 hover:bg-white/60 focus-visible:outline-2"
             aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
-            title="Expand children (G)"
+            title={`Expand children (${ALT_LABEL}G)`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -396,6 +404,9 @@ function Node(props: {
 interface Notice {
   message: string;
   action?: { label: string; run: () => void };
+  // The history position the notice describes; later edits or undo make it
+  // stale, so it is dismissed rather than offering the wrong Undo.
+  revision?: number;
 }
 
 const formatDate = (iso: string) => {
@@ -464,6 +475,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }));
   const claimCount = () =>
     account().status === "authenticated" ? (claims.data?.length ?? 0) : 0;
+  // "Not now" lasts until the account changes.
+  const [claimDismissed, setClaimDismissed] = createSignal(false);
+  createEffect(
+    on(
+      () => account().user?.id,
+      () => setClaimDismissed(false),
+    ),
+  );
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopDurability: (() => void) | undefined;
@@ -673,6 +692,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
   }
 
+  // A new map opens with its first idea selected, ready for typing or Tab.
+  function selectFirstIdea() {
+    const root = forest()[0]?.id;
+    if (root) setSelectedId(root);
+  }
+
   async function openLatestOrCreate(target = repository) {
     const latest = await target.latestProject();
     if (target !== repository || disposed) return;
@@ -687,6 +712,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }),
       target,
     );
+    if (target === repository && !disposed) selectFirstIdea();
   }
 
   async function performInitializeWorkspace() {
@@ -823,9 +849,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         new LoroApi(undefined, undefined, userId, queryClient),
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
-      setClaimMessage(
-        `Added ${ids.length} anonymous ${ids.length === 1 ? "project" : "projects"} to this account. Cloud saving will continue automatically.`,
-      );
+      setClaimMessage("");
+      showNotice({
+        message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
+      });
       await refreshClaims(owner);
       cloud?.retry();
       if (ids[0]) await openProject(ids[0]);
@@ -852,6 +879,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // (selection, viewport, measurements, drag previews) is local UI state.
   const [doc, setDoc] = createSignal(ephemeralDocument());
   const [historyRevision, setHistoryRevision] = createSignal(0);
+  // Read synchronously, even inside a batch, to tie notices to history.
+  let historyCount = 0;
   let editorSelection: TextSelection | undefined;
   const [storageReady, setStorageReady] = createSignal(false);
   const [saveStatus, setSaveStatus] = createSignal<
@@ -874,11 +903,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     };
     current.on("beforeChange", beforeChange);
     undo.onRecord((entry) => {
+      historyCount++;
       setHistoryRevision((n) => n + 1);
       entry.before = selectionBefore;
       queueMicrotask(() => (entry.after = captureSelection()));
     });
     undo.onRestore(({ entry, direction }) => {
+      historyCount++;
       setHistoryRevision((n) => n + 1);
       const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
@@ -933,10 +964,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let noticeTimer: number | undefined;
   function showNotice(next: Notice) {
     window.clearTimeout(noticeTimer);
-    setNotice(next);
+    setNotice({ ...next, revision: historyCount });
     noticeTimer = window.setTimeout(() => setNotice(undefined), 6000);
   }
   onCleanup(() => window.clearTimeout(noticeTimer));
+  createEffect(
+    on(
+      historyRevision,
+      () => {
+        if (notice() && notice()?.revision !== historyCount)
+          setNotice(undefined);
+      },
+      { defer: true },
+    ),
+  );
 
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
@@ -1052,7 +1093,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   });
   const layout = createMemo(() => {
     const preview = drag();
-    if (!preview) return baseLayout();
+    // Over a drop target the branch stays put, so the target and its
+    // surroundings remain readable; the label and indicator show the move.
+    if (!preview || dropTarget()) return baseLayout();
     return layoutMindMap(
       translatePreview(
         visibleForest(),
@@ -1199,8 +1242,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (bounds) fitBounds(bounds, 1);
   }
 
-  function fitSelection() {
-    const id = selectedId();
+  function fitSelection(id = selectedId()) {
     if (!id) return fitMap();
     const ids = [id];
     const visit = (nodes: MindMapNode[]) => {
@@ -1335,6 +1377,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     fitMap();
   }
   function exitFocus() {
+    if (notice()?.action?.label === "Leave focus") setNotice(undefined);
     const back = focusReturn;
     focusReturn = undefined;
     const selected = selectedId();
@@ -1355,6 +1398,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   });
 
   const [searchOpen, setSearchOpen] = createSignal(false);
+  // After jumping to a search result, a chip offers the view the search began
+  // from, including its folds, until the user moves on.
+  const [returnView, setReturnView] = createSignal<ViewSnapshot>();
   const [searchQuery, setSearchQuery] = createSignal("");
   const [searchIndex, setSearchIndex] = createSignal(0);
   let searchInput: HTMLInputElement | undefined;
@@ -1369,6 +1415,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setContextMenu(undefined);
     if (!searchOpen()) {
       searchReturn = snapshotView();
+      setReturnView(undefined);
       setSearchIndex(0);
       setSearchOpen(true);
     }
@@ -1396,6 +1443,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   function closeSearch(keep: boolean) {
     const back = searchReturn;
     searchReturn = undefined;
+    setReturnView(keep ? back : undefined);
     batch(() => {
       setSearchOpen(false);
       setSearchQuery("");
@@ -1478,7 +1526,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         name,
         projectMarkdown(name, forest(), (id) => view().text(id)),
       );
-      setStorageMessage(`Exported “${name}” as an outline.`);
+      showNotice({ message: `Exported “${truncate(name, 40)}” as an outline` });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError"))
         setStorageMessage(
@@ -1548,10 +1596,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (!first) return;
     if (parent) revealNode(first);
     setSelectedId(first);
+    // Show what arrived once the new ideas have been measured.
+    if (count > 1) {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => (parent ? fitSelection(parent) : fitMap())),
+      );
+    }
     showNotice({
       message: `Pasted ${count} ${count === 1 ? "idea" : "ideas"}${parent ? ` under “${nodeLabel(parent)}”` : ""}`,
       action: { label: "Undo", run: undo },
     });
+  }
+
+  // F6 / Shift+F6 cycle focus between the canvas and each labelled toolbar
+  // or panel, the conventional escape hatch for widgets that use Tab.
+  function cycleRegions(direction: 1 | -1) {
+    const focusable =
+      'button:not(:disabled), input:not(:disabled), textarea, [tabindex="0"]';
+    const regions: HTMLElement[] = [
+      canvas,
+      ...Array.from(
+        canvas.querySelectorAll<HTMLElement>("[data-toolbar][aria-label]"),
+      ).filter(
+        (region) =>
+          !region.parentElement?.closest("[data-toolbar][aria-label]") &&
+          region.querySelector(focusable),
+      ),
+    ];
+    const active = document.activeElement;
+    const current = Math.max(
+      0,
+      regions.findIndex(
+        (region, index) => index > 0 && active && region.contains(active),
+      ),
+    );
+    const next =
+      regions[(current + direction + regions.length) % regions.length];
+    if (next === canvas) canvas.focus({ preventScroll: true });
+    else next.querySelector<HTMLElement>(focusable)?.focus();
   }
 
   const [showHelp, setShowHelp] = createSignal(false);
@@ -1640,6 +1722,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setTop(0);
       setZoom(1);
       setShowLoad(false);
+      setReturnView(undefined);
+      setFocusId(undefined);
     });
     canvas.focus({ preventScroll: true });
   }
@@ -1652,11 +1736,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, target);
       if (target !== repository || disposed) return;
       const state = handle.state();
-      setStorageMessage(
-        state.status === "ready"
-          ? `Loaded “${state.view.name}”.`
-          : "Project is still loading.",
-      );
+      if (state.status === "ready") {
+        setStorageMessage("");
+        showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
+      } else setStorageMessage("Project is still loading.");
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
@@ -1683,6 +1766,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, target);
       if (target !== repository || disposed) return;
       setStorageMessage("");
+      selectFirstIdea();
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
@@ -1718,11 +1802,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("done");
-      setStorageMessage(
-        view().saving().local
-          ? "Saved locally."
-          : "Local saving is off. Export a copy to keep your work.",
-      );
+      if (view().saving().local) {
+        setStorageMessage("");
+        showNotice({ message: "Saved locally." });
+      } else
+        setStorageMessage(
+          "Local saving is off. Export a copy to keep your work.",
+        );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("error");
@@ -1839,7 +1925,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         ...(layoutAnchor() && { anchor: layoutAnchor() }),
       });
       await writeProjectFile(name, json);
-      setStorageMessage(`Exported “${name}”.`);
+      showNotice({ message: `Exported “${truncate(name, 40)}”` });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
@@ -1894,7 +1980,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, owner);
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
-      setStorageMessage(`Imported “${content.name}”.`);
+      showNotice({ message: `Imported “${truncate(content.name, 40)}”` });
     } catch (error) {
       if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -2130,6 +2216,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   function insertParent() {
     const id = selectedId();
     if (!id) return;
+    if (id === focusId()) {
+      showNotice({
+        message: "Leave focus to add a parent above this branch",
+        action: { label: "Leave focus", run: exitFocus },
+      });
+      return;
+    }
     finishWriting();
     const parent = details().get(id)?.parent;
     const index = childrenOf(parent).findIndex((node) => node.id === id);
@@ -2397,28 +2490,24 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setShowHelp((open) => !open);
         return;
       }
-      if (
-        matchesLetter(e, "o") &&
-        !e.repeat &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+      // Letter commands use Option/Alt so plain typing always edits the idea.
+      const option =
+        e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.repeat;
+      if (option && matchesLetter(e, "o")) {
         e.preventDefault();
         setOutlineOpen((open) => !open);
         return;
       }
-      if (
-        matchesLetter(e, "n") &&
-        !e.repeat &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+      if (option && matchesLetter(e, "n")) {
         e.preventDefault();
         toggleNotes();
+        return;
+      }
+      // F6 moves between the canvas and the toolbars without tabbing through
+      // the map, which Tab uses to add ideas.
+      if (e.key === "F6") {
+        e.preventDefault();
+        cycleRegions(e.shiftKey ? -1 : 1);
         return;
       }
       // Physical keys keep view shortcuts working on every keyboard layout.
@@ -2466,65 +2555,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         (e.target instanceof Element && e.target.closest("[data-toolbar]"))
       )
         return;
+      const id = selectedId() as string;
       const arrow = ARROW_DIRECTIONS.get(e.key);
-      if (
-        matchesLetter(e, "g") &&
-        !e.repeat &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+      const plain = !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+      // Option+arrows move ideas everywhere. Ctrl+arrows also work, except that
+      // macOS reserves them for Mission Control.
+      const move = arrow && !e.shiftKey && !e.metaKey && e.altKey !== e.ctrlKey;
+      if (option && matchesLetter(e, "g")) {
         e.preventDefault();
-        toggleCollapse(selectedId() as string);
-      } else if (
-        matchesLetter(e, "f") &&
-        !e.repeat &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+        toggleCollapse(id);
+      } else if (option && matchesLetter(e, "f")) {
         e.preventDefault();
-        if (focusId() === selectedId()) exitFocus();
+        if (focusId() === id) exitFocus();
         else focusBranch();
+      } else if (move) {
+        e.preventDefault();
+        if (arrow === "up" || arrow === "down")
+          command((doc) => reorderNode(doc, id, arrow === "up" ? -1 : 1));
+        else if (arrow === "right") indentSelected();
+        else outdentSelected();
       } else if (
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        ((e.key === "Delete" && !e.metaKey) ||
-          (e.key === "Backspace" && e.metaKey))
+        (plain && (e.key === "Delete" || e.key === "Backspace")) ||
+        (e.metaKey &&
+          !e.shiftKey &&
+          !e.ctrlKey &&
+          !e.altKey &&
+          e.key === "Backspace")
       ) {
         e.preventDefault();
         removeSelected();
-      } else if (
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey &&
-        (e.key === "Tab" || e.key === "Enter")
-      ) {
+      } else if (plain && e.key === "Tab") {
         e.preventDefault();
-        add(e.key === "Tab" ? "child" : "sibling");
-      } else if (
-        e.ctrlKey &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !e.metaKey &&
-        (e.key === "ArrowUp" || e.key === "ArrowDown")
-      ) {
+        add("child");
+      } else if (plain && e.key === "Enter") {
         e.preventDefault();
-        const id = selectedId() as string;
-        command((doc) => reorderNode(doc, id, e.key === "ArrowUp" ? -1 : 1));
-      } else if (
-        e.ctrlKey &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !e.metaKey &&
-        (e.key === "ArrowLeft" || e.key === "ArrowRight")
-      ) {
-        e.preventDefault();
-        if (e.key === "ArrowRight") indentSelected();
-        else outdentSelected();
+        // A central idea has no siblings to speak of; Enter grows the map.
+        add(details().get(id)?.parent ? "sibling" : "child");
       } else if (
         e.key === "Tab" &&
         e.shiftKey &&
@@ -2534,22 +2600,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ) {
         e.preventDefault();
         insertParent();
-      } else if (
-        arrow &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+      } else if (arrow && plain) {
         e.preventDefault();
-        const target = navigationTarget(visibleForest(), selectedId()!, arrow);
+        const target = navigationTarget(visibleForest(), id, arrow);
         if (target) {
           setColorScope("node");
           setSelectedId(target);
         }
-      } else if (e.key === "F2") {
+      } else if (e.key === "F2" || (plain && e.key === " ")) {
         e.preventDefault();
-        write(selectedId()!);
+        write(id);
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // Typing replaces the idea's text: writing starts before the key's
+        // default action, so the character lands in the selected editor.
+        write(id);
       }
     };
     const wheel = (e: WheelEvent) => {
@@ -2814,7 +2878,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
       />
-      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2">
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-12.5rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
         <section
           data-no-pan
           data-toolbar
@@ -2862,6 +2926,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <span
               role="status"
               class="save-state"
+              // With cloud saving healthy, one status is enough; the local one
+              // stays available to assistive technology.
+              classList={{
+                "sr-only":
+                  view().saving().local &&
+                  view().saving().cloud &&
+                  saveStatus() !== "error" &&
+                  ["saved", "saving", "offline"].includes(
+                    cloudStatus()?.status ?? "",
+                  ),
+              }}
               data-tone={
                 !view().saving().local
                   ? "muted"
@@ -3004,7 +3079,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         >
                           <span class="min-w-0 flex-1">
                             <span class="block truncate">{project.name}</span>
-                            <span class="block text-[11px] font-normal text-stone-400">
+                            <span class="block text-[11px] font-normal text-stone-500">
                               {project.id === doc().id
                                 ? "Open now"
                                 : `Created ${formatDate(project.createdAt)}`}
@@ -3179,7 +3254,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="icon-button"
               aria-label="Outline"
-              title="Outline (O)"
+              title={`Outline (${ALT_LABEL}O)`}
               aria-pressed={outlineOpen()}
               disabled={!storageReady()}
               onClick={() => setOutlineOpen((open) => !open)}
@@ -3212,10 +3287,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             state={account()}
             beforeNavigate={saveBeforeAuth}
             onRetry={() => void auth.check()}
-            claimCount={claimCount()}
             claiming={claiming()}
             claimMessage={claimMessage()}
-            onClaim={() => void addAnonymousProjects()}
           />
         </div>
         <Show when={searchOpen()}>
@@ -3240,7 +3313,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 placeholder={
                   focusId() ? "Search this branch" : "Search this map"
                 }
-                class="search-field min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-400"
+                class="search-field min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-500"
                 value={searchQuery()}
                 onInput={(e) => {
                   batch(() => {
@@ -3316,18 +3389,29 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         {result.text.slice(result.match[1])}
                       </span>
                       <Show when={result.path.length}>
-                        <span class="block truncate text-xs text-stone-400">
-                          {result.path
-                            .map((part) => truncate(part, 20))
-                            .join(" › ")}
+                        <span class="block truncate text-xs text-stone-500">
+                          {/* The nearest parents matter most; earlier ones collapse. */}
+                          {[
+                            ...(result.path.length > 3 ? ["…"] : []),
+                            ...result.path
+                              .slice(-3)
+                              .map((part) => truncate(part, 20)),
+                          ].join(" › ")}
                         </span>
                       </Show>
                     </div>
                   )}
                 </For>
               </div>
-              <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-400">
-                ↑↓ preview · Enter go · Esc return
+              <p class="flex justify-between gap-2 border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
+                <span>
+                  {searchResults().length}{" "}
+                  {searchResults().length === 1 ? "match" : "matches"} in{" "}
+                  {focusId() ? "this branch" : "this map"}
+                </span>
+                <span class="keyboard-hint">
+                  ↑↓ preview · Enter go · Esc back
+                </span>
               </p>
             </Show>
           </search>
@@ -3355,6 +3439,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               finishWriting();
               setColorScope("node");
               setSelectedId(id);
+              // On narrow screens the outline covers the map, so picking an idea
+              // returns to the map to show it.
+              if (canvasSize().width < 640) setOutlineOpen(false);
             }}
             onToggle={(id) => toggleCollapse(id, false)}
             onEdit={write}
@@ -3364,6 +3451,76 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             }}
           />
         </div>
+      </Show>
+      <Show when={claimCount() > 0 && !claimDismissed()}>
+        <section
+          data-no-pan
+          data-toolbar
+          aria-label="Maps from before sign-in"
+          class="map-toolbar absolute top-16 left-1/2 z-30 w-[28rem] max-w-[calc(100%-1.5rem)] -translate-x-1/2 p-3 cursor-default"
+        >
+          <p class="text-sm font-semibold text-stone-800">
+            Your earlier work is safe
+          </p>
+          <p class="mt-0.5 text-xs leading-5 text-stone-600">
+            {claimCount() === 1
+              ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
+              : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
+          </p>
+          <div class="mt-2.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="primary-button px-3! py-1.5! text-xs!"
+              disabled={claiming()}
+              onClick={() => void addAnonymousProjects()}
+            >
+              {claiming()
+                ? "Adding projects…"
+                : "Add anonymous projects to this account"}
+            </button>
+            <button
+              type="button"
+              class="map-control text-xs"
+              disabled={claiming()}
+              onClick={() => setClaimDismissed(true)}
+            >
+              Not now
+            </button>
+          </div>
+        </section>
+      </Show>
+      <Show when={returnView()}>
+        <nav
+          data-no-pan
+          data-toolbar
+          aria-label="Return from search"
+          class="map-toolbar absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
+          classList={{ "top-16": !focusId(), "top-[7.25rem]": !!focusId() }}
+        >
+          <button
+            type="button"
+            class="map-control flex items-center gap-1.5"
+            title="Restore the view and folds from before the search"
+            onClick={() => {
+              const back = returnView();
+              setReturnView(undefined);
+              if (back) restoreView(back);
+              canvas.focus({ preventScroll: true });
+            }}
+          >
+            <ArrowLeftIcon class="size-4" />
+            Back to where you were
+          </button>
+          <button
+            type="button"
+            class="icon-button size-8!"
+            aria-label="Stay here"
+            title="Stay here"
+            onClick={() => setReturnView(undefined)}
+          >
+            <CloseIcon class="size-4" />
+          </button>
+        </nav>
       </Show>
       <Show when={focusId()}>
         <nav
@@ -3426,7 +3583,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     class="notice-action"
                     onClick={() => {
                       setNotice(undefined);
+                      const undoing = action().run === undo;
                       action().run();
+                      if (undoing)
+                        showNotice({
+                          message: "Undone",
+                          action: { label: "Redo", run: redo },
+                        });
                     }}
                   >
                     {action().label}
@@ -3581,7 +3744,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="icon-button relative"
               aria-label="Notes"
-              title="Notes (N)"
+              title={`Notes (${ALT_LABEL}N)`}
               aria-pressed={notesOpen()}
               onClick={() => toggleNotes()}
             >
@@ -3606,7 +3769,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     ? "Expand children"
                     : "Collapse children"
                 }
-                title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (G)`}
+                title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
                 onClick={() => toggleCollapse(selectedId() as string)}
               >
                 <Show
@@ -3622,7 +3785,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label={
                   focusId() === selectedId() ? "Leave focus" : "Focus branch"
                 }
-                title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (F)`}
+                title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
                 aria-pressed={focusId() === selectedId()}
                 onClick={() =>
                   focusId() === selectedId() ? exitFocus() : focusBranch()
@@ -3695,9 +3858,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <li>
               <kbd>Tab</kbd> adds a child, <kbd>Enter</kbd> a sibling
             </li>
-            <li>
-              Double-click or <kbd>F2</kbd> to edit an idea
-            </li>
+            <li>Type to rewrite the selected idea</li>
             <li>Drag an idea onto another to move it under</li>
             <li>
               <kbd>{MOD_LABEL}Z</kbd> undoes anything
@@ -3715,6 +3876,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       <div
         class="map-layer absolute w-full h-full origin-top-left"
         classList={{ "map-layer-easing": easingView() }}
+        data-dropping={dropTarget() ? "" : undefined}
         style={{
           left: "50%",
           top: "50%",
@@ -3769,6 +3931,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 onFinish={() => {
                   if (selectedId() === id) finishWriting();
                 }}
+                onTab={(shift) => (shift ? insertParent() : add("child"))}
                 onSelectionChange={recordEditorSelection}
                 onPointerDown={(e) => startPointer(e, id)}
               />
@@ -3809,7 +3972,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           class="drag-label"
           style={{
             left: `${(dragPointer()?.x ?? 0) + 14}px`,
-            top: `${(dragPointer()?.y ?? 0) + 16}px`,
+            top: `${(dragPointer()?.y ?? 0) - 40}px`,
           }}
         >
           {dragLabel()}
@@ -3931,7 +4094,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(indentSelected)}
                     >
                       Move under idea above
-                      <kbd class="ml-auto">Ctrl→</kbd>
+                      <kbd class="ml-auto">{ALT_LABEL}→</kbd>
                     </button>
                     <button
                       type="button"
@@ -3944,7 +4107,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(outdentSelected)}
                     >
                       Move out to parent level
-                      <kbd class="ml-auto">Ctrl←</kbd>
+                      <kbd class="ml-auto">{ALT_LABEL}←</kbd>
                     </button>
                     <button
                       type="button"
@@ -3955,7 +4118,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       {view().note(nodeId()).trim()
                         ? "Open notes"
                         : "Add notes"}
-                      <kbd class="ml-auto">N</kbd>
+                      <kbd class="ml-auto">{ALT_LABEL}N</kbd>
                     </button>
                     <Show when={placedIds(nodeId()).length}>
                       <button
@@ -3981,7 +4144,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         {collapsedIds().has(nodeId())
                           ? "Expand children"
                           : "Collapse children"}
-                        <kbd class="ml-auto">G</kbd>
+                        <kbd class="ml-auto">{ALT_LABEL}G</kbd>
                       </button>
                       <button
                         type="button"
@@ -3994,7 +4157,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         {focusId() === nodeId()
                           ? "Leave focus"
                           : "Focus on this branch"}
-                        <kbd class="ml-auto">F</kbd>
+                        <kbd class="ml-auto">{ALT_LABEL}F</kbd>
                       </button>
                     </Show>
                     <div class="menu-divider" />
@@ -4005,7 +4168,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(removeSelected)}
                     >
                       Delete
-                      <kbd class="ml-auto">Del</kbd>
+                      <kbd class="ml-auto">⌫</kbd>
                     </button>
                   </>
                 );
@@ -4067,7 +4230,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Fit selection"
             title="Fit selection (⇧2)"
             disabled={!selectedId()}
-            onClick={fitSelection}
+            onClick={() => fitSelection()}
           >
             <FitSelectionIcon />
           </button>

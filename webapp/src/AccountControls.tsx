@@ -7,10 +7,8 @@ export function AccountControls(props: {
   state: SessionState;
   beforeNavigate: (action: "login" | "logout") => boolean | Promise<boolean>;
   onRetry: () => void;
-  claimCount: number;
   claiming: boolean;
   claimMessage: string;
-  onClaim: () => void;
 }) {
   const [message, setMessage] = createSignal("");
   const navigation = createMutation(() => ({
@@ -60,7 +58,7 @@ export function AccountControls(props: {
       class="map-toolbar pointer-events-auto flex max-w-72 flex-col gap-1 text-sm cursor-default"
       aria-label="Account"
     >
-      <div class="flex items-center gap-1">
+      <div class="flex min-h-9 items-center gap-1">
         <Show when={props.state.user}>
           {(user) => (
             <>
@@ -113,27 +111,6 @@ export function AccountControls(props: {
           </button>
         </Show>
       </div>
-      <Show
-        when={props.state.status === "authenticated" && props.claimCount > 0}
-      >
-        <div class="border-t border-stone-100 px-2 py-1.5 text-xs text-stone-600">
-          <p>
-            {props.claimCount} anonymous{" "}
-            {props.claimCount === 1 ? "project is" : "projects are"} saved
-            separately in this browser.
-          </p>
-          <button
-            type="button"
-            class="map-control mt-1 -ml-2 text-xs! font-medium text-blue-700"
-            disabled={props.claiming || navigating()}
-            onClick={props.onClaim}
-          >
-            {props.claiming
-              ? "Adding projects…"
-              : "Add anonymous projects to this account"}
-          </button>
-        </div>
-      </Show>
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
         {message() || props.state.message}
       </p>

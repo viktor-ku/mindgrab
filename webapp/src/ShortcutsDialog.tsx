@@ -1,20 +1,21 @@
 import { createEffect, For } from "solid-js";
 import { CloseIcon } from "./icons";
 
-export const MOD_LABEL =
+const APPLE =
   typeof navigator !== "undefined" &&
-  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
-    ? "⌘"
-    : "Ctrl+";
+  /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+export const MOD_LABEL = APPLE ? "⌘" : "Ctrl+";
+export const ALT_LABEL = APPLE ? "⌥" : "Alt+";
 
 const GROUPS: { title: string; items: [string, string][] }[] = [
   {
     title: "Write",
     items: [
-      ["Tab", "Add a child idea"],
-      ["Enter", "Add a sibling idea"],
+      ["Type", "Replace the selected idea's text"],
+      ["Tab", "Add a child idea (also while editing)"],
+      ["Enter", "Add a sibling (a child for the central idea)"],
       ["⇧Tab", "Insert a parent above the idea"],
-      ["F2 · double-click", "Edit the selected idea"],
+      ["F2 · Space · double-click", "Edit the selected idea"],
       ["Enter · Esc", "Finish editing"],
       ["⇧Enter", "New line while editing"],
     ],
@@ -23,12 +24,12 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     title: "Move and organize",
     items: [
       ["Arrow keys", "Select a nearby idea"],
-      ["Ctrl↑ · Ctrl↓", "Reorder among siblings"],
-      ["Ctrl→", "Move under the idea above"],
-      ["Ctrl←", "Move out to the parent's level"],
+      [`${ALT_LABEL}↑ · ${ALT_LABEL}↓`, "Reorder among siblings"],
+      [`${ALT_LABEL}→`, "Move under the idea above"],
+      [`${ALT_LABEL}←`, "Move out to the parent's level"],
       ["Drag onto an idea", "Move under it, or before/after at its edges"],
-      ["G", "Collapse or expand children"],
-      ["Delete", "Delete the idea and its children"],
+      [`${ALT_LABEL}G`, "Collapse or expand children"],
+      ["⌫ · Delete", "Delete the idea and its children"],
       [
         `${MOD_LABEL}C · ${MOD_LABEL}X · ${MOD_LABEL}V`,
         "Copy, cut, paste branches as outlines",
@@ -39,14 +40,15 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     title: "Find your way",
     items: [
       [`${MOD_LABEL}F · /`, "Search; Esc returns to where you were"],
-      ["F", "Focus on the selected branch"],
-      ["N", "Open notes for the selected idea"],
-      ["O", "Show or hide the outline"],
+      [`${ALT_LABEL}F`, "Focus on the selected branch"],
+      [`${ALT_LABEL}N`, "Open notes for the selected idea"],
+      [`${ALT_LABEL}O`, "Show or hide the outline"],
       ["⇧1", "Fit the whole map"],
       ["⇧2", "Fit the selected branch"],
       [`${MOD_LABEL}+ · ${MOD_LABEL}−`, "Zoom around the selection"],
       [`${MOD_LABEL}0`, "Zoom to 100%"],
       ["Esc", "Clear selection, then leave focus"],
+      ["F6", "Move between the map and the toolbars"],
     ],
   },
   {
@@ -96,7 +98,7 @@ export function ShortcutsDialog(props: {
           <CloseIcon />
         </button>
       </header>
-      <div class="grid min-h-0 gap-x-8 gap-y-6 overflow-y-auto px-6 py-5 sm:grid-cols-2">
+      <div class="scroll-fade grid min-h-0 gap-x-8 gap-y-6 overflow-y-auto px-6 pt-5 pb-8 sm:grid-cols-2">
         <For each={GROUPS}>
           {(group) => (
             <section>

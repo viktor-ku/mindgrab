@@ -1,5 +1,6 @@
 import { createEffect, For, Show } from "solid-js";
 import { ChevronRightIcon, CloseIcon } from "./icons";
+import { ALT_LABEL } from "./ShortcutsDialog";
 import type { MindMapNode } from "./mind-map";
 
 // A synchronized tree view of the map. It shares selection and folding with
@@ -146,7 +147,7 @@ export function Outline(props: {
                 {props.text(node.id).trim() || "New idea"}
               </span>
               <Show when={!open() && children().length}>
-                <span class="shrink-0 text-[11px] text-stone-400">
+                <span class="shrink-0 text-[11px] text-stone-500">
                   {children().length}
                 </span>
               </Show>
@@ -178,7 +179,7 @@ export function Outline(props: {
           type="button"
           class="icon-button size-8!"
           aria-label="Close outline"
-          title="Close outline (O)"
+          title={`Close outline (${ALT_LABEL}O)`}
           onClick={props.onClose}
         >
           <CloseIcon class="size-4" />

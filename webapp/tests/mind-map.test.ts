@@ -22,7 +22,7 @@ const tree = (): MindMapNode[] => [
 ];
 
 describe("free positioning", () => {
-  test("connectors bend and attach to facing borders in all directions", () => {
+  test("connectors attach to facing borders in all directions", () => {
     const from = { id: "a", text: "A", x: 0, y: 0, width: 100, height: 40 };
     for (const [x, y, startX, startY, endX, endY] of [
       [200, 0, 100, 20, 200, 20],
@@ -31,8 +31,13 @@ describe("free positioning", () => {
       [0, -200, 50, 0, 50, -160],
     ]) {
       const path = connectionPath({ from, to: { ...from, id: "b", x, y } });
-      expect(path.startsWith(`M ${startX} ${startY} Q `)).toBe(true);
+      // Children to the right use a side-to-side S-curve; others bend.
+      const rightward = x >= from.width;
+      expect(
+        path.startsWith(`M ${startX} ${startY} ${rightward ? "C" : "Q"} `),
+      ).toBe(true);
       expect(path.endsWith(`, ${endX} ${endY}`)).toBe(true);
+      if (rightward) continue;
       const values = path.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
       expect(
         (endX - startX) * (values[3] - startY) -
@@ -77,7 +82,9 @@ describe("layout stability", () => {
           Math.abs(y - node.y - node.height / 2) / (node.height / 2),
         );
       expect(onBorder(connection.from, values[0], values[1])).toBeCloseTo(1);
-      expect(onBorder(connection.to, values[4], values[5])).toBeCloseTo(1);
+      expect(
+        onBorder(connection.to, values[values.length - 2], values.at(-1) ?? 0),
+      ).toBeCloseTo(1);
     }
   });
 
