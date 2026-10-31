@@ -269,7 +269,9 @@ impl Project {
                 color,
             } => {
                 validate_text(&text)?;
-                if tree.nodes().len() >= MAX_NODES {
+                // Counting live nodes walks every tombstone, so only do it once the
+                // total including tombstones reaches the limit.
+                if tree.nodes().len() >= MAX_NODES && live_nodes(&tree).len() >= MAX_NODES {
                     return Err(StateError::ResourceLimit);
                 }
                 let parent = self.parent(parent.as_deref())?;
@@ -284,6 +286,10 @@ impl Project {
                 meta.insert("color", color.as_str())?;
                 meta.insert_container("text", LoroText::new())?
                     .insert(0, &text)?;
+                // Activate the note with the node, inside the same undoable change.
+                // Lazy activation on a later edit needs its own commit, which would
+                // split an undo group that also contains other edits (a paste).
+                meta.ensure_mergeable_text("note")?;
                 created_node = Some(id.to_string());
             }
             Command::CreateSibling { id, text, color } => {
@@ -496,11 +502,15 @@ impl Project {
         validate_name(name)?;
         let saving: SavingPreferences = serde_json::from_value(meta["saving"].clone())?;
         let tree = self.tree();
-        let all = tree.nodes();
-        if all.len() > MAX_NODES {
+        if live_nodes(&tree).len() > MAX_NODES {
             return Err(StateError::ResourceLimit);
         }
-        for id in all {
+        for id in tree.nodes() {
+            // Undoing a step that created and then deleted a node recreates it
+            // as an empty tombstone. It never held data and can never show.
+            if tree.is_node_deleted(&id)? && tree.get_meta(id)?.is_empty() {
+                continue;
+            }
             self.node_data(id)?;
         }
         let root_ids = tree.roots();
@@ -674,6 +684,9 @@ impl Project {
         let text = match meta.get("note") {
             Some(ValueOrContainer::Container(Container::Text(text))) => text,
             _ => {
+                // Only nodes created before notes existed get here; new nodes
+                // activate their note on creation. The separate commit ends any
+                // undo group in progress, so callers edit notes in their own step.
                 let text = meta.ensure_mergeable_text("note")?;
                 // Keep activation when content is undone. Undoing/recreating a
                 // mergeable map reference can hide remote edits or duplicate
@@ -688,6 +701,15 @@ impl Project {
     fn text(&self, value: &str) -> Result<LoroText> {
         shared_text(&self.tree().get_meta(self.node(value)?)?)
     }
+}
+
+/// Nodes that are not deleted. Loro keeps deleted nodes as tombstones, so
+/// limits on map size must not count them or a long-lived map would fill up.
+fn live_nodes(tree: &LoroTree) -> Vec<TreeID> {
+    tree.nodes()
+        .into_iter()
+        .filter(|id| !tree.is_node_deleted(id).unwrap_or(true))
+        .collect()
 }
 
 fn shared_text(meta: &LoroMap) -> Result<LoroText> {

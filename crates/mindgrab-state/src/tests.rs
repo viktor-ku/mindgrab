@@ -463,6 +463,14 @@ fn note(project: &Project, id: &str) -> String {
 fn old_snapshots_and_note_cursors_remain_read_only_until_first_edit() {
     let mut project = Project::new("Old document").unwrap();
     let id = create(&mut project, None, "idea");
+    // Nodes created before notes existed have no note entry; new nodes do.
+    project
+        .tree()
+        .get_meta(project.node(&id).unwrap())
+        .unwrap()
+        .delete("note")
+        .unwrap();
+    project.doc.commit();
     let bytes = project.snapshot().unwrap();
     let mut restored = Project::from_snapshot(&bytes).unwrap();
     let version = restored.version();
@@ -779,4 +787,107 @@ fn invalid_stored_notes_including_hidden_nodes_are_rejected_atomically() {
         assert!(project.merge(&bytes).is_err());
         assert_eq!(note(&project, &id), "");
     }
+}
+
+#[test]
+fn a_new_node_and_its_first_note_undo_as_one_step() {
+    // Pasting a branch creates nodes and sets their notes in one undo group.
+    let mut project = Project::new("Paste").unwrap();
+    let root = create(&mut project, None, "root");
+    project.clear_history();
+    let before = serde_json::to_value(project.view().unwrap()).unwrap();
+    project.start_group().unwrap();
+    let child = create(&mut project, Some(&root), "pasted");
+    project
+        .apply(Command::SetNote {
+            id: child,
+            note: "carried note".into(),
+        })
+        .unwrap();
+    create(&mut project, Some(&root), "second");
+    project.stop_group();
+    project.apply(Command::Undo).unwrap();
+    assert_eq!(
+        serde_json::to_value(project.view().unwrap()).unwrap(),
+        before
+    );
+    assert!(!project.can_undo());
+}
+
+#[test]
+fn a_first_note_on_a_legacy_node_undoes_as_its_own_step() {
+    // Nodes created before notes existed activate their note lazily, in a
+    // commit excluded from undo. The editor gives note editing its own undo
+    // step, so the activation never sits inside a step with other edits.
+    let mut project = Project::new("Legacy").unwrap();
+    let legacy = create(&mut project, None, "legacy");
+    project
+        .tree()
+        .get_meta(project.node(&legacy).unwrap())
+        .unwrap()
+        .delete("note")
+        .unwrap();
+    project.doc.commit();
+    project.clear_history();
+    let before = serde_json::to_value(project.view().unwrap()).unwrap();
+    project.start_group().unwrap();
+    project
+        .apply(Command::SetNote {
+            id: legacy.clone(),
+            note: "first".into(),
+        })
+        .unwrap();
+    project.stop_group();
+    project.apply(Command::Undo).unwrap();
+    assert_eq!(
+        serde_json::to_value(project.view().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn undoing_a_step_that_created_and_deleted_a_node_keeps_the_view_valid() {
+    let mut project = Project::new("Undo").unwrap();
+    let root = create(&mut project, None, "root");
+    project.clear_history();
+    let before = serde_json::to_value(project.view().unwrap()).unwrap();
+    project.start_group().unwrap();
+    let parent = create(&mut project, Some(&root), "temporary");
+    create(&mut project, Some(&parent), "child");
+    project.apply(Command::DeleteNode { id: parent }).unwrap();
+    project.stop_group();
+    project.apply(Command::Undo).unwrap();
+    assert_eq!(
+        serde_json::to_value(project.view().unwrap()).unwrap(),
+        before
+    );
+    project.apply(Command::Redo).unwrap();
+    assert_eq!(
+        serde_json::to_value(project.view().unwrap()).unwrap(),
+        before
+    );
+    let restored = Project::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(restored.view().unwrap()).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn deleted_nodes_do_not_count_toward_the_node_limit() {
+    // Loro keeps deleted nodes as tombstones; a long-lived map that has
+    // created and deleted more than MAX_NODES ideas must stay usable.
+    let mut project = Project::new("Churn").unwrap();
+    let root = create(&mut project, None, "root");
+    for _ in 0..(MAX_NODES / 1000 + 1) {
+        let ids: Vec<String> = (0..1000)
+            .map(|_| create(&mut project, Some(&root), "x"))
+            .collect();
+        for id in ids {
+            project.apply(Command::DeleteNode { id }).unwrap();
+        }
+    }
+    assert_eq!(project.view().unwrap().nodes.len(), 1);
+    create(&mut project, Some(&root), "still possible");
+    assert_eq!(project.view().unwrap().nodes.len(), 2);
 }
