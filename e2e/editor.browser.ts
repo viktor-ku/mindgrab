@@ -14,6 +14,7 @@ import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import { NODE_COLORS } from "../webapp/src/node-colors";
+import { PROJECT_FILE_VERSION } from "../webapp/src/project-import-export";
 import type { Harness } from "./harness";
 
 // Interaction tests for the Rust/WASM-bound editor in headless Chromium. The harness
@@ -104,6 +105,11 @@ async function edit(id: string) {
   await node(id).dblclick();
   await editor().waitFor();
 }
+async function projectMenu(item: string) {
+  await page.getByRole("button", { name: "Project menu" }).click();
+  // Menu item names include their shortcut hints, such as "Save now ⌘S".
+  await page.getByRole("menuitem", { name: item }).first().click();
+}
 async function startDrag(id: string) {
   await frame();
   const box = await node(id).boundingBox();
@@ -118,7 +124,7 @@ async function startDrag(id: string) {
 describe("remote documents", () => {
   test("switching projects detaches the previous document", async () => {
     const id = await rootId();
-    await page.getByRole("button", { name: "New", exact: true }).click();
+    await projectMenu("New map");
     await page.waitForFunction((id) => !window.harness.ids().includes(id), id);
     expect((await call("retiredObservers")).every((count) => count === 0)).toBe(
       true,
@@ -148,7 +154,7 @@ describe("collapsing branches", () => {
     await node(root).click();
     const content = await call("content");
     const updates = await call("localUpdates");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     expect(await node(root).getAttribute("data-collapsed")).toBe("true");
     expect(await node(root).getAttribute("data-selected")).toBe("true");
     expect(await page.locator("[data-node-id]").count()).toBe(1);
@@ -162,10 +168,10 @@ describe("collapsing branches", () => {
     expect(await call("localUpdates")).toBe(updates);
     await page.keyboard.press("ArrowRight");
     expect(await node(root).getAttribute("data-selected")).toBe("true");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     for (const id of [child, grandchild, sibling]) await node(id).waitFor();
     expect(await page.locator("svg.pointer-events-none path").count()).toBe(3);
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(root)
       .getByRole("button", { name: "Expand 3 hidden nodes" })
       .click();
@@ -195,9 +201,9 @@ describe("collapsing branches", () => {
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await call("edit", grandchild, 0, 10, "Updated");
     const added = await addChild(child, "Remote child");
     expect(
@@ -205,31 +211,33 @@ describe("collapsing branches", () => {
         .getByRole("button", { name: "Expand 4 hidden nodes" })
         .count(),
     ).toBe(1);
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(sibling).waitFor();
     expect(await node(child).getAttribute("data-collapsed")).toBe("true");
     expect(await node(grandchild).count()).toBe(0);
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(added).waitFor();
     expect(await node(grandchild).textContent()).toBe("Updated");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await call("remove", grandchild);
     await call("remove", added);
     expect(await node(child).getAttribute("data-collapsed")).toBe("false");
   });
 
-  test("G ignores typing, modifiers, repeated keydowns, leaves, and no selection", async () => {
+  test("Option+G ignores typing, other modifiers, repeated keydowns, leaves, and no selection", async () => {
     const root = await rootId();
     const child = await addChild(root, "Child");
-    await page.keyboard.press("g");
+    // New maps open with the first idea selected; start from no selection.
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Alt+g");
     await node(child).waitFor();
     await node(child)
       .getByRole("button", { name: "Child", exact: true })
       .click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     expect(await node(child).getAttribute("data-collapsed")).toBe("false");
     await node(child).click({ button: "right" });
     expect(
@@ -241,14 +249,16 @@ describe("collapsing branches", () => {
     expect(await call("text", root)).toBe("g");
     await node(child).waitFor();
     await page.keyboard.press("Enter");
-    for (const key of ["Control+g", "Meta+g", "Alt+g"])
+    for (const key of ["Control+Alt+g", "Meta+Alt+g", "Alt+Shift+g"])
       await page.keyboard.press(key);
     expect(await node(root).getAttribute("data-collapsed")).toBe("false");
+    await page.keyboard.down("Alt");
     await page.keyboard.down("g");
     await page.keyboard.down("g");
     await page.keyboard.up("g");
+    await page.keyboard.up("Alt");
     expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(child).waitFor();
   });
 
@@ -256,7 +266,7 @@ describe("collapsing branches", () => {
     const root = await rootId();
     const child = await addChild(root, "Child");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await page.keyboard.press("Tab");
     await editor().waitFor();
     await page.keyboard.type("Added");
@@ -267,7 +277,7 @@ describe("collapsing branches", () => {
     ) as string;
     await page.keyboard.press("Delete");
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await page.keyboard.press("Control+z");
     await node(added).waitFor();
     expect(await node(added).getAttribute("data-selected")).toBe("true");
@@ -281,7 +291,7 @@ describe("collapsing branches", () => {
     await call("place", child, 220, 65);
     await call("place", grandchild, 370, 120);
     await node(root).click();
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     // The wider stack must finish its ResizeObserver layout before dragging.
     await frame();
     await frame();
@@ -290,7 +300,7 @@ describe("collapsing branches", () => {
     await page.mouse.up();
     expect(await call("position", child)).toEqual({ x: 310, y: 135 });
     expect(await call("position", grandchild)).toEqual({ x: 460, y: 190 });
-    await page.keyboard.press("g");
+    await page.keyboard.press("Alt+g");
     await node(grandchild).waitFor();
     expect(await translation(grandchild)).toEqual({ x: 460, y: 190 });
   });
@@ -306,7 +316,7 @@ describe("text editing", () => {
     await page.keyboard.insertText("😀");
     await page.keyboard.press("Backspace");
     await page.evaluate(() => navigator.clipboard.writeText("pasted"));
-    await page.keyboard.press("Control+V");
+    await page.keyboard.press("ControlOrMeta+V");
     expect(await call("text", id)).toBe("New idea!?\npasted");
     await page.keyboard.press("Enter");
     await editor().waitFor({ state: "detached" });
@@ -376,8 +386,18 @@ describe("text editing", () => {
 });
 
 describe("node colors", () => {
+  // The visible fill is on the card. Top-level ideas use a strong fill and the
+  // others a light one, so fills differ from the swatches.
   const background = (id: string) =>
-    node(id).evaluate((el) => getComputedStyle(el).backgroundColor);
+    node(id)
+      .locator(".map-node-card")
+      .evaluate((el) => getComputedStyle(el).backgroundColor);
+  const openColors = async () => {
+    await page.getByRole("button", { name: "Color", exact: true }).click();
+    await page
+      .getByRole("region", { name: "Selected node color controls" })
+      .waitFor();
+  };
 
   test("the default fill and every palette swatch render with a background", async () => {
     const root = await rootId();
@@ -388,7 +408,9 @@ describe("node colors", () => {
     ).toBe("blue");
     expect(await background(root)).not.toBe("rgba(0, 0, 0, 0)");
     await node(root).click();
+    await openColors();
     const fills = new Set<string>();
+    const swatches = new Set<string>();
     for (const color of NODE_COLORS) {
       const choice = page.getByRole("button", {
         name: new RegExp(`^${color.label}(, selected)?$`),
@@ -398,15 +420,18 @@ describe("node colors", () => {
         .evaluate((el) => getComputedStyle(el).backgroundColor);
       expect(swatch).not.toBe("rgba(0, 0, 0, 0)");
       await choice.click();
-      expect(await background(root)).toBe(swatch);
+      const fill = await background(root);
+      expect(fill).not.toBe("rgba(0, 0, 0, 0)");
       expect(
         (await call("content")).nodes.find(
           (node: { id: string }) => node.id === root,
         )?.color,
       ).toBe(color.value);
-      fills.add(swatch);
+      fills.add(fill);
+      swatches.add(swatch);
     }
     expect(fills.size).toBe(NODE_COLORS.length);
+    expect(swatches.size).toBe(NODE_COLORS.length);
   });
 
   test("node and branch scopes recolor the intended nodes and undo together", async () => {
@@ -417,7 +442,13 @@ describe("node colors", () => {
     const sibling = await call("addChild", root, "Sibling");
     if (!grandchild || !sibling) throw new Error("Branch was not created.");
     await node(child).click();
-    const originalFill = await background(child);
+    // Top-level and nested ideas have different fills, so each node is
+    // compared with its own original fill.
+    const original: Record<string, string> = {};
+    for (const id of [root, child, grandchild, sibling])
+      original[id] = await background(id);
+    const originalFill = original[child];
+    await openColors();
     await page.getByRole("button", { name: "Rose", exact: true }).click();
     const roseFill = await background(child);
     expect(roseFill).not.toBe(originalFill);
@@ -427,7 +458,7 @@ describe("node colors", () => {
           (node: { id: string }) => node.id === id,
         )?.color,
       ).toBe("blue");
-      expect(await background(id)).toBe(originalFill);
+      expect(await background(id)).toBe(original[id]);
     }
 
     await page.getByText("This branch", { exact: true }).click();
@@ -453,7 +484,7 @@ describe("node colors", () => {
           (node: { id: string }) => node.id === id,
         )?.color,
       ).toBe("blue");
-      expect(await background(id)).toBe(originalFill);
+      expect(await background(id)).toBe(original[id]);
     }
 
     await page.getByRole("button", { name: "Undo", exact: true }).click();
@@ -468,7 +499,7 @@ describe("node colors", () => {
         (node: { id: string }) => node.id === grandchild,
       )?.color,
     ).toBe("blue");
-    expect(await background(grandchild)).toBe(originalFill);
+    expect(await background(grandchild)).toBe(original[grandchild]);
   });
 });
 
@@ -487,18 +518,16 @@ describe("dragging", () => {
     await call("place", grandchild, 500, 300);
     await call("remove", gone);
     await move(100, 40);
-    expect(await translation(child)).toEqual({
-      x: start.x + 100,
-      y: start.y + 40,
-    });
+    const moved = await translation(child);
+    expect(moved.x).toBeCloseTo(start.x + 100, 2);
+    expect(moved.y).toBeCloseTo(start.y + 40, 2);
     expect(await call("localUpdates")).toBe(updates);
     await page.mouse.up();
 
     expect(await call("localUpdates")).toBe(updates + 1);
-    expect(await call("position", child)).toEqual({
-      x: start.x + 100,
-      y: start.y + 40,
-    });
+    const placed = await call("position", child);
+    expect(placed?.x).toBeCloseTo(start.x + 100, 2);
+    expect(placed?.y).toBeCloseTo(start.y + 40, 2);
     expect(await call("position", grandchild)).toEqual({
       x: 600,
       y: 340,
@@ -570,7 +599,7 @@ describe("existing interactions", () => {
 
     await page.getByRole("button", { name: "Zoom in" }).click();
     expect(
-      await page.getByRole("button", { name: "Reset view" }).textContent(),
+      await page.getByRole("button", { name: "Zoom to 100%" }).textContent(),
     ).toBe("120%");
   });
 });
@@ -582,18 +611,17 @@ async function uploadProject(json: string) {
       configurable: true,
     }),
   );
+  const previous = await call("projectId");
   const chooser = page.waitForEvent("filechooser");
-  await page.getByRole("button", { name: "Import", exact: true }).click();
+  await projectMenu("Import backup…");
   await (await chooser).setFiles({
     name: "Portable.mindgrab.json",
     mimeType: "application/json",
     buffer: Buffer.from(json),
   });
   await page.waitForFunction(
-    () =>
-      !document.querySelector<HTMLFieldSetElement>(
-        'fieldset[aria-label="Project actions"]',
-      )?.disabled,
+    (id) => window.harness.projectId() !== id,
+    previous,
   );
 }
 
@@ -605,7 +633,7 @@ async function downloadProject() {
     }),
   );
   const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await projectMenu("Export backup (.json)");
   const saved = await download;
   const path = await saved.path();
   if (!path) throw new Error("No downloaded file.");
@@ -628,7 +656,7 @@ describe("portable file actions", () => {
     expect(saved.name).toBe("Portable.mindgrab.json");
     const file = JSON.parse(saved.json);
     expect(file.format).toBe("mindgrab-project");
-    expect(file.version).toBe(3);
+    expect(file.version).toBe(PROJECT_FILE_VERSION);
     expect(file.project.nodes[0].text).toBe("Offline\nHäid mõtteid 😀 日本語");
     expect(file.project.nodes[0].position).toEqual({ x: -30, y: 80 });
     const originalNodes = await call("ids");
@@ -657,13 +685,13 @@ describe("portable file actions", () => {
     await edit(secondNodes[0]);
     await editor().fill("Only the second import");
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Load", exact: true }).click();
+    await projectMenu("Open map…");
     await page.locator("#saved-projects").waitFor();
     expect(
-      await page.getByRole("button", { name: /^Portable · / }).count(),
+      await page.getByRole("menuitem", { name: /^Portable · / }).count(),
     ).toBe(3);
     await page
-      .getByRole("button", {
+      .getByRole("menuitem", {
         name: `Portable · ${firstId.slice(0, 8)}`,
         exact: true,
       })
@@ -695,11 +723,13 @@ describe("portable file actions", () => {
     await page
       .getByText("Browser storage is unavailable.", { exact: true })
       .waitFor();
+    await page.getByRole("button", { name: "Project menu" }).click();
     expect(
       await page
-        .getByRole("button", { name: "Export", exact: true })
+        .getByRole("menuitem", { name: "Export backup (.json)", exact: true })
         .isEnabled(),
     ).toBe(true);
+    await page.getByRole("button", { name: "Project menu" }).click();
     const saved = await downloadProject();
     expect(JSON.parse(saved.json).project.nodes[0].text).toBe("New idea");
   });

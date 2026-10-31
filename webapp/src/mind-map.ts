@@ -3,6 +3,7 @@ import type { NodeColor } from "./node-colors";
 export interface MindMapNode {
   id: string;
   text: string;
+  note?: string;
   color?: NodeColor;
   position?: NodePosition;
   next?: MindMapNode[];
@@ -193,6 +194,16 @@ export function navigationTarget(
 }
 
 export function connectionPath({ from, to }: Connection) {
+  // Children laid out to the right connect side to side with a smooth S-curve,
+  // so every branch leaves its parent at the same point.
+  if (to.x >= from.x + from.width) {
+    const startX = from.x + from.width;
+    const startY = from.y + from.height / 2;
+    const endX = to.x;
+    const endY = to.y + to.height / 2;
+    const middle = (startX + endX) / 2;
+    return `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`;
+  }
   const dx = to.x + to.width / 2 - (from.x + from.width / 2);
   const dy = to.y + to.height / 2 - (from.y + from.height / 2);
   // Attach to the facing borders, even when a child is above or left of its parent.
@@ -240,4 +251,58 @@ export function nodeDetails(nodes: MindMapNode[]) {
   }
   for (const node of nodes) visit(node);
   return details;
+}
+
+export type DropTarget =
+  | { kind: "inside"; id: string }
+  | { kind: "before" | "after"; id: string };
+
+// A drop over a node's middle makes the dragged branch its last child; a drop
+// over its top or bottom edge places the branch before or after it as a
+// sibling. Anywhere else is a free placement on the canvas.
+export function dropTargetAt(
+  nodes: readonly (NodeSize & NodePosition & { id: string })[],
+  point: NodePosition,
+  excluded: ReadonlySet<string>,
+): DropTarget | undefined {
+  const MARGIN = 6;
+  let best: { target: DropTarget; distance: number } | undefined;
+  for (const node of nodes) {
+    if (excluded.has(node.id)) continue;
+    if (
+      point.x < node.x - MARGIN ||
+      point.x > node.x + node.width + MARGIN ||
+      point.y < node.y - MARGIN ||
+      point.y > node.y + node.height + MARGIN
+    )
+      continue;
+    const edge = Math.min(14, node.height / 4);
+    const kind =
+      point.y < node.y + edge
+        ? "before"
+        : point.y > node.y + node.height - edge
+          ? "after"
+          : "inside";
+    const distance = Math.hypot(
+      point.x - (node.x + node.width / 2),
+      point.y - (node.y + node.height / 2),
+    );
+    if (!best || distance < best.distance)
+      best = { target: { kind, id: node.id }, distance };
+  }
+  return best?.target;
+}
+
+// Every id in the branch rooted at `id`, including `id`.
+export function branchIds(nodes: readonly MindMapNode[], id: string) {
+  const ids = new Set<string>();
+  const visit = (branch: readonly MindMapNode[]) => {
+    for (const node of branch) {
+      ids.add(node.id);
+      visit(node.next ?? []);
+    }
+  };
+  const root = findNode(nodes as MindMapNode[], id);
+  if (root) visit([root]);
+  return ids;
 }

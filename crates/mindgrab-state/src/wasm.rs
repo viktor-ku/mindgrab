@@ -85,6 +85,36 @@ impl WasmProject {
         self.0.edit_draft(id, base, next, caret).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = noteCursor)]
+    pub fn note_cursor(
+        &self,
+        id: &str,
+        index: usize,
+        after: bool,
+    ) -> std::result::Result<Vec<u8>, JsValue> {
+        self.0.note_cursor(id, index, after).map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = resolveNoteCursor)]
+    pub fn resolve_note_cursor(
+        &self,
+        id: &str,
+        bytes: &[u8],
+    ) -> std::result::Result<usize, JsValue> {
+        self.0.resolve_note_cursor(id, bytes).map_err(js_error)
+    }
+    #[wasm_bindgen(js_name = editNoteDraft)]
+    pub fn edit_note_draft(
+        &mut self,
+        id: &str,
+        base: &[u8],
+        next: &str,
+        caret: usize,
+    ) -> std::result::Result<usize, JsValue> {
+        self.0
+            .edit_note_draft(id, base, next, caret)
+            .map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = canUndo)]
     pub fn can_undo(&self) -> bool {
         self.0.can_undo()

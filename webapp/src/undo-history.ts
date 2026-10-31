@@ -38,7 +38,9 @@ export class EditHistory<Selection> {
     this.#restoreListeners.add(listener);
   }
   finishGroup() {
-    if (this.#doc.ready) {
+    // Restore listeners may resume writing during undo/redo; #pop starts the
+    // next group itself once they finish, and Loro rejects a second start.
+    if (this.#doc.ready && !this.#popping) {
       this.#doc.native().stopGroup();
       this.#doc.native().startGroup();
     }
@@ -55,10 +57,24 @@ export class EditHistory<Selection> {
     this.#popping = true;
     const source = type === "undo" ? this.#undo : this.#redo;
     const destination = type === "undo" ? this.#redo : this.#undo;
-    const entry = source.pop() ?? {};
+    const native = this.#doc.native();
+    const counts = () =>
+      type === "undo"
+        ? [native.undoCount(), native.redoCount()]
+        : [native.redoCount(), native.undoCount()];
+    const [sourceBefore, destinationBefore] = counts();
     try {
       this.#doc.dispatch({ type });
-      destination.push(entry);
+      // Loro skips steps whose changes a collaborator already removed and
+      // reverts an older one in the same call. Keep entries paired with
+      // Loro's steps: drop the skipped ones and restore the one reverted.
+      const [sourceAfter, destinationAfter] = counts();
+      let entry: HistoryEntry<Selection> = {};
+      for (let i = Math.max(1, sourceBefore - sourceAfter); i > 0; i--)
+        entry = source.pop() ?? {};
+      for (let i = destinationAfter - destinationBefore; i > 1; i--)
+        destination.push({});
+      if (destinationAfter > destinationBefore) destination.push(entry);
       for (const listener of this.#restoreListeners)
         listener({ entry, direction: type });
     } finally {

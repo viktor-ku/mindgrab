@@ -7,9 +7,18 @@ export function bindTextarea(
   doc: ProjectDocument,
   id: string,
   onValue: (value: string) => void = () => {},
+  field: "text" | "note" = "text",
 ) {
+  const cursor = (index: number, after: boolean) =>
+    field === "note"
+      ? doc.native().noteCursor(id, index, after)
+      : doc.native().cursor(id, index, after);
+  const resolveCursor = (bytes: Uint8Array) =>
+    field === "note"
+      ? doc.native().resolveNoteCursor(id, bytes)
+      : doc.native().resolveCursor(id, bytes);
   let base = doc.snapshot();
-  let synced = doc.view().nodes.find((node) => node.id === id)?.text ?? "";
+  let synced = doc.view().nodes.find((node) => node.id === id)?.[field] ?? "";
   let composing = false;
   let applying = false;
   let selection:
@@ -25,14 +34,11 @@ export function bindTextarea(
     if (composing || input.value !== synced) return;
     try {
       selection = {
-        start: doc
-          .native()
-          .cursor(
-            id,
-            input.selectionStart,
-            input.selectionStart !== input.selectionEnd,
-          ),
-        end: doc.native().cursor(id, input.selectionEnd, false),
+        start: cursor(
+          input.selectionStart,
+          input.selectionStart !== input.selectionEnd,
+        ),
+        end: cursor(input.selectionEnd, false),
         direction: input.selectionDirection,
       };
     } catch {
@@ -40,7 +46,7 @@ export function bindTextarea(
     }
   };
   function render(caret?: number) {
-    const next = doc.view().nodes.find((node) => node.id === id)?.text;
+    const next = doc.view().nodes.find((node) => node.id === id)?.[field];
     if (next === undefined) return;
     synced = next;
     base = doc.snapshot();
@@ -49,8 +55,8 @@ export function bindTextarea(
       let end = caret;
       try {
         if (start === undefined && selection) {
-          start = doc.native().resolveCursor(id, selection.start);
-          end = doc.native().resolveCursor(id, selection.end);
+          start = resolveCursor(selection.start);
+          end = resolveCursor(selection.end);
         }
       } catch {
         /* A deleted cursor falls back to the browser caret. */
@@ -70,7 +76,11 @@ export function bindTextarea(
     let caret: number | undefined;
     try {
       caret = doc.change(() =>
-        doc.native().editDraft(id, base, input.value, input.selectionEnd),
+        field === "note"
+          ? doc
+              .native()
+              .editNoteDraft(id, base, input.value, input.selectionEnd)
+          : doc.native().editDraft(id, base, input.value, input.selectionEnd),
       );
     } catch {
       /* Rejected drafts are replaced by the accepted state. */

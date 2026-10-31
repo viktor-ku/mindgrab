@@ -6,8 +6,8 @@ mod model;
 mod wasm;
 
 use loro::{
-    CommitOptions, Container, ContainerTrait, ExportMode, LoroDoc, LoroMap, LoroText, LoroTree,
-    ToJson, TreeID, UndoManager, ValueOrContainer,
+    CommitOptions, Container, ContainerID, ContainerTrait, ContainerType, ExportMode, LoroDoc,
+    LoroMap, LoroText, LoroTree, ToJson, TreeID, UndoManager, ValueOrContainer,
 };
 use loro_internal::cursor::{Cursor, Side};
 pub use model::*;
@@ -69,6 +69,8 @@ impl Project {
         doc.get_tree("nodes").enable_fractional_index(8);
         let mut undo = UndoManager::new(&doc);
         undo.add_exclude_origin_prefix("preferences");
+        undo.add_exclude_origin_prefix("note-init");
+        undo.add_exclude_origin_prefix("repair");
         Ok(Self { doc, undo })
     }
 
@@ -120,7 +122,17 @@ impl Project {
     }
 
     pub fn cursor(&self, id: &str, index: usize, after: bool) -> Result<Vec<u8>> {
-        let text = self.text(id)?;
+        self.field_cursor(id, index, after, false)
+    }
+    pub fn note_cursor(&self, id: &str, index: usize, after: bool) -> Result<Vec<u8>> {
+        self.field_cursor(id, index, after, true)
+    }
+    fn field_cursor(&self, id: &str, index: usize, after: bool, note: bool) -> Result<Vec<u8>> {
+        let text = self.field_text(id, note)?;
+        if !text.is_attached() {
+            cursor_index("", index)?;
+            return Ok(Cursor::new(None, self.note_container(id)?, Side::Left, 0).encode());
+        }
         let value = text.to_string();
         let index = cursor_index(&value, index)?;
         let cursor = if after {
@@ -135,9 +147,30 @@ impl Project {
             .ok_or_else(|| StateError::Invalid("Invalid cursor".into()))
     }
     pub fn resolve_cursor(&self, id: &str, bytes: &[u8]) -> Result<usize> {
+        self.resolve_field_cursor(id, bytes, false)
+    }
+    pub fn resolve_note_cursor(&self, id: &str, bytes: &[u8]) -> Result<usize> {
+        self.resolve_field_cursor(id, bytes, true)
+    }
+    fn resolve_field_cursor(&self, id: &str, bytes: &[u8], note: bool) -> Result<usize> {
         let cursor =
             Cursor::decode(bytes).map_err(|_| StateError::Invalid("Invalid cursor".into()))?;
-        let text = self.text(id)?;
+        let text = self.field_text(id, note)?;
+        let container = if text.is_attached() {
+            text.id()
+        } else {
+            self.note_container(id)?
+        };
+        if cursor.container != container {
+            return invalid("Cursor belongs to another text field");
+        }
+        if !text.is_attached() {
+            return if cursor.id.is_none() {
+                Ok(0)
+            } else {
+                invalid("Cursor no longer exists")
+            };
+        }
         let position = self
             .doc
             .get_cursor_pos(&cursor)
@@ -154,21 +187,54 @@ impl Project {
     /// Apply a textarea edit against the exact document the user saw. Stable
     /// cursors rebase an IME draft over remote changes received while composing.
     pub fn edit_draft(&mut self, id: &str, base: &[u8], next: &str, caret: usize) -> Result<usize> {
+        self.edit_field_draft(id, base, next, caret, false)
+    }
+    pub fn edit_note_draft(
+        &mut self,
+        id: &str,
+        base: &[u8],
+        next: &str,
+        caret: usize,
+    ) -> Result<usize> {
+        self.edit_field_draft(id, base, next, caret, true)
+    }
+    fn edit_field_draft(
+        &mut self,
+        id: &str,
+        base: &[u8],
+        next: &str,
+        caret: usize,
+        note: bool,
+    ) -> Result<usize> {
         let source = Self::from_snapshot(base)?;
-        let old = source.text(id)?.to_string();
+        let old = source.field_text(id, note)?.to_string();
         let (index, delete, insert) = text_diff(&old, next, Some(caret));
-        let start = self.resolve_cursor(id, &source.cursor(id, index, true)?)?;
+        let start =
+            self.resolve_field_cursor(id, &source.field_cursor(id, index, true, note)?, note)?;
         let end = if delete == 0 {
             start
         } else {
-            self.resolve_cursor(id, &source.cursor(id, index + delete, false)?)?
+            self.resolve_field_cursor(
+                id,
+                &source.field_cursor(id, index + delete, false, note)?,
+                note,
+            )?
         };
         let inserted = insert.encode_utf16().count();
-        self.apply(Command::EditText {
-            id: id.into(),
-            index: start,
-            delete_count: end.saturating_sub(start),
-            insert,
+        self.apply(if note {
+            Command::EditNote {
+                id: id.into(),
+                index: start,
+                delete_count: end.saturating_sub(start),
+                insert,
+            }
+        } else {
+            Command::EditText {
+                id: id.into(),
+                index: start,
+                delete_count: end.saturating_sub(start),
+                insert,
+            }
         })?;
         Ok(start + inserted)
     }
@@ -204,7 +270,9 @@ impl Project {
                 color,
             } => {
                 validate_text(&text)?;
-                if tree.nodes().len() >= MAX_NODES {
+                // Counting live nodes walks every tombstone, so only do it once the
+                // total including tombstones reaches the limit.
+                if tree.nodes().len() >= MAX_NODES && live_nodes(&tree).len() >= MAX_NODES {
                     return Err(StateError::ResourceLimit);
                 }
                 let parent = self.parent(parent.as_deref())?;
@@ -219,6 +287,10 @@ impl Project {
                 meta.insert("color", color.as_str())?;
                 meta.insert_container("text", LoroText::new())?
                     .insert(0, &text)?;
+                // Activate the note with the node, inside the same undoable change.
+                // Lazy activation on a later edit needs its own commit, which would
+                // split an undo group that also contains other edits (a paste).
+                meta.ensure_mergeable_text("note")?;
                 created_node = Some(id.to_string());
             }
             Command::CreateSibling { id, text, color } => {
@@ -333,6 +405,20 @@ impl Project {
             } => {
                 edit_text(&self.text(&id)?, index, delete_count, &insert)?;
             }
+            Command::SetNote { id, note } => {
+                validate_text(&note)?;
+                let current = self.field_text(&id, true)?.to_string();
+                let (index, delete, insert) = text_diff(&current, &note, None);
+                self.edit_note(&id, index, delete, &insert)?;
+            }
+            Command::EditNote {
+                id,
+                index,
+                delete_count,
+                insert,
+            } => {
+                self.edit_note(&id, index, delete_count, &insert)?;
+            }
             Command::SetColor { id, color } => {
                 let node = self.node(&id)?;
                 if self.node_data(node)?.1 != color {
@@ -361,9 +447,11 @@ impl Project {
             }
             Command::Undo => {
                 self.undo.undo()?;
+                self.remove_blank_nodes()?;
             }
             Command::Redo => {
                 self.undo.redo()?;
+                self.remove_blank_nodes()?;
             }
         }
         self.doc.commit_with(CommitOptions::new().origin(origin));
@@ -417,11 +505,16 @@ impl Project {
         validate_name(name)?;
         let saving: SavingPreferences = serde_json::from_value(meta["saving"].clone())?;
         let tree = self.tree();
-        let all = tree.nodes();
-        if all.len() > MAX_NODES {
+        if live_nodes(&tree).len() > MAX_NODES {
             return Err(StateError::ResourceLimit);
         }
-        for id in all {
+        for id in tree.nodes() {
+            // Undo can recreate a node without its data: as an empty tombstone
+            // after a step that created and deleted it, or as a live leaf when
+            // it moves a node another replica deleted. Neither has content.
+            if self.is_blank(id)? {
+                continue;
+            }
             self.node_data(id)?;
         }
         let root_ids = tree.roots();
@@ -429,6 +522,9 @@ impl Project {
         let mut nodes = Vec::new();
         let mut seen = std::collections::HashSet::new();
         while let Some((id, depth)) = pending.pop() {
+            if self.is_blank(id)? {
+                continue;
+            }
             let stable = self.stable_id(id)?;
             // Concurrent undo can recreate the same application node twice.
             // Choose the first visible branch in Loro's deterministic order.
@@ -438,6 +534,7 @@ impl Project {
             let (text, color, position) = self.node_data(id)?;
             let children = tree.children(id).unwrap_or_default();
             pending.extend(children.iter().rev().map(|child| (*child, depth + 1)));
+            let note = self.note_data(id)?;
             nodes.push(Node {
                 id: stable,
                 parent: tree
@@ -447,6 +544,7 @@ impl Project {
                     .transpose()?,
                 children: Vec::new(),
                 text,
+                note,
                 color,
                 position,
                 depth,
@@ -485,6 +583,35 @@ impl Project {
         })
     }
 
+    /// A childless node without a stable id, which undo can leave behind when
+    /// it recreates a deleted node with none or only part of its data (say,
+    /// just an older color). It has no identity or text a person could see.
+    fn is_blank(&self, id: TreeID) -> Result<bool> {
+        let tree = self.tree();
+        Ok(tree.get_meta(id)?.get("id").is_none()
+            && (tree.is_node_deleted(&id)?
+                || tree.children(Some(id)).unwrap_or_default().is_empty()))
+    }
+
+    /// Deletes live blank nodes an undo or redo just recreated, in a commit
+    /// excluded from undo history; they carry nothing a person could see.
+    fn remove_blank_nodes(&mut self) -> Result<()> {
+        let tree = self.tree();
+        let blank: Vec<TreeID> = live_nodes(&tree)
+            .into_iter()
+            .filter(|id| self.is_blank(*id).unwrap_or(false))
+            .collect();
+        if blank.is_empty() {
+            return Ok(());
+        }
+        self.doc.commit();
+        for id in blank {
+            tree.delete(id)?;
+        }
+        self.doc.commit_with(CommitOptions::new().origin("repair"));
+        Ok(())
+    }
+
     fn node_data(&self, id: TreeID) -> Result<(String, Color, Option<Position>)> {
         let meta = self.tree().get_meta(id)?;
         let value = meta.get_deep_value().to_json_value();
@@ -493,13 +620,14 @@ impl Project {
             .ok_or_else(|| StateError::Invalid("Expected node metadata".into()))?;
         if fields
             .keys()
-            .any(|key| !["id", "text", "color", "position"].contains(&key.as_str()))
+            .any(|key| !["id", "text", "note", "color", "position"].contains(&key.as_str()))
         {
             return invalid("Unexpected node metadata");
         }
         self.stable_id(id)?;
         let text = shared_text(&meta)?.to_string();
         validate_text(&text)?;
+        validate_text(&self.note_data(id)?)?;
         let color: Color = serde_json::from_value(value["color"].clone())?;
         let position: Option<Position> = value
             .get("position")
@@ -554,9 +682,70 @@ impl Project {
     fn parent(&self, value: Option<&str>) -> Result<Option<TreeID>> {
         value.map(|value| self.node(value)).transpose()
     }
+    fn note_data(&self, id: TreeID) -> Result<String> {
+        let meta = self.tree().get_meta(id)?;
+        match meta.get("note") {
+            None => Ok(String::new()),
+            Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text.to_string()),
+            _ => invalid("Expected shared node note"),
+        }
+    }
+    fn field_text(&self, id: &str, note: bool) -> Result<LoroText> {
+        if !note {
+            return self.text(id);
+        }
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        match meta.get("note") {
+            Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text),
+            // A detached empty value keeps reads and no-op edits read-only.
+            None => Ok(LoroText::new()),
+            _ => invalid("Expected shared node note"),
+        }
+    }
+    fn note_container(&self, id: &str) -> Result<ContainerID> {
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        Ok(ContainerID::new_mergeable(
+            &meta.id(),
+            "note",
+            ContainerType::Text,
+        ))
+    }
+    fn edit_note(&self, id: &str, index: usize, delete: usize, insert: &str) -> Result<()> {
+        let text = self.field_text(id, true)?;
+        if !text_edit_changed(&text.to_string(), index, delete, insert)? {
+            return Ok(());
+        }
+        // Deterministic identity preserves concurrent first edits on old nodes.
+        let meta = self.tree().get_meta(self.node(id)?)?;
+        let text = match meta.get("note") {
+            Some(ValueOrContainer::Container(Container::Text(text))) => text,
+            _ => {
+                // Only nodes created before notes existed get here; new nodes
+                // activate their note on creation. The separate commit ends any
+                // undo group in progress, so callers edit notes in their own step.
+                let text = meta.ensure_mergeable_text("note")?;
+                // Keep activation when content is undone. Undoing/recreating a
+                // mergeable map reference can hide remote edits or duplicate
+                // restored content. Only the following text delta is undoable.
+                self.doc
+                    .commit_with(CommitOptions::new().origin("note-init"));
+                text
+            }
+        };
+        edit_text(&text, index, delete, insert)
+    }
     fn text(&self, value: &str) -> Result<LoroText> {
         shared_text(&self.tree().get_meta(self.node(value)?)?)
     }
+}
+
+/// Nodes that are not deleted. Loro keeps deleted nodes as tombstones, so
+/// limits on map size must not count them or a long-lived map would fill up.
+fn live_nodes(tree: &LoroTree) -> Vec<TreeID> {
+    tree.nodes()
+        .into_iter()
+        .filter(|id| !tree.is_node_deleted(id).unwrap_or(true))
+        .collect()
 }
 
 fn shared_text(meta: &LoroMap) -> Result<LoroText> {
@@ -598,11 +787,10 @@ fn validate_position(position: Position) -> Result<()> {
         invalid("Position must contain finite coordinates")
     }
 }
-fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Result<()> {
+fn text_edit_changed(current: &str, index: usize, delete: usize, insert: &str) -> Result<bool> {
     let end = index
         .checked_add(delete)
         .ok_or_else(|| StateError::Invalid("Invalid text range".into()))?;
-    let current = text.to_string();
     let mut boundaries = std::collections::HashSet::from([0]);
     let mut length = 0;
     for ch in current.chars() {
@@ -621,6 +809,12 @@ fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Resu
         .take(delete)
         .eq(insert.encode_utf16())
     {
+        return Ok(false);
+    }
+    Ok(true)
+}
+fn edit_text(text: &LoroText, index: usize, delete: usize, insert: &str) -> Result<()> {
+    if !text_edit_changed(&text.to_string(), index, delete, insert)? {
         return Ok(());
     }
     if delete > 0 {

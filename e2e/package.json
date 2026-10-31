@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun --bun test ./editor.browser.ts ./project-repository.browser.ts ./accounts.browser.ts ./query.browser.ts",
+    "test": "bun --bun test ./editor.browser.ts ./ui-framework.browser.ts ./ui-fuzz.browser.ts ./project-repository.browser.ts ./accounts.browser.ts ./query.browser.ts",
     "test:offline": "bun --bun test ./offline-shell.browser.ts",
     "lint": "bun --bun run biome lint .",
     "format": "bun --bun run biome format --write .",

@@ -32,7 +32,12 @@ await init(
     : undefined,
 );
 export const SCHEMA_VERSION = 1;
-export const LIMITS = { nodes: 10_000, text: 65_536, nameBytes: 200 } as const;
+export const LIMITS = {
+  nodes: 10_000,
+  text: 65_536,
+  note: 65_536,
+  nameBytes: 200,
+} as const;
 export const ORIGIN = {
   create: Symbol("create"),
   local: Symbol("local"),
@@ -61,12 +66,14 @@ export type ProjectState =
   | { status: "invalid"; message: string };
 export interface NewNode {
   text?: string;
+  note?: string;
   color?: NodeColor;
   position?: NodePosition;
 }
 export interface ForestNode {
   id: string;
   text: string;
+  note?: string;
   color: NodeColor;
   position?: NodePosition;
   children: ForestNode[];
@@ -130,16 +137,32 @@ export class ProjectDocument {
     for (const listener of this.#before) listener();
     const version = this.version();
     const result = action();
-    if (this.version() !== version) {
+    if (this.#snapshots.size && this.version() !== version) {
       const bytes = this.snapshot();
       for (const listener of this.#snapshots) listener(bytes, origin);
     }
     return result;
   }
   dispatch(command: Command): CommandResult {
+    if (this.#batching)
+      return JSON.parse(this.native().dispatch(JSON.stringify(command)));
     return this.change(() =>
       JSON.parse(this.native().dispatch(JSON.stringify(command))),
     );
+  }
+  #batching = false;
+  // Applies many commands as one change, so observers (persistence, sync and
+  // the view) process a large paste once instead of once per node.
+  batch<T>(action: () => T): T {
+    if (this.#batching) return action();
+    return this.change(() => {
+      this.#batching = true;
+      try {
+        return action();
+      } finally {
+        this.#batching = false;
+      }
+    });
   }
   merge(bytes: Uint8Array, origin: unknown = ORIGIN.remote) {
     if (!bytes.length) return;
@@ -212,6 +235,7 @@ export function projectMindMap(view: DocumentView): MindMapNode[] {
     entries.set(node.id, {
       id: node.id,
       text: node.text,
+      ...(node.note && { note: node.note }),
       color: node.color,
       ...(node.position && { position: node.position }),
     });
@@ -233,18 +257,26 @@ function create(
   doc: ProjectDocument,
   parent: string | null,
   init: NewNode = {},
+  index: number | null = null,
 ) {
   const id = doc.dispatch({
     type: "createNode",
     parent,
-    index: null,
+    index,
     text: init.text ?? "",
     color: init.color ?? "blue",
   }).createdNode!;
+  if (init.note) setNodeNote(doc, id, init.note);
   if (init.position)
     doc.dispatch({ type: "setPosition", id, position: init.position });
   return id;
 }
+export const createNodeAt = (
+  doc: ProjectDocument,
+  parent: string | null,
+  index: number,
+  init: NewNode = {},
+) => create(doc, parent, init, index);
 export const createRoot = (doc: ProjectDocument, init: NewNode = {}) =>
   create(doc, null, init);
 export const createChild = (
@@ -257,12 +289,14 @@ export function createSibling(
   id: string,
   init: NewNode = {},
 ) {
-  return doc.dispatch({
+  const sibling = doc.dispatch({
     type: "createSibling",
     id,
     text: init.text ?? "",
     color: init.color ?? "blue",
   }).createdNode!;
+  if (init.note) setNodeNote(doc, sibling, init.note);
+  return sibling;
 }
 export const renameProject = (doc: ProjectDocument, name: string) =>
   doc.dispatch({ type: "rename", name }).changed;
@@ -278,6 +312,15 @@ export const replaceNodeText = (
   id: string,
   text: string,
 ) => doc.dispatch({ type: "setText", id, text }).changed;
+export const setNodeNote = (doc: ProjectDocument, id: string, note: string) =>
+  doc.dispatch({ type: "setNote", id, note }).changed;
+export const editNodeNote = (
+  doc: ProjectDocument,
+  id: string,
+  index: number,
+  deleteCount: number,
+  insert: string,
+) => doc.dispatch({ type: "editNote", id, index, deleteCount, insert }).changed;
 export const deleteSubtree = (doc: ProjectDocument, id: string) =>
   doc.dispatch({ type: "deleteNode", id }).changed;
 export const setNodeColor = (
@@ -293,6 +336,21 @@ export const reorderNode = (
   id: string,
   direction: -1 | 1,
 ) => doc.dispatch({ type: "reorderNode", id, direction }).changed;
+export const moveNode = (
+  doc: ProjectDocument,
+  id: string,
+  parent: string | null,
+  index: number,
+) => doc.dispatch({ type: "moveNode", id, parent, index }).changed;
+// Returns the branch to automatic placement.
+export function clearPositions(doc: ProjectDocument, ids: Iterable<string>) {
+  let changed = false;
+  for (const id of ids)
+    changed =
+      doc.dispatch({ type: "setPosition", id, position: null }).changed ||
+      changed;
+  return changed;
+}
 export const translateSubtree = (
   doc: ProjectDocument,
   id: string,

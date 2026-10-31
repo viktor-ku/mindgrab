@@ -130,3 +130,500 @@
     animation: none;
   }
 }
+
+/* Editor chrome: compact floating toolbars over the canvas. */
+:root {
+  font-family:
+    "Inter var", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+.map-canvas {
+  background-color: #f5f4f1;
+  background-image: radial-gradient(#d6d3d1 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+.map-toolbar {
+  border-color: #e7e5e480;
+  box-shadow:
+    0 1px 2px #1c19170d,
+    0 4px 16px #1c19170f;
+}
+.map-layer-easing {
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex-shrink: 0;
+  border-radius: 0.5rem;
+  color: #44403c;
+  cursor: pointer;
+}
+.icon-button:hover:not(:disabled) {
+  background: #f5f5f4;
+  color: #1c1917;
+}
+.icon-button[aria-pressed="true"],
+.icon-button[aria-expanded="true"] {
+  background: #f0efed;
+  color: #1c1917;
+}
+.icon-button:disabled {
+  color: #c7c3bf;
+  cursor: default;
+}
+.icon-button:focus-visible,
+.tool-button:focus-visible,
+.menu-item:focus-visible,
+.primary-button:focus-visible,
+.notice-action:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+}
+.tool-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 2.25rem;
+  padding: 0 0.625rem;
+  border-radius: 0.5rem;
+  color: #292524;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.tool-button:hover:not(:disabled) {
+  background: #f5f5f4;
+}
+.tool-button:disabled {
+  color: #c7c3bf;
+  cursor: default;
+}
+.primary-button {
+  border-radius: 0.625rem;
+  padding: 0.55rem 1rem;
+  background: #1c1917;
+  color: white;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 2px #1c191733;
+}
+.primary-button:hover:not(:disabled) {
+  background: #292524;
+}
+.project-name {
+  min-width: 0;
+  max-width: 18rem;
+  border-radius: 0.375rem;
+  padding: 0.3rem 0.4rem;
+  color: #1c1917;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  cursor: text;
+  outline: none;
+  user-select: text;
+}
+.project-name:hover {
+  background: #f5f5f4;
+}
+.project-name:focus-visible {
+  background: white;
+  box-shadow: 0 0 0 2px #2563eb;
+}
+.save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  white-space: nowrap;
+}
+.save-state::before {
+  content: "";
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: #22c55e;
+}
+.save-state[data-tone="busy"]::before {
+  background: #f59e0b;
+  animation: save-pulse 1s ease-in-out infinite alternate;
+}
+.save-state[data-tone="warn"]::before {
+  background: #f59e0b;
+}
+.save-state[data-tone="error"] {
+  color: #b91c1c;
+}
+.save-state[data-tone="error"]::before {
+  background: #dc2626;
+}
+.save-state[data-tone="muted"]::before {
+  background: #a8a29e;
+}
+@keyframes save-pulse {
+  to {
+    opacity: 0.35;
+  }
+}
+.menu-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0.3rem;
+}
+.menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.6rem;
+  color: #292524;
+  font-size: 0.8125rem;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-item:hover:not(:disabled),
+.menu-item:focus-visible {
+  background: #f5f5f4;
+}
+.menu-item:disabled {
+  color: #c7c3bf;
+  cursor: default;
+}
+.menu-item[aria-current="true"] {
+  font-weight: 600;
+}
+.menu-divider {
+  height: 1px;
+  margin: 0.25rem 0.4rem;
+  background: #eeedeb;
+}
+kbd {
+  display: inline-block;
+  border: 1px solid #e7e5e4;
+  border-bottom-width: 2px;
+  border-radius: 0.3rem;
+  padding: 0 0.3rem;
+  background: #fafaf9;
+  color: #57534e;
+  font-family: inherit;
+  font-size: 0.6875rem;
+  line-height: 1.15rem;
+  white-space: nowrap;
+}
+.menu-item kbd {
+  border: 0;
+  background: none;
+  color: #78716c;
+}
+.notice {
+  max-width: min(32rem, calc(100vw - 1.5rem));
+  border-radius: 0.75rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.9rem;
+  background: #1c1917;
+  color: #fafaf9;
+  font-size: 0.8125rem;
+  box-shadow: 0 8px 24px #1c191740;
+  animation: notice-enter 160ms ease-out;
+}
+.notice-action {
+  flex-shrink: 0;
+  border-radius: 0.4rem;
+  padding: 0.25rem 0.6rem;
+  color: #93c5fd;
+  font-weight: 600;
+  cursor: pointer;
+}
+.notice-action:hover {
+  background: #ffffff1a;
+}
+@keyframes notice-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.search-result {
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
+.search-result[aria-selected="true"] {
+  background: #eff6ff;
+}
+.search-result mark {
+  border-radius: 0.15rem;
+  background: #fde68a;
+  color: inherit;
+}
+.drop-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 3px;
+  border-radius: 999px;
+  background: #2563eb;
+  pointer-events: none;
+}
+.drop-indicator[data-kind="inside"] {
+  border: 2px dashed #2563eb;
+  border-radius: 0.5rem;
+  background: #2563eb14;
+  outline: 4px solid #2563eb1f;
+}
+.drag-label {
+  position: fixed;
+  z-index: 60;
+  max-width: 18rem;
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  background: #1c1917;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  box-shadow: 0 6px 16px #1c191733;
+}
+.shortcuts-dialog {
+  width: min(44rem, calc(100vw - 2rem));
+  max-height: min(42rem, calc(100dvh - 2rem));
+  margin: auto;
+  border: 0;
+  border-radius: 1rem;
+  padding: 0;
+  background: white;
+  color: #1c1917;
+  cursor: default;
+  box-shadow: 0 24px 64px #1c191740;
+}
+.shortcuts-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  animation: notice-enter 160ms ease-out;
+}
+.shortcuts-dialog::backdrop {
+  background: #1c191740;
+}
+.choice-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  border: 1px solid #e7e5e4;
+  border-radius: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.choice-card:has(input:checked) {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+.choice-card input {
+  margin-top: 0.2rem;
+  accent-color: #2563eb;
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-layer-easing {
+    transition: none;
+  }
+  .notice,
+  .shortcuts-dialog[open],
+  .save-state[data-tone="busy"]::before {
+    animation: none;
+  }
+}
+
+/* Ideas on the canvas. */
+.map-node-card {
+  min-height: 40px;
+  border-radius: 0.6rem;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.875rem;
+  box-shadow:
+    0 1px 1px #1c19170d,
+    0 2px 6px #1c19170a;
+  transition: box-shadow 120ms ease;
+}
+.map-node:hover .map-node-card {
+  box-shadow:
+    0 1px 2px #1c191714,
+    0 4px 12px #1c191714;
+}
+.map-node-root .map-node-card {
+  padding: 0.45rem 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  box-shadow:
+    0 1px 2px #1c19171f,
+    0 6px 16px #1c191714;
+}
+.map-node-selected {
+  box-shadow:
+    0 0 0 2px #f5f4f1,
+    0 0 0 4px #2563eb,
+    0 6px 16px #2563eb26 !important;
+}
+.map-node-dragging {
+  z-index: 10;
+  opacity: 0.75;
+  pointer-events: none;
+}
+.map-node-dragging .map-node-card {
+  box-shadow: 0 12px 28px #1c191733;
+}
+.map-links {
+  stroke: #a8a29e;
+  stroke-width: 1.5;
+}
+/* The search panel has its own close control. */
+.search-field::-webkit-search-cancel-button {
+  appearance: none;
+}
+@media (max-width: 639px) {
+  /* Status keeps its colored dot; the words stay available to assistive tech. */
+  .save-state {
+    gap: 0;
+    font-size: 0;
+  }
+  .save-state::before {
+    width: 0.5rem;
+    height: 0.5rem;
+  }
+  .project-name {
+    max-width: 8rem;
+  }
+}
+.outline-panel {
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.outline-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 1.875rem;
+  border-radius: 0.4rem;
+  padding-right: 0.5rem;
+  color: #292524;
+  cursor: pointer;
+}
+.outline-row:hover {
+  background: #f5f5f4;
+}
+.outline-item {
+  outline: none;
+}
+.outline-item[aria-selected="true"] > .outline-row {
+  background: #eff6ff;
+  color: #1e3a8a;
+  font-weight: 500;
+}
+.outline-item:focus-visible > .outline-row {
+  box-shadow: inset 0 0 0 2px #2563eb;
+}
+.outline-toggle {
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  border-radius: 0.25rem;
+  color: #78716c;
+  cursor: pointer;
+}
+.outline-toggle:hover {
+  background: #e7e5e4;
+}
+.outline-dot {
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  flex-shrink: 0;
+}
+.outline-dot::before {
+  content: "";
+  width: 0.3rem;
+  height: 0.3rem;
+  border-radius: 999px;
+  background: #d6d3d1;
+}
+.note-badge {
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  margin-right: -0.25rem;
+  opacity: 0.6;
+  pointer-events: none;
+}
+.notes-panel {
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+/* Ideas dim while dragged over a target so the target stays readable. */
+.map-layer[data-dropping] .map-node-dragging {
+  opacity: 0.35;
+}
+@media (pointer: coarse) {
+  /* Comfortable touch targets without changing the visual density. */
+  .icon-button,
+  .tool-button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+  .map-node::before {
+    content: "";
+    position: absolute;
+    inset: -6px;
+  }
+  .notice-action {
+    padding: 0.55rem 0.8rem;
+  }
+  .keyboard-hint {
+    display: none;
+  }
+}
+/* Hints that a panel continues below the fold. */
+.scroll-fade {
+  mask-image: linear-gradient(
+    to bottom,
+    black calc(100% - 2.5rem),
+    transparent
+  );
+}
+/* The narrowest phones keep the selection toolbar on one line; branch focus
+   stays available from the More menu. */
+@media (max-width: 400px) {
+  .narrow-hide {
+    display: none;
+  }
+}
+@media (max-width: 400px) and (pointer: coarse) {
+  .icon-button,
+  .tool-button {
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+  }
+}
+@media (pointer: coarse) {
+  .menu-item {
+    min-height: 2.75rem;
+  }
+  .color-scope {
+    min-height: 2.75rem;
+  }
+}

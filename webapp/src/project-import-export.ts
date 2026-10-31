@@ -7,17 +7,19 @@ import {
   SCHEMA_VERSION,
 } from "./project-document";
 import type { ProjectDocument, DocumentView } from "./project-document";
+import { escapeLine } from "./outline-text";
 import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
-export const PROJECT_FILE_VERSION = 3;
+export const PROJECT_FILE_VERSION = 4;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
 export interface ProjectFileNode {
   id: string;
   text: string;
+  note?: string;
   color: NodeColor;
   position?: { x: number; y: number };
   children: ProjectFileNode[];
@@ -29,6 +31,8 @@ export interface ViewportPreference {
   top: number;
   zoom: number;
   anchor?: { id: string; centerY: number };
+  // Folded branches in this browser; ids of nodes that no longer exist are ignored.
+  collapsed?: string[];
 }
 
 export interface ProjectFile {
@@ -56,18 +60,34 @@ const PositionSchema = z.strictObject({
 const ViewportSchema = z.strictObject({
   left: z.number().finite(),
   top: z.number().finite(),
-  zoom: z.number().finite().min(0.25).max(2.5),
+  // The editor zooms out to 10% to fit large maps; backups keep that view.
+  zoom: z.number().finite().min(0.1).max(2.5),
 });
 const AnchorSchema = z.strictObject({
   id: z.string().min(1),
   centerY: z.number().finite(),
 });
 
+// Text must be valid Unicode: a lone surrogate cannot be stored or synced.
+const wellFormed = (value: string) =>
+  !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    value,
+  );
+const WELL_FORMED = "Text contains an invalid character.";
+
 function nodeSchema(depth: number): z.ZodType<ProjectFileNode> {
   return z.lazy(() =>
     z.strictObject({
       id: z.string().min(1).max(128),
-      text: z.string().max(LIMITS.text),
+      text: z.string().max(LIMITS.text).refine(wellFormed, WELL_FORMED),
+      note: z
+        .string()
+        .refine(wellFormed, WELL_FORMED)
+        .refine(
+          (note) => note.length <= LIMITS.note,
+          `Note must be at most ${LIMITS.note} UTF-16 units.`,
+        )
+        .optional(),
       color: z.custom<NodeColor>(isNodeColor, "Invalid node color."),
       position: PositionSchema.optional(),
       children:
@@ -86,6 +106,7 @@ const PortableProjectSchema = z
       name: z
         .string()
         .refine((name) => name.trim().length > 0, "Project name is required.")
+        .refine(wellFormed, WELL_FORMED)
         .refine(
           (name) => new TextEncoder().encode(name).length <= LIMITS.nameBytes,
           `Project name must be at most ${LIMITS.nameBytes} bytes.`,
@@ -142,10 +163,13 @@ function checkedFile(value: unknown): ProjectFile {
     }
   }
   const parsed = PortableProjectSchema.safeParse(value);
-  if (!parsed.success)
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.length ? ` (at ${issue.path.join(".")})` : "";
     throw new ProjectFileError(
-      parsed.error.issues[0]?.message ?? "Invalid project file.",
+      `This Mindgrab backup is damaged: ${issue?.message ?? "invalid content"}${where}.`,
     );
+  }
   return parsed.data;
 }
 
@@ -188,10 +212,16 @@ export function serializeProjectFile(
 export function parseProjectFile(json: string): ProjectFile {
   if (new TextEncoder().encode(json).length > PROJECT_FILE_MAX_BYTES)
     throw new ProjectFileError("Project file exceeds the 10 MiB size limit.");
+  if (!json.trim()) throw new ProjectFileError("The file is empty.");
   let value: unknown;
   try {
     value = JSON.parse(json);
   } catch {
+    // Outline exports are Markdown; their text pastes into a map instead.
+    if (/^\s*([#>*+-]|\d+[.)])\s/.test(json))
+      throw new ProjectFileError(
+        "This looks like a Markdown outline, not a backup. Copy its text and paste it into a map instead.",
+      );
     throw new ProjectFileError("Project file is not valid JSON.");
   }
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -199,11 +229,11 @@ export function parseProjectFile(json: string): ProjectFile {
   const header = value as { format?: unknown; version?: unknown };
   if (header.format !== PROJECT_FILE_FORMAT)
     throw new ProjectFileError("File is not a Mindgrab project.");
-  if (header.version !== PROJECT_FILE_VERSION)
+  if (header.version !== 3 && header.version !== PROJECT_FILE_VERSION)
     throw new ProjectFileError(
       `Unsupported Mindgrab project version: ${String(header.version)}.`,
     );
-  return checkedFile(value);
+  return checkedFile({ ...value, version: PROJECT_FILE_VERSION });
 }
 
 export function prepareProjectImport(input: ProjectFile) {
@@ -231,6 +261,7 @@ export function prepareProjectImport(input: ProjectFile) {
         children: node.children.map((child) => ids.get(child.id)!),
         depth,
         text: node.text,
+        note: node.note ?? "",
         position: node.position ? { ...node.position } : null,
         color: node.color,
       });
@@ -288,6 +319,10 @@ const JSON_FILE_TYPE = [
   },
 ];
 
+const MARKDOWN_FILE_TYPE = [
+  { description: "Markdown outline", accept: { "text/markdown": [".md"] } },
+];
+
 function safeFileName(name: string): string {
   return Array.from(name, (character) =>
     /[<>:"/\\|?*]/.test(character) || character.charCodeAt(0) < 32
@@ -317,29 +352,85 @@ export async function readProjectFile(): Promise<File | undefined> {
   });
 }
 
-export async function writeProjectFile(
-  fileName: string,
-  json: string,
+export function writeProjectFile(fileName: string, json: string) {
+  return writeFile(
+    `${safeFileName(fileName)}.mindgrab.json`,
+    json,
+    "application/json",
+    JSON_FILE_TYPE,
+  );
+}
+
+export function writeMarkdownFile(fileName: string, markdown: string) {
+  return writeFile(
+    `${safeFileName(fileName)}.md`,
+    markdown,
+    "text/markdown",
+    MARKDOWN_FILE_TYPE,
+  );
+}
+
+// A readable outline of every node, folded or not. Nested list items keep the
+// hierarchy; line breaks inside a node continue its list item.
+interface OutlineNode {
+  id: string;
+  note?: string;
+  next?: readonly OutlineNode[];
+}
+
+export function projectMarkdown(
+  name: string,
+  roots: readonly OutlineNode[],
+  text: (id: string) => string,
+  note?: (id: string) => string,
+) {
+  // The title is one heading line, whatever the name contains.
+  const title = name.replace(/\s*[\r\n]+\s*/g, " ").trim() || "Untitled map";
+  const lines = [`# ${escapeMarkdown(title)}`, ""];
+  const visit = (nodes: readonly OutlineNode[], depth: number) => {
+    for (const node of nodes) {
+      const indent = "  ".repeat(depth);
+      const [first = "", ...rest] = (text(node.id).trim() || "New idea").split(
+        /\r?\n/,
+      );
+      lines.push(`${indent}- ${escapeMarkdown(first)}`);
+      for (const line of rest)
+        lines.push(`${indent}  ${escapeMarkdown(line)}`.trimEnd());
+      const details = note ? note(node.id) : node.note;
+      if (details)
+        for (const line of details.split(/\r?\n/))
+          lines.push(`${indent}  > ${escapeMarkdown(line)}`.trimEnd());
+      visit(node.next ?? [], depth + 1);
+    }
+  };
+  visit(roots, 0);
+  return `${lines.join("\n")}\n`;
+}
+
+// Leading headings, quotes, bullets, checkboxes and numbers would change the
+// outline structure when pasted back; leading spaces are dropped by pasting.
+const escapeMarkdown = (line: string) => escapeLine(line.trimStart());
+
+async function writeFile(
+  suggestedName: string,
+  contents: string,
+  type: string,
+  types: { description: string; accept: Record<string, string[]> }[],
 ): Promise<void> {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker })
     .showSaveFilePicker;
   if (picker) {
-    const handle = await picker.call(window, {
-      suggestedName: `${safeFileName(fileName)}.mindgrab.json`,
-      types: JSON_FILE_TYPE,
-    });
+    const handle = await picker.call(window, { suggestedName, types });
     const writable = await handle.createWritable();
-    await writable.write(json);
+    await writable.write(contents);
     await writable.close();
     return;
   }
 
-  const url = URL.createObjectURL(
-    new Blob([json], { type: "application/json" }),
-  );
+  const url = URL.createObjectURL(new Blob([contents], { type }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `${safeFileName(fileName)}.mindgrab.json`;
+  link.download = suggestedName;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

@@ -191,7 +191,8 @@ async function edit(text: string) {
   await page.locator("[data-node-id]").first().dblclick();
   await page.getByLabel("Node text").fill(text);
   await page.getByLabel("Node text").press("Enter");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByRole("button", { name: "Project menu" }).click();
+  await page.getByRole("menuitem", { name: "Save now" }).click();
   await page.waitForFunction(() =>
     document
       .querySelector('[aria-label="Project actions"]')

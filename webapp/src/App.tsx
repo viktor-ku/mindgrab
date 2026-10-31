@@ -11,16 +11,18 @@ import {
   createMemo,
   createSignal,
   For,
+  on,
   onCleanup,
   onMount,
   Show,
   untrack,
 } from "solid-js";
-import { createShortcut } from "@solid-primitives/keyboard";
 import type { ProjectDocument } from "./project-document";
 import { EditHistory } from "./undo-history";
 import {
+  branchIds,
   connectionPath,
+  dropTargetAt,
   findNode,
   layoutMindMap,
   navigationTarget,
@@ -30,13 +32,17 @@ import {
   visibleMindMap,
 } from "./mind-map";
 import {
+  clearPositions,
   createChild,
+  createNodeAt,
   createProjectDocument,
   createRoot,
   createSibling,
   deleteSubtree,
   LIMITS,
+  moveNode,
   ORIGIN,
+  setNodeNote,
   renameProject,
   reorderNode,
   setNodeColor,
@@ -59,16 +65,57 @@ import {
   parseProjectFile,
   prepareProjectImport,
   PROJECT_FILE_MAX_BYTES,
+  PROJECT_FILE_MAX_DEPTH as MAX_DEPTH,
   ProjectFileError,
+  projectMarkdown,
   readProjectFile,
+  writeMarkdownFile,
   writeProjectFile,
 } from "./project-import-export";
+import { ALT_LABEL, MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
+import { Outline } from "./Outline";
+import { NotesPanel } from "./NotesPanel";
+import {
+  BRANCH_MIME,
+  branchEntry,
+  branchOutline,
+  outlineSize,
+  parseBranchEntry,
+  parseOutline,
+} from "./outline-text";
+import type { OutlineEntry } from "./outline-text";
+import {
+  ArrowLeftIcon,
+  BrandMark,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  ChildIcon,
+  CloseIcon,
+  FitMapIcon,
+  FitSelectionIcon,
+  FocusIcon,
+  FoldIcon,
+  HelpIcon,
+  MinusIcon,
+  MoreIcon,
+  NoteIcon,
+  OutlineIcon,
+  PlusIcon,
+  RedoIcon,
+  SearchIcon,
+  SiblingIcon,
+  TrashIcon,
+  UndoIcon,
+  UnfoldIcon,
+} from "./icons";
+import { searchNodes } from "./search";
 import { AccountControls } from "./AccountControls";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
 import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
 import { LoroApi, SyncError } from "./loro-api";
 import type {
+  DropTarget,
   LayoutAnchor,
   MindMapNode,
   NodePosition,
@@ -86,10 +133,64 @@ const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
     ["ArrowDown", "down"],
   ]);
 
+// Letter shortcuts follow the typed character, falling back to the physical key
+// when the active layout does not type Latin letters (for example Cyrillic).
+function matchesLetter(event: KeyboardEvent, letter: string) {
+  const key = event.key.toLowerCase();
+  return (
+    key === letter ||
+    (!/^[a-z]$/.test(key) && event.code === `Key${letter.toUpperCase()}`)
+  );
+}
+
+const ZOOM_MIN = 0.1;
+const ZOOM_MAX = 2.5;
+// A device-wide input preference: what a plain scroll wheel does on the canvas.
+type WheelMode = "pan" | "zoom";
+const WHEEL_MODE_KEY = "mindgrab:wheel-mode";
+function storedWheelMode(): WheelMode {
+  try {
+    return localStorage.getItem(WHEEL_MODE_KEY) === "zoom" ? "zoom" : "pan";
+  } catch {
+    return "pan";
+  }
+}
+function storeWheelMode(mode: WheelMode) {
+  try {
+    localStorage.setItem(WHEEL_MODE_KEY, mode);
+  } catch {
+    // Storage may be unavailable; the choice then lasts for this tab only.
+  }
+}
+
+const HINT_KEY = "mindgrab:hint-dismissed";
+function storedFlag(key: string) {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+function storeFlag(key: string, value = true) {
+  try {
+    if (value) localStorage.setItem(key, "1");
+    else localStorage.removeItem(key);
+  } catch {
+    // Without storage the flag lasts for this tab only.
+  }
+}
+
+const OUTLINE_KEY = "mindgrab:outline-open";
+
+// Screen space kept clear of floating toolbars and panels when fitting or
+// following nodes.
+const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
+
 function NodeEditor(props: {
   doc: ProjectDocument;
   id: string;
   onFinish: () => void;
+  onTab: (shift: boolean) => void;
   onSelectionChange: (selection: TextSelection) => void;
 }) {
   let input!: HTMLTextAreaElement;
@@ -116,7 +217,7 @@ function NodeEditor(props: {
   });
 
   return (
-    <div class="relative min-w-px">
+    <div class="relative min-w-px flex-1">
       <span
         class="block whitespace-pre-wrap wrap-anywhere invisible"
         aria-hidden="true"
@@ -128,17 +229,14 @@ function NodeEditor(props: {
         aria-label="Node text"
         rows={1}
         maxLength={LIMITS.text}
-        class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-center outline-none select-text cursor-text"
+        class="absolute inset-0 w-full h-full min-w-0 resize-none overflow-hidden whitespace-pre-wrap wrap-anywhere bg-transparent p-0 text-left outline-none select-text cursor-text"
         onBlur={props.onFinish}
         onInput={reportSelection}
         onSelect={reportSelection}
         onKeyUp={reportSelection}
         onKeyDown={(e) => {
-          const historyShortcut =
-            (e.ctrlKey || e.metaKey) &&
-            !e.altKey &&
-            (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y");
-          if (!historyShortcut) e.stopPropagation();
+          // Keys still reach the window so app shortcuts (search, undo, F6)
+          // work while writing; the canvas handler ignores text fields.
           if (e.isComposing) return;
           if (
             e.key === "Escape" ||
@@ -150,6 +248,11 @@ function NodeEditor(props: {
           ) {
             e.preventDefault();
             props.onFinish();
+          } else if (e.key === "Tab" && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            // Keep capturing: Tab adds a child and Shift+Tab a parent, both
+            // already in writing mode, instead of moving focus away.
+            e.preventDefault();
+            props.onTab(e.shiftKey);
           }
         }}
       />
@@ -181,6 +284,8 @@ function Node(props: {
   selected: boolean;
   writing: boolean;
   dragging: boolean;
+  root: boolean;
+  note: boolean;
   descendants: number;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -188,6 +293,7 @@ function Node(props: {
   onSelect: () => void;
   onWrite: () => void;
   onFinish: () => void;
+  onTab: (shift: boolean) => void;
   onSelectionChange: (selection: TextSelection) => void;
   onPointerDown: (event: PointerEvent) => void;
 }) {
@@ -195,6 +301,7 @@ function Node(props: {
   const color = () =>
     NODE_COLORS.find((option) => option.value === props.color) ??
     NODE_COLORS[0];
+  const fill = () => (props.root ? color().rootClass : color().nodeClass);
   onMount(() => {
     const observer = new ResizeObserver(([entry]) => {
       // Layout sizes stay in canvas units even when the viewport is zoomed.
@@ -210,9 +317,10 @@ function Node(props: {
     // biome-ignore lint/a11y/noStaticElementInteractions: The wrapper handles pointer dragging and bubbled clicks from its button.
     <div
       ref={container}
-      class={`cursor-pointer select-none absolute w-max max-w-40 leading-6 rounded-sm ${color().nodeClass}`}
+      class="map-node cursor-pointer select-none absolute w-max max-w-56 leading-6"
       classList={{
-        "z-10": props.dragging,
+        "map-node-dragging": props.dragging,
+        "map-node-root": props.root,
       }}
       data-no-pan
       data-node-id={props.id}
@@ -224,25 +332,21 @@ function Node(props: {
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
       }}
-      title={`Click to select · Double-click to write · Drag to move${props.descendants ? " · G to collapse or expand children" : ""}`}
+      title={`Click to select · Double-click to write · Drag to move${props.descendants ? ` · ${ALT_LABEL}G to collapse or expand children` : ""}`}
     >
       <Show when={props.collapsed}>
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-sm border pointer-events-none ${color().nodeClass}`}
+          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-lg border pointer-events-none ${fill()}`}
         />
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-sm border pointer-events-none ${color().nodeClass}`}
+          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-lg border pointer-events-none ${fill()}`}
         />
       </Show>
       <div
-        class={`relative border rounded-sm shadow-sm/10 px-2.5 py-0.75 grid items-center box-border ${color().nodeClass}`}
-        classList={{
-          "grid-cols-[minmax(0,1fr)_auto] gap-x-2": props.collapsed,
-          "ring-2 ring-blue-500 ring-offset-2 ring-offset-stone-200":
-            props.selected,
-        }}
+        class={`map-node-card relative flex items-center gap-2 box-border border ${fill()}`}
+        classList={{ "map-node-selected": props.selected }}
         style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
       >
         <Show
@@ -252,8 +356,8 @@ function Node(props: {
               type="button"
               aria-pressed={props.selected}
               aria-expanded={props.descendants ? !props.collapsed : undefined}
-              aria-keyshortcuts={props.descendants ? "g" : undefined}
-              class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer"
+              aria-keyshortcuts={props.descendants ? "Alt+G" : undefined}
+              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer outline-none"
             >
               {props.text || "New idea"}
             </button>
@@ -263,15 +367,28 @@ function Node(props: {
             doc={props.doc}
             id={props.id}
             onFinish={props.onFinish}
+            onTab={props.onTab}
             onSelectionChange={props.onSelectionChange}
           />
+        </Show>
+        <Show when={props.note && !props.writing}>
+          {/* An indicator only: short ideas are mostly badge, so a clickable
+              badge would open notes when people meant to select the idea. */}
+          <span
+            role="img"
+            class="note-badge"
+            aria-label="Has notes"
+            title={`Has notes · open them with ${ALT_LABEL}N`}
+          >
+            <NoteIcon class="size-3.5" />
+          </span>
         </Show>
         <Show when={props.collapsed}>
           <button
             type="button"
             class="rounded px-1.5 text-[10px] leading-4 font-medium whitespace-nowrap cursor-pointer bg-white/35 hover:bg-white/60 focus-visible:outline-2"
             aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
-            title="Expand children (G)"
+            title={`Expand children (${ALT_LABEL}G)`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -286,11 +403,37 @@ function Node(props: {
   );
 }
 
+interface Notice {
+  message: string;
+  action?: { label: string; run: () => void };
+  // The history position the notice describes; later edits or undo make it
+  // stale, so it is dismissed rather than offering the wrong Undo.
+  revision?: number;
+}
+
+const formatDate = (iso: string) => {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? "earlier"
+    : date.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        ...(date.getFullYear() !== new Date().getFullYear() && {
+          year: "numeric",
+        }),
+      });
+};
+
+const truncate = (text: string, length: number) =>
+  text.length > length ? `${text.slice(0, length - 1).trimEnd()}…` : text;
+
 interface ContextMenuState {
   x: number;
   y: number;
   nodeId?: string;
   rootPosition?: NodePosition;
+  // Opens upward from (x, y), for menus anchored to the bottom toolbar.
+  above?: boolean;
 }
 
 export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
@@ -334,6 +477,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }));
   const claimCount = () =>
     account().status === "authenticated" ? (claims.data?.length ?? 0) : 0;
+  // "Not now" lasts until the account changes.
+  // Nothing durable keeps this project: local saving is off and cloud saving
+  // is off or cannot run without an account.
+  const memoryOnly = () =>
+    !view().saving().local &&
+    (!view().saving().cloud || account().status !== "authenticated");
+  const [claimDismissed, setClaimDismissed] = createSignal(false);
+  createEffect(
+    on(
+      () => account().user?.id,
+      () => setClaimDismissed(false),
+    ),
+  );
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopDurability: (() => void) | undefined;
@@ -533,10 +689,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setLeft(view.left);
         setTop(view.top);
         setZoom(view.zoom);
+        if (Array.isArray(view.collapsed))
+          setCollapsedIds(
+            new Set(view.collapsed.filter((id) => typeof id === "string")),
+          );
       }
     } catch {
       // A missing local viewport preference does not prevent opening content.
     }
+  }
+
+  // A new map opens with its first idea selected, ready for typing or Tab.
+  function selectFirstIdea() {
+    const root = forest()[0]?.id;
+    if (root) setSelectedId(root);
   }
 
   async function openLatestOrCreate(target = repository) {
@@ -553,6 +719,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }),
       target,
     );
+    if (target === repository && !disposed) selectFirstIdea();
   }
 
   async function performInitializeWorkspace() {
@@ -689,9 +856,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         new LoroApi(undefined, undefined, userId, queryClient),
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
-      setClaimMessage(
-        `Added ${ids.length} anonymous ${ids.length === 1 ? "project" : "projects"} to this account. Cloud saving will continue automatically.`,
-      );
+      setClaimMessage("");
+      showNotice({
+        message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
+      });
       await refreshClaims(owner);
       cloud?.retry();
       if (ids[0]) await openProject(ids[0]);
@@ -718,6 +886,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // (selection, viewport, measurements, drag previews) is local UI state.
   const [doc, setDoc] = createSignal(ephemeralDocument());
   const [historyRevision, setHistoryRevision] = createSignal(0);
+  // Read synchronously, even inside a batch, to tie notices to history.
+  let historyCount = 0;
   let editorSelection: TextSelection | undefined;
   const [storageReady, setStorageReady] = createSignal(false);
   const [saveStatus, setSaveStatus] = createSignal<
@@ -740,18 +910,25 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     };
     current.on("beforeChange", beforeChange);
     undo.onRecord((entry) => {
+      historyCount++;
       setHistoryRevision((n) => n + 1);
       entry.before = selectionBefore;
       queueMicrotask(() => (entry.after = captureSelection()));
     });
     undo.onRestore(({ entry, direction }) => {
+      historyCount++;
       setHistoryRevision((n) => n + 1);
       const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
+      // Undo from inside the notes panel keeps the person writing notes
+      // instead of reopening the idea's title editor.
+      const resumeWriting =
+        selection.writing &&
+        !document.activeElement?.matches('textarea[aria-label="Idea notes"]');
       setSelectedId(selection.id);
-      setWriting(selection.writing);
+      setWriting(resumeWriting);
       editorSelection = selection.text;
-      if (selection.writing && selection.text) {
+      if (resumeWriting && selection.text) {
         queueMicrotask(() => {
           const editor = canvas.querySelector<HTMLTextAreaElement>(
             '[aria-label="Node text"]',
@@ -792,6 +969,27 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       undo.finishGroup();
     }
   }
+
+  // A short-lived confirmation for actions with broad effects, offering the
+  // way back next to what happened.
+  const [notice, setNotice] = createSignal<Notice>();
+  let noticeTimer: number | undefined;
+  function showNotice(next: Notice) {
+    window.clearTimeout(noticeTimer);
+    setNotice({ ...next, revision: historyCount });
+    noticeTimer = window.setTimeout(() => setNotice(undefined), 6000);
+  }
+  onCleanup(() => window.clearTimeout(noticeTimer));
+  createEffect(
+    on(
+      historyRevision,
+      () => {
+        if (notice() && notice()?.revision !== historyCount)
+          setNotice(undefined);
+      },
+      { defer: true },
+    ),
+  );
 
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
@@ -835,8 +1033,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [selectedId, setSelectedId] = createSignal<string>();
   const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
   const details = createMemo(() => nodeDetails(forest()));
+  // Branch focus shows one branch as if it were the whole map. It is a view;
+  // the document and every other branch are untouched.
+  const [focusId, setFocusId] = createSignal<string>();
+  const scopeForest = createMemo(() => {
+    const focus = focusId();
+    const root = focus ? findNode(forest(), focus) : undefined;
+    return root ? [root] : forest();
+  });
   const visibleForest = createMemo(() =>
-    visibleMindMap(forest(), collapsedIds()),
+    visibleMindMap(scopeForest(), collapsedIds()),
   );
   const [colorScope, setColorScope] = createSignal<"node" | "branch">("node");
   const [writing, setWriting] = createSignal(false);
@@ -881,13 +1087,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // once on release.
   const [drag, setDrag] = createSignal<{ id: string; delta: NodePosition }>();
   const draggingId = () => drag()?.id;
+  // Where a node drag would land if released now; undefined means a free
+  // placement on the canvas.
+  const [dropTarget, setDropTarget] = createSignal<DropTarget>();
+  const [dragPointer, setDragPointer] = createSignal<NodePosition>();
   const baseLayout = createMemo(() =>
     layoutMindMap(visibleForest(), nodeSizes(), layoutAnchor()),
   );
   const basePositions = createMemo(() => {
     // Hidden descendants must also move when their folded parent is dragged.
     const full = collapsedIds().size
-      ? layoutMindMap(forest(), nodeSizes(), layoutAnchor()).nodes
+      ? layoutMindMap(scopeForest(), nodeSizes(), layoutAnchor()).nodes
       : [];
     return new Map(
       [...full, ...baseLayout().nodes].map((node) => [node.id, node]),
@@ -895,7 +1105,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   });
   const layout = createMemo(() => {
     const preview = drag();
-    if (!preview) return baseLayout();
+    // Over a drop target the branch stays put, so the target and its
+    // surroundings remain readable; the label and indicator show the move.
+    if (!preview || dropTarget()) return baseLayout();
     return layoutMindMap(
       translatePreview(
         visibleForest(),
@@ -925,15 +1137,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const id = selectedId();
     return id ? findNode(forest(), id) : undefined;
   });
-  const selectedText = () => {
-    const id = selectedId();
-    return id ? view().text(id) : "";
-  };
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
+  const connections = createMemo(
+    () =>
+      new Map(
+        layout().connections.map((connection) => [
+          connection.to.id,
+          connection,
+        ]),
+      ),
+  );
   const [left, setLeft] = createSignal(0);
   const [top, setTop] = createSignal(0);
   const [zoom, setZoom] = createSignal(1);
   const [panning, setPanning] = createSignal(false);
+  const [wheelMode, setWheelMode] = createSignal<WheelMode>(storedWheelMode());
+  createEffect(() => storeWheelMode(wheelMode()));
   let canvas!: HTMLDivElement;
   let contextMenuElement: HTMLDivElement | undefined;
   let pointer:
@@ -949,6 +1168,639 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     | undefined;
   let suppressClick = false;
 
+  // Read from a ResizeObserver so following the selection while typing never
+  // forces a synchronous layout of the whole map.
+  const [canvasSize, setCanvasSize] = createSignal({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  onMount(() => {
+    const observer = new ResizeObserver(([entry]) =>
+      setCanvasSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      }),
+    );
+    observer.observe(canvas);
+    onCleanup(() => observer.disconnect());
+  });
+
+  // Canvas units map to screen pixels relative to the canvas center through
+  // `left/top + zoom * (point - origin)`. The origin keeps the first root
+  // centered where the map started.
+  const viewOrigin = () => ({
+    x: (layout().nodes[0]?.width ?? 0) / 2,
+    y: NODE_MIN_HEIGHT / 2,
+  });
+  // Programmatic view changes ease into place; direct manipulation does not.
+  const [easingView, setEasingView] = createSignal(false);
+  let easeTimer: number | undefined;
+  function moveView(next: { left: number; top: number; zoom?: number }) {
+    window.clearTimeout(easeTimer);
+    batch(() => {
+      setEasingView(true);
+      setLeft(next.left);
+      setTop(next.top);
+      if (next.zoom !== undefined) setZoom(next.zoom);
+    });
+    easeTimer = window.setTimeout(() => setEasingView(false), 220);
+  }
+  onCleanup(() => window.clearTimeout(easeTimer));
+
+  function nodeBounds(ids?: Iterable<string>) {
+    const nodes = ids
+      ? [...ids].flatMap((id) => positionedNodes().get(id) ?? [])
+      : layout().nodes;
+    if (!nodes.length) return;
+    return {
+      minX: Math.min(...nodes.map((node) => node.x)),
+      minY: Math.min(...nodes.map((node) => node.y)),
+      maxX: Math.max(...nodes.map((node) => node.x + node.width)),
+      maxY: Math.max(...nodes.map((node) => node.y + node.height)),
+    };
+  }
+
+  function fitBounds(
+    bounds: NonNullable<ReturnType<typeof nodeBounds>>,
+    maxZoom: number,
+  ) {
+    const width = canvasSize().width - viewInsets().left - viewInsets().right;
+    const height = canvasSize().height - viewInsets().top - viewInsets().bottom;
+    const next = Math.min(
+      maxZoom,
+      ZOOM_MAX,
+      Math.max(
+        ZOOM_MIN,
+        Math.min(
+          width / Math.max(1, bounds.maxX - bounds.minX),
+          height / Math.max(1, bounds.maxY - bounds.minY),
+        ),
+      ),
+    );
+    const origin = viewOrigin();
+    moveView({
+      zoom: next,
+      left:
+        (viewInsets().left - viewInsets().right) / 2 -
+        next * ((bounds.minX + bounds.maxX) / 2 - origin.x),
+      top:
+        (viewInsets().top - viewInsets().bottom) / 2 -
+        next * ((bounds.minY + bounds.maxY) / 2 - origin.y),
+    });
+  }
+
+  function fitMap() {
+    const bounds = nodeBounds();
+    if (bounds) fitBounds(bounds, 1);
+  }
+
+  function fitSelection(id = selectedId()) {
+    if (!id) return fitMap();
+    const ids = [id];
+    const visit = (nodes: MindMapNode[]) => {
+      for (const node of nodes) {
+        ids.push(node.id);
+        visit(node.next ?? []);
+      }
+    };
+    visit(findNode(visibleForest(), id)?.next ?? []);
+    const bounds = nodeBounds(ids);
+    if (bounds) fitBounds(bounds, 1.5);
+  }
+
+  // Pans by the smallest amount that brings the node fully into view, so
+  // writing and keyboard navigation never continue offscreen.
+  function keepInView(id: string) {
+    const node = positionedNodes().get(id);
+    if (!node || !canvas) return;
+    const origin = viewOrigin();
+    const scale = zoom();
+    const halfWidth = canvasSize().width / 2;
+    const halfHeight = canvasSize().height / 2;
+    const screenLeft = left() + scale * (node.x - origin.x);
+    const screenTop = top() + scale * (node.y - origin.y);
+    const screenRight = screenLeft + scale * node.width;
+    const screenBottom = screenTop + scale * node.height;
+    const shift = (start: number, end: number, min: number, max: number) =>
+      end - start > max - min
+        ? min - start
+        : start < min
+          ? min - start
+          : end > max
+            ? max - end
+            : 0;
+    const dx = shift(
+      screenLeft,
+      screenRight,
+      -halfWidth + viewInsets().left,
+      halfWidth - viewInsets().right,
+    );
+    const dy = shift(
+      screenTop,
+      screenBottom,
+      -halfHeight + viewInsets().top,
+      halfHeight - viewInsets().bottom,
+    );
+    if (dx || dy) moveView({ left: left() + dx, top: top() + dy });
+  }
+
+  createEffect(
+    on(
+      [
+        selectedId,
+        // While writing, follow the growing node; otherwise only selection
+        // changes move the view so remote edits never pull it around.
+        () => {
+          const id = selectedId();
+          const node = writing() && id ? positionedNodes().get(id) : undefined;
+          return node && `${node.x},${node.y},${node.width},${node.height}`;
+        },
+      ],
+      ([id]) => {
+        if (id && !pointer) keepInView(id);
+      },
+    ),
+  );
+
+  function centerOn(id: string) {
+    const node = positionedNodes().get(id);
+    if (!node) return;
+    const origin = viewOrigin();
+    moveView({
+      left:
+        (viewInsets().left - viewInsets().right) / 2 -
+        zoom() * (node.x + node.width / 2 - origin.x),
+      top:
+        (viewInsets().top - viewInsets().bottom) / 2 -
+        zoom() * (node.y + node.height / 2 - origin.y),
+    });
+  }
+
+  // Search and branch focus change only the view. Leaving them restores the
+  // folds and viewport they started from; content edits are never undone.
+  interface ViewSnapshot {
+    left: number;
+    top: number;
+    zoom: number;
+    collapsed: ReadonlySet<string>;
+    selected?: string;
+  }
+  const snapshotView = (): ViewSnapshot => ({
+    left: left(),
+    top: top(),
+    zoom: zoom(),
+    collapsed: collapsedIds(),
+    selected: selectedId(),
+  });
+  function restoreView(snapshot: ViewSnapshot, selection = true) {
+    batch(() => {
+      setCollapsedIds(
+        new Set(
+          [...snapshot.collapsed].filter(
+            (id) => details().get(id)?.descendants,
+          ),
+        ),
+      );
+      if (selection)
+        setSelectedId(
+          snapshot.selected && details().has(snapshot.selected)
+            ? snapshot.selected
+            : undefined,
+        );
+      moveView(snapshot);
+    });
+  }
+
+  let focusReturn: ViewSnapshot | undefined;
+  function focusBranch(id = selectedId()) {
+    if (!id || !details().has(id)) return;
+    finishWriting();
+    setContextMenu(undefined);
+    if (!focusId()) focusReturn = snapshotView();
+    batch(() => {
+      setFocusId(id);
+      setSelectedId(id);
+      setCollapsedIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    });
+    fitMap();
+  }
+  function exitFocus() {
+    if (notice()?.action?.label === "Leave focus") setNotice(undefined);
+    const back = focusReturn;
+    focusReturn = undefined;
+    const selected = selectedId();
+    setFocusId(undefined);
+    if (back) restoreView(back, false);
+    if (selected) keepInView(selected);
+    canvas.focus({ preventScroll: true });
+  }
+  const focusPath = createMemo(() => {
+    const path: string[] = [];
+    for (let id = focusId(); id; id = details().get(id)?.parent)
+      path.unshift(id);
+    return path;
+  });
+  createEffect(() => {
+    const id = focusId();
+    if (id && !details().has(id)) untrack(exitFocus);
+    // An idea outside the branch (selected by undo, a remote move or search)
+    // would be edited invisibly; show the whole map instead.
+    else if (
+      id &&
+      selectedId() &&
+      !untrack(() => inFocus(selectedId() as string))
+    )
+      untrack(exitFocus);
+  });
+
+  const [searchOpen, setSearchOpen] = createSignal(false);
+  // After jumping to a search result, a chip offers the view the search began
+  // from, including its folds, until the user moves on.
+  const [returnView, setReturnView] = createSignal<ViewSnapshot>();
+  const [searchQuery, setSearchQuery] = createSignal("");
+  const [searchIndex, setSearchIndex] = createSignal(0);
+  let searchInput: HTMLInputElement | undefined;
+  let searchReturn: ViewSnapshot | undefined;
+  // One extra hit tells whether the list was cut off at the display limit.
+  const SEARCH_LIMIT = 50;
+  const searchHits = createMemo(() =>
+    searchOpen()
+      ? searchNodes(
+          scopeForest(),
+          (id) => view().text(id),
+          searchQuery(),
+          SEARCH_LIMIT + 1,
+        )
+      : [],
+  );
+  const searchResults = createMemo(() => searchHits().slice(0, SEARCH_LIMIT));
+  // Moving on from a kept search result retires the way back.
+  createEffect(
+    on(
+      selectedId,
+      () => {
+        if (!searchOpen()) setReturnView(undefined);
+      },
+      { defer: true },
+    ),
+  );
+  function openSearch() {
+    finishWriting();
+    setContextMenu(undefined);
+    if (!searchOpen()) {
+      searchReturn = snapshotView();
+      setReturnView(undefined);
+      setSearchIndex(0);
+      setSearchOpen(true);
+    }
+    queueMicrotask(() => {
+      searchInput?.focus();
+      searchInput?.select();
+    });
+  }
+  // Reveals the result inside the folds the search started from, so moving
+  // between results never accumulates unfolded branches.
+  function previewResult(id: string) {
+    const next = new Set(searchReturn?.collapsed ?? collapsedIds());
+    for (
+      let parent = details().get(id)?.parent;
+      parent;
+      parent = details().get(parent)?.parent
+    )
+      next.delete(parent);
+    batch(() => {
+      setCollapsedIds(next);
+      setSelectedId(id);
+    });
+    centerOn(id);
+  }
+  function closeSearch(keep: boolean) {
+    const back = searchReturn;
+    searchReturn = undefined;
+    setReturnView(keep ? back : undefined);
+    batch(() => {
+      setSearchOpen(false);
+      setSearchQuery("");
+    });
+    if (!keep && back) restoreView(back);
+    canvas.focus({ preventScroll: true });
+  }
+  createEffect(
+    // Preview follows the query and the highlighted result only. Edits made
+    // while searching also change the results, but must not move the
+    // selection (or the editor) to another idea.
+    on([searchQuery, searchIndex], ([, index]) => {
+      const results = untrack(searchResults);
+      const result = results[Math.min(index, results.length - 1)];
+      if (result) untrack(() => previewResult(result.id));
+    }),
+  );
+
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  function closeProjectMenu() {
+    setMenuOpen(false);
+    document
+      .querySelector<HTMLButtonElement>('button[aria-label="Project menu"]')
+      ?.focus();
+  }
+  const [mapFilter, setMapFilter] = createSignal("");
+  createEffect(on(showLoad, () => setMapFilter(""), { defer: true }));
+  // Newest first; the filter matches names ignoring case.
+  const listedProjects = createMemo(() => {
+    const query = mapFilter().trim().toLowerCase();
+    return [...savedProjects()]
+      .filter((project) => project.name.toLowerCase().includes(query))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  });
+  let projectMenu: HTMLDivElement | undefined;
+  createEffect(() => {
+    if (menuOpen())
+      queueMicrotask(() =>
+        projectMenu
+          ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+          ?.focus(),
+      );
+  });
+  const [colorOpen, setColorOpen] = createSignal(false);
+  createEffect(on(selectedId, () => setColorOpen(false), { defer: true }));
+  // Keyboard users land on the current color when the popover opens.
+  createEffect(
+    on(
+      colorOpen,
+      (open) =>
+        open &&
+        queueMicrotask(() =>
+          document
+            .querySelector<HTMLButtonElement>(
+              '[aria-label="Selected node color controls"] .color-choice[aria-pressed="true"]',
+            )
+            ?.focus(),
+        ),
+      { defer: true },
+    ),
+  );
+
+  function menuArrowKeys(e: KeyboardEvent & { currentTarget: HTMLElement }) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const items = Array.from(
+      e.currentTarget.querySelectorAll<HTMLButtonElement>(
+        '[role="menuitem"]:not(:disabled)',
+      ),
+    );
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? items.length - 1
+          : (current + (e.key === "ArrowDown" ? 1 : -1) + items.length) %
+            items.length;
+    items[next]?.focus();
+  }
+
+  function resetPlacement(id: string) {
+    const placed = placedIds(id);
+    if (command((doc) => clearPositions(doc, placed)))
+      showNotice({
+        message: `Returned “${nodeLabel(id)}” to automatic placement`,
+        action: { label: "Undo", run: undo },
+      });
+  }
+
+  const dragLabel = () => {
+    const target = dropTarget();
+    if (!target) return "Place here on the canvas";
+    const name = nodeLabel(target.id);
+    return target.kind === "inside"
+      ? `Move under “${name}”`
+      : `Move ${target.kind} “${name}”`;
+  };
+
+  async function exportMarkdown() {
+    finishWriting();
+    finishProjectName();
+    try {
+      const name = view().name();
+      await writeMarkdownFile(
+        name,
+        projectMarkdown(name, forest(), (id) => view().text(id)),
+      );
+      showNotice({ message: `Exported “${truncate(name, 40)}” as an outline` });
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError"))
+        setStorageMessage(
+          error instanceof Error
+            ? error.message
+            : "Could not export the outline.",
+        );
+    }
+  }
+
+  const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
+  const [notesOpen, setNotesOpen] = createSignal(false);
+  // A panel that closes while it holds focus hands focus back to the map, so
+  // keyboard users never land on the page body.
+  createEffect(
+    on(
+      () => [
+        outlineOpen(),
+        notesOpen(),
+        menuOpen(),
+        showPreferences(),
+        showHelp(),
+      ],
+      () => {
+        if (!document.activeElement || document.activeElement === document.body)
+          canvas?.focus({ preventScroll: true });
+      },
+      { defer: true },
+    ),
+  );
+  // Opening notes from the keyboard moves focus into them; closing returns it.
+  function toggleNotes(open = !notesOpen()) {
+    finishWriting();
+    setNotesOpen(open);
+    if (open && selectedId())
+      queueMicrotask(() =>
+        document
+          .querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Idea notes"]',
+          )
+          ?.focus(),
+      );
+    else canvas.focus({ preventScroll: true });
+  }
+  createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
+  const viewInsets = () => {
+    const wide = canvasSize().width >= 640;
+    return {
+      ...VIEW_INSETS,
+      ...(wide && outlineOpen() && { left: 316 }),
+      ...(wide && notesOpen() && { right: 348 }),
+    };
+  };
+  // Branches travel through the clipboard as indented Markdown lists, so they
+  // paste into other apps and pasted outlines become branches here.
+  // Levels from the top (1 for a central idea) and the levels a branch spans.
+  function depthOf(id: string) {
+    let depth = 1;
+    for (let p = details().get(id)?.parent; p; p = details().get(p)?.parent)
+      depth++;
+    return depth;
+  }
+  function branchHeight(id: string) {
+    const height = (node: MindMapNode): number =>
+      1 + Math.max(0, ...(node.next ?? []).map(height));
+    const node = findNode(forest(), id);
+    return node ? height(node) : 1;
+  }
+  function tooDeep() {
+    showNotice({
+      message: `Maps can be at most ${MAX_DEPTH} levels deep, so backups stay readable.`,
+    });
+  }
+
+  function pasteOutline(entries: OutlineEntry[]) {
+    const parent = selectedId() ?? focusId();
+    const count = outlineSize(entries);
+    if (details().size + count > LIMITS.nodes) {
+      showNotice({
+        message: `A map holds at most ${LIMITS.nodes.toLocaleString()} ideas; this paste would add ${count.toLocaleString()}.`,
+      });
+      return;
+    }
+    const start = parent ? depthOf(parent) + 1 : 1;
+    if (start > MAX_DEPTH) return tooDeep();
+    let first: string | undefined;
+    // Backups keep at most MAX_DEPTH levels; deeper lines join the deepest
+    // allowed level instead of making the map impossible to back up.
+    let flattened = false;
+    let shortened = false;
+    try {
+      command((doc) =>
+        doc.batch(() => {
+          const make = (
+            list: OutlineEntry[],
+            under: string | undefined,
+            depth: number,
+          ) => {
+            for (const entry of list) {
+              if (entry.text.length > LIMITS.text) shortened = true;
+              const init = {
+                text: entry.text.slice(0, LIMITS.text),
+                ...(entry.color && { color: entry.color }),
+              };
+              const id = under
+                ? createChild(doc, under, init)
+                : createRoot(doc, init);
+              if (entry.note)
+                setNodeNote(doc, id, entry.note.slice(0, LIMITS.note));
+              first ??= id;
+              if (entry.children.length && depth >= MAX_DEPTH) flattened = true;
+              if (depth >= MAX_DEPTH) make(entry.children, under, depth);
+              else make(entry.children, id, depth + 1);
+            }
+          };
+          make(entries, parent, start);
+        }),
+      );
+    } catch (error) {
+      showNotice({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not paste these ideas.",
+      });
+      return;
+    }
+    if (!first) return;
+    if (parent) revealNode(first);
+    setSelectedId(first);
+    // Show what arrived once the new ideas have been measured.
+    if (count > 1) {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => (parent ? fitSelection(parent) : fitMap())),
+      );
+    }
+    showNotice({
+      message: `Pasted ${count} ${count === 1 ? "idea" : "ideas"}${parent ? ` under “${nodeLabel(parent)}”` : ""}${
+        flattened
+          ? ` · levels past ${MAX_DEPTH} were flattened`
+          : shortened
+            ? ` · long text was shortened to ${LIMITS.text.toLocaleString()} characters`
+            : ""
+      }`,
+      action: { label: "Undo", run: undo },
+    });
+  }
+
+  // Past the first or last sibling, Up/Down continue to the closest idea above
+  // or below on screen, preferring ideas in the same column.
+  function nearbyIdea(id: string, arrow: "left" | "right" | "up" | "down") {
+    if (arrow !== "up" && arrow !== "down") return;
+    const from = positionedNodes().get(id);
+    if (!from) return;
+    const center = (node: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }) => ({
+      x: node.x + node.width / 2,
+      y: node.y + node.height / 2,
+    });
+    const start = center(from);
+    let best: { id: string; score: number } | undefined;
+    for (const node of layout().nodes) {
+      const point = center(node);
+      const dy = point.y - start.y;
+      if (arrow === "up" ? dy >= -1 : dy <= 1) continue;
+      const score = Math.abs(dy) + Math.abs(point.x - start.x) * 2;
+      if (!best || score < best.score) best = { id: node.id, score };
+    }
+    return best?.id;
+  }
+
+  // F6 / Shift+F6 cycle focus between the canvas and each labelled toolbar
+  // or panel, the conventional escape hatch for widgets that use Tab.
+  function cycleRegions(direction: 1 | -1) {
+    const focusable =
+      'button:not(:disabled), input:not(:disabled), textarea, [tabindex="0"]';
+    const regions: HTMLElement[] = [
+      canvas,
+      ...Array.from(
+        canvas.querySelectorAll<HTMLElement>("[data-toolbar][aria-label]"),
+      ).filter(
+        (region) =>
+          !region.parentElement?.closest("[data-toolbar][aria-label]") &&
+          region.querySelector(focusable),
+      ),
+    ];
+    const active = document.activeElement;
+    const current = Math.max(
+      0,
+      regions.findIndex(
+        (region, index) => index > 0 && active && region.contains(active),
+      ),
+    );
+    const next =
+      regions[(current + direction + regions.length) % regions.length];
+    if (next === canvas) canvas.focus({ preventScroll: true });
+    else next.querySelector<HTMLElement>(focusable)?.focus();
+  }
+
+  const [showHelp, setShowHelp] = createSignal(false);
+  const [hintDismissed, setHintDismissed] = createSignal(storedFlag(HINT_KEY));
+  function dismissHint() {
+    setHintDismissed(true);
+    storeFlag(HINT_KEY);
+  }
+
   let viewSaveTimer: number | undefined;
   createEffect(() => {
     const handle = activeHandle;
@@ -959,6 +1811,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       top: top(),
       zoom: zoom(),
       anchor: layoutAnchor(),
+      collapsed: [...collapsedIds()],
     };
     if (!handle || handle.doc !== currentDoc) return;
     window.clearTimeout(viewSaveTimer);
@@ -1004,6 +1857,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     pointer = undefined;
     batch(() => {
       setDrag(undefined);
+      setDropTarget(undefined);
       setPanning(false);
     });
     if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
@@ -1026,6 +1880,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setTop(0);
       setZoom(1);
       setShowLoad(false);
+      setReturnView(undefined);
+      setFocusId(undefined);
     });
     canvas.focus({ preventScroll: true });
   }
@@ -1038,11 +1894,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, target);
       if (target !== repository || disposed) return;
       const state = handle.state();
-      setStorageMessage(
-        state.status === "ready"
-          ? `Loaded “${state.view.name}”.`
-          : "Project is still loading.",
-      );
+      if (state.status === "ready") {
+        setStorageMessage("");
+        showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
+      } else setStorageMessage("Project is still loading.");
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
@@ -1069,6 +1924,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, target);
       if (target !== repository || disposed) return;
       setStorageMessage("");
+      selectFirstIdea();
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
@@ -1104,11 +1960,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("done");
-      setStorageMessage(
-        view().saving().local
-          ? "Saved locally."
-          : "Local saving is off. Export a copy to keep your work.",
-      );
+      if (view().saving().local) {
+        setStorageMessage("");
+        showNotice({ message: "Saved locally." });
+      } else
+        setStorageMessage(
+          "Local saving is off. Export a copy to keep your work.",
+        );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("error");
@@ -1166,6 +2024,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         top: top(),
         zoom: zoom(),
         anchor: layoutAnchor(),
+        collapsed: [...collapsedIds()],
       });
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed)
@@ -1224,7 +2083,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         ...(layoutAnchor() && { anchor: layoutAnchor() }),
       });
       await writeProjectFile(name, json);
-      setStorageMessage(`Exported “${name}”.`);
+      showNotice({ message: `Exported “${truncate(name, 40)}”` });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
@@ -1279,7 +2138,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(handle, owner);
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
-      setStorageMessage(`Imported “${content.name}”.`);
+      showNotice({ message: `Imported “${truncate(content.name, 40)}”` });
     } catch (error) {
       if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -1298,14 +2157,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const { undo } = session();
     undo.finishGroup();
     undo.undo();
-    canvas.focus({ preventScroll: true });
+    focusAfterHistory();
   }
 
   function redo() {
     const { undo } = session();
     undo.finishGroup();
     undo.redo();
-    canvas.focus({ preventScroll: true });
+    focusAfterHistory();
+  }
+
+  // An open idea editor always has keyboard focus, however it opened (undo,
+  // redo, a toolbar button), unless someone is typing in the notes panel.
+  createEffect(
+    on([writing, selectedId], ([open]) => {
+      if (!open) return;
+      queueMicrotask(() => {
+        const editor = canvas.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="Node text"]',
+        );
+        const active = document.activeElement;
+        if (
+          editor &&
+          active !== editor &&
+          !active?.matches('textarea[aria-label="Idea notes"], input')
+        )
+          editor.focus({ preventScroll: true });
+      });
+    }),
+  );
+
+  // A restored edit keeps its editor focused; otherwise keys go to the map.
+  function focusAfterHistory() {
+    if (!writing()) return canvas.focus({ preventScroll: true });
+    canvas
+      .querySelector<HTMLTextAreaElement>('textarea[aria-label="Node text"]')
+      ?.focus({ preventScroll: true });
   }
 
   const canUndo = () => {
@@ -1341,7 +2228,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (next.size !== collapsedIds().size) setCollapsedIds(next);
   }
 
-  function toggleCollapse(id: string) {
+  function toggleCollapse(id: string, focusCanvas = true) {
     if (!details().get(id)?.descendants) return;
     cancelPointer();
     const node = positionedNodes().get(id);
@@ -1353,7 +2240,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return next;
       });
     });
-    canvas.focus({ preventScroll: true });
+    if (focusCanvas) canvas.focus({ preventScroll: true });
   }
 
   // One editing session is one undo step.
@@ -1374,6 +2261,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setWriting(true);
   }
 
+  // When the menu key (or Shift+F10) was last pressed; its contextmenu event
+  // carries no reliable pointer information across browsers.
+  let contextKeyAt = -Infinity;
   function openContextMenu(e: MouseEvent) {
     const target = e.target instanceof Element ? e.target : undefined;
     const toolbar = target?.closest("[data-toolbar]");
@@ -1385,27 +2275,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
     e.preventDefault();
     finishWriting();
-    const nodeId = nodeElement?.dataset.nodeId;
+    // The keyboard menu key has no pointer; it opens the selected idea's menu
+    // beside the idea instead of clearing the selection.
+    const fromKeyboard =
+      !nodeElement && selectedId() && performance.now() - contextKeyAt < 500;
+    const nodeId = fromKeyboard ? selectedId() : nodeElement?.dataset.nodeId;
     setSelectedId(nodeId);
+    const anchor = fromKeyboard
+      ? canvas
+          .querySelector(`[data-node-id="${CSS.escape(nodeId ?? "")}"]`)
+          ?.getBoundingClientRect()
+      : undefined;
+    const clientX = anchor ? anchor.right : e.clientX;
+    const clientY = anchor ? anchor.bottom : e.clientY;
 
     const bounds = canvas.getBoundingClientRect();
     const rootPosition = nodeId
       ? undefined
       : {
           x:
-            (e.clientX -
-              bounds.left -
-              bounds.width / 2 -
-              left() +
-              canvas.scrollLeft) /
-            zoom(),
+            (clientX - bounds.left - bounds.width / 2 - left()) / zoom() +
+            viewOrigin().x,
           y:
-            (e.clientY -
-              bounds.top -
-              bounds.height / 2 -
-              top() +
-              canvas.scrollTop) /
-            zoom(),
+            (clientY - bounds.top - bounds.height / 2 - top()) / zoom() +
+            viewOrigin().y,
         };
 
     const menuWidth = 208;
@@ -1415,8 +2308,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         : 104
       : 56;
     setContextMenu({
-      x: Math.max(8, Math.min(e.clientX, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(e.clientY, window.innerHeight - menuHeight - 8)),
+      x: Math.max(8, Math.min(clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(clientY, window.innerHeight - menuHeight - 8)),
       nodeId,
       rootPosition,
     });
@@ -1424,6 +2317,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   function add(kind: "child" | "sibling" | "root", position?: NodePosition) {
     finishWriting();
+    const current = selectedId();
+    if (kind === "child" && current && depthOf(current) >= MAX_DEPTH)
+      return tooDeep();
+    // Siblings and new roots of a focused branch would appear outside the view.
+    if (
+      focusId() &&
+      (kind === "root" || selectedId() === focusId()) &&
+      kind !== "child"
+    ) {
+      showNotice({
+        message: "Leave focus to add ideas beside this branch",
+        action: { label: "Leave focus", run: exitFocus },
+      });
+      return;
+    }
     const init = { text: "New idea", ...(position && { position }) };
     const id = selectedId();
     const anchorId =
@@ -1448,13 +2356,141 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     });
   }
 
+  const nodeLabel = (id: string) =>
+    truncate(view().text(id).trim() || "New idea", 32);
+  const childrenOf = (parent: string | undefined) =>
+    parent ? (findNode(forest(), parent)?.next ?? []) : forest();
+  // Manual offsets are relative to the old surroundings, so a branch that
+  // changes parent returns to automatic placement.
+  const placedIds = (id: string) =>
+    [...branchIds(forest(), id)].filter(
+      (key) => findNode(forest(), key)?.position,
+    );
+
+  function moveBranch(id: string, target: DropTarget) {
+    if (blockedByFocus(id, "move")) return;
+    const parent =
+      target.kind === "inside" ? target.id : details().get(target.id)?.parent;
+    // In branch focus a move may only land inside the focused branch.
+    if (focusId() && !(parent && inFocus(parent))) {
+      showNotice({
+        message: "Leave focus to move ideas out of this branch",
+        action: { label: "Leave focus", run: exitFocus },
+      });
+      return;
+    }
+    if ((parent ? depthOf(parent) : 0) + branchHeight(id) > MAX_DEPTH)
+      return tooDeep();
+    const siblings = childrenOf(parent).filter((node) => node.id !== id);
+    const index =
+      target.kind === "inside"
+        ? siblings.length
+        : siblings.findIndex((node) => node.id === target.id) +
+          (target.kind === "after" ? 1 : 0);
+    const placed = placedIds(id);
+    const moved = command((doc) => {
+      const changed = moveNode(doc, id, parent ?? null, index);
+      return clearPositions(doc, placed) || changed;
+    });
+    if (!moved) return;
+    setSelectedId(id);
+    showNotice({
+      message: parent
+        ? `Moved “${nodeLabel(id)}” under “${nodeLabel(parent)}”`
+        : `Moved “${nodeLabel(id)}” to the top level`,
+      action: { label: "Undo", run: undo },
+    });
+  }
+
+  // Whether an idea is the focused branch's root or inside it.
+  function inFocus(id: string) {
+    const focus = focusId();
+    if (!focus) return true;
+    for (let at: string | undefined = id; at; at = details().get(at)?.parent)
+      if (at === focus) return true;
+    return false;
+  }
+
+  // The focused branch's root anchors the view; moving it would take the
+  // branch somewhere the view does not show.
+  function blockedByFocus(id: string, action: "move") {
+    if (id !== focusId()) return false;
+    showNotice({
+      message: `Leave focus to ${action} this branch`,
+      action: { label: "Leave focus", run: exitFocus },
+    });
+    return true;
+  }
+
+  // Ctrl+Right: become the last child of the previous sibling.
+  function indentSelected() {
+    const id = selectedId();
+    if (!id) return;
+    const siblings = childrenOf(details().get(id)?.parent);
+    const previous = siblings[siblings.findIndex((node) => node.id === id) - 1];
+    if (previous) moveBranch(id, { kind: "inside", id: previous.id });
+  }
+
+  // Ctrl+Left: become the sibling just after the current parent.
+  function outdentSelected() {
+    const id = selectedId();
+    const parent = id && details().get(id)?.parent;
+    if (id && parent) moveBranch(id, { kind: "after", id: parent });
+  }
+
+  // Wraps the selected branch in a new parent at the same place.
+  function insertParent() {
+    const id = selectedId();
+    if (!id) return;
+    if (depthOf(id) + branchHeight(id) > MAX_DEPTH) return tooDeep();
+    if (id === focusId()) {
+      showNotice({
+        message: "Leave focus to add a parent above this branch",
+        action: { label: "Leave focus", run: exitFocus },
+      });
+      return;
+    }
+    finishWriting();
+    const parent = details().get(id)?.parent;
+    const index = childrenOf(parent).findIndex((node) => node.id === id);
+    const color = findNode(forest(), id)?.color;
+    const placed = placedIds(id);
+    const created = command((doc) => {
+      const wrapper = createNodeAt(doc, parent ?? null, index, {
+        text: "New idea",
+        color,
+      });
+      moveNode(doc, id, wrapper, 0);
+      clearPositions(doc, placed);
+      return wrapper;
+    });
+    if (created) write(created);
+  }
+
+  // Selection moves to the next sibling, else the previous one, else the
+  // parent, so keyboard deletion can continue without reaching for the mouse.
   function removeSelected() {
     const id = selectedId();
     if (!id) return;
     finishWriting();
-    command((doc) => deleteSubtree(doc, id));
-    setSelectedId(undefined);
+    const parent = details().get(id)?.parent;
+    const siblings = parent
+      ? (findNode(visibleForest(), parent)?.next ?? [])
+      : visibleForest();
+    const index = siblings.findIndex((node) => node.id === id);
+    const nextId = siblings[index + 1]?.id ?? siblings[index - 1]?.id ?? parent;
+    const text = view().text(id).trim() || "New idea";
+    const removed = 1 + (details().get(id)?.descendants ?? 0);
+    if (!command((doc) => deleteSubtree(doc, id))) return;
+    setSelectedId(nextId);
     setColorScope("node");
+    showNotice({
+      message:
+        removed === 1
+          ? `Deleted “${truncate(text, 32)}”`
+          : `Deleted “${truncate(text, 32)}” and ${removed - 1} more`,
+      action: { label: "Undo", run: undo },
+    });
     canvas.focus({ preventScroll: true });
   }
 
@@ -1464,21 +2500,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     command((doc) => setNodeColor(doc, id, color, colorScope() === "branch"));
   }
 
+  // Pointer zoom keeps the point under the pointer still. Button and keyboard
+  // zoom keep the selected node still when it is visible, else the center.
   function changeZoom(value: number, clientX?: number, clientY?: number) {
-    const next = Math.min(2.5, Math.max(0.25, value));
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value));
     const bounds = canvas.getBoundingClientRect();
-    const x =
-      (clientX ?? bounds.left + bounds.width / 2) -
-      bounds.left -
-      bounds.width / 2;
-    const y =
-      (clientY ?? bounds.top + bounds.height / 2) -
-      bounds.top -
-      bounds.height / 2;
+    let x = 0;
+    let y = 0;
+    if (clientX !== undefined && clientY !== undefined) {
+      x = clientX - bounds.left - bounds.width / 2;
+      y = clientY - bounds.top - bounds.height / 2;
+    } else {
+      const node = positionedNodes().get(selectedId() ?? "");
+      if (node) {
+        const origin = viewOrigin();
+        const nodeX = left() + zoom() * (node.x + node.width / 2 - origin.x);
+        const nodeY = top() + zoom() * (node.y + node.height / 2 - origin.y);
+        if (
+          Math.abs(nodeX) < bounds.width / 2 &&
+          Math.abs(nodeY) < bounds.height / 2
+        ) {
+          x = nodeX;
+          y = nodeY;
+        }
+      }
+    }
     const ratio = next / zoom();
-    setLeft(x - (x - left()) * ratio);
-    setTop(y - (y - top()) * ratio);
-    setZoom(next);
+    const target = {
+      left: x - (x - left()) * ratio,
+      top: y - (y - top()) * ratio,
+      zoom: next,
+    };
+    if (clientX === undefined) moveView(target);
+    else
+      batch(() => {
+        setLeft(target.left);
+        setTop(target.top);
+        setZoom(next);
+      });
   }
 
   function startPointer(e: PointerEvent, nodeId?: string) {
@@ -1490,6 +2549,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       (nodeId && writing() && selectedId() === nodeId)
     )
       return;
+    // Working on the map ends an open search, keeping the result in view.
+    if (searchOpen()) closeSearch(true);
     suppressClick = false;
     if (nodeId) {
       finishWriting();
@@ -1524,9 +2585,29 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (!drag() && Math.hypot(dx, dy) < 6) return;
       canvas.setPointerCapture(e.pointerId);
       suppressClick = true;
-      setDrag({
-        id: pointer.nodeId,
-        delta: { x: dx / pointer.zoom, y: dy / pointer.zoom },
+      const id = pointer.nodeId;
+      const bounds = canvas.getBoundingClientRect();
+      const origin = viewOrigin();
+      batch(() => {
+        setDrag({
+          id,
+          delta: { x: dx / pointer!.zoom, y: dy / pointer!.zoom },
+        });
+        setDropTarget(
+          dropTargetAt(
+            baseLayout().nodes,
+            {
+              x:
+                (e.clientX - bounds.left - bounds.width / 2 - left()) / zoom() +
+                origin.x,
+              y:
+                (e.clientY - bounds.top - bounds.height / 2 - top()) / zoom() +
+                origin.y,
+            },
+            branchIds(forest(), id),
+          ),
+        );
+        setDragPointer({ x: e.clientX, y: e.clientY });
       });
     } else {
       setLeft(pointer.left + dx);
@@ -1541,9 +2622,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (commit && drag()) {
       movePointer(e);
       const { id, delta } = drag() as { id: string; delta: NodePosition };
+      const target = dropTarget();
       batch(() => {
-        command((doc) => translateSubtree(doc, id, basePositions(), delta));
+        if (target) moveBranch(id, target);
+        else
+          command((doc) => translateSubtree(doc, id, basePositions(), delta));
         setDrag(undefined);
+        setDropTarget(undefined);
       });
     }
     cancelPointer();
@@ -1595,7 +2680,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     window.addEventListener("beforeunload", beforeUnload);
     onCleanup(() => window.removeEventListener("beforeunload", beforeUnload));
     const keydown = (e: KeyboardEvent) => {
-      if (showPreferences()) return;
+      if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
+        contextKeyAt = performance.now();
+      if (showPreferences() || showHelp() || searchOpen()) return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -1612,15 +2699,82 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }
         return;
       }
+      // Escape steps back one level: a drag, then the selection, then focus.
       if (e.key === "Escape") {
         e.preventDefault();
-        cancelPointer();
-        setSelectedId(undefined);
-        setColorScope("node");
+        if (pointer) cancelPointer();
+        else if (selectedId()) {
+          setSelectedId(undefined);
+          setColorScope("node");
+        } else if (focusId()) exitFocus();
         canvas.focus({ preventScroll: true });
         return;
       }
       if (pointer) return;
+      // With an idea selected every printable key types into it, so these
+      // single-key shortcuts apply only when nothing is selected.
+      if (
+        e.key === "/" &&
+        !selectedId() &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        openSearch();
+        return;
+      }
+      if (
+        e.key === "?" &&
+        !selectedId() &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        setShowHelp((open) => !open);
+        return;
+      }
+      // Letter commands use Option/Alt so plain typing always edits the idea.
+      const option =
+        e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.repeat;
+      if (option && matchesLetter(e, "o")) {
+        e.preventDefault();
+        setOutlineOpen((open) => !open);
+        return;
+      }
+      if (option && matchesLetter(e, "n")) {
+        e.preventDefault();
+        toggleNotes();
+        return;
+      }
+      // Physical keys keep view shortcuts working on every keyboard layout.
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.altKey && ["Equal", "NumpadAdd"].includes(e.code)) {
+        e.preventDefault();
+        changeZoom(zoom() * 1.2);
+        return;
+      }
+      if (mod && !e.altKey && ["Minus", "NumpadSubtract"].includes(e.code)) {
+        e.preventDefault();
+        changeZoom(zoom() / 1.2);
+        return;
+      }
+      if (mod && !e.altKey && !e.shiftKey && e.code === "Digit0") {
+        e.preventDefault();
+        changeZoom(1);
+        return;
+      }
+      if (e.altKey && !mod && !e.shiftKey && e.code === "Digit1") {
+        e.preventDefault();
+        fitMap();
+        return;
+      }
+      if (e.altKey && !mod && !e.shiftKey && e.code === "Digit2") {
+        e.preventDefault();
+        fitSelection();
+        return;
+      }
       if (
         !selectedId() &&
         e.key === "Enter" &&
@@ -1639,60 +2793,72 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         (e.target instanceof Element && e.target.closest("[data-toolbar]"))
       )
         return;
+      const id = selectedId() as string;
       const arrow = ARROW_DIRECTIONS.get(e.key);
-      if (
-        e.key.toLowerCase() === "g" &&
-        !e.repeat &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey
-      ) {
+      const plain = !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+      // Option+arrows move ideas everywhere. Ctrl+arrows also work, except that
+      // macOS reserves them for Mission Control.
+      const move = arrow && !e.shiftKey && !e.metaKey && e.altKey !== e.ctrlKey;
+      if (option && matchesLetter(e, "g")) {
         e.preventDefault();
-        toggleCollapse(selectedId() as string);
+        toggleCollapse(id);
+      } else if (option && matchesLetter(e, "f")) {
+        e.preventDefault();
+        if (focusId() === id) exitFocus();
+        else focusBranch();
+      } else if (move) {
+        e.preventDefault();
+        if (arrow === "right") indentSelected();
+        else if (arrow === "left") outdentSelected();
+        else if (!blockedByFocus(id, "move"))
+          command((doc) => reorderNode(doc, id, arrow === "up" ? -1 : 1));
       } else if (
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        ((e.key === "Delete" && !e.metaKey) ||
-          (e.key === "Backspace" && e.metaKey))
+        (plain && (e.key === "Delete" || e.key === "Backspace")) ||
+        (e.metaKey &&
+          !e.shiftKey &&
+          !e.ctrlKey &&
+          !e.altKey &&
+          e.key === "Backspace")
       ) {
         e.preventDefault();
         removeSelected();
-      } else if (
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
-        !e.metaKey &&
-        (e.key === "Tab" || e.key === "Enter")
-      ) {
+      } else if (plain && e.key === "Tab") {
         e.preventDefault();
-        add(e.key === "Tab" ? "child" : "sibling");
-      } else if (
-        e.ctrlKey &&
-        !e.shiftKey &&
-        !e.altKey &&
-        !e.metaKey &&
-        (e.key === "ArrowUp" || e.key === "ArrowDown")
-      ) {
+        add("child");
+      } else if (plain && e.key === "Enter") {
         e.preventDefault();
-        const id = selectedId() as string;
-        command((doc) => reorderNode(doc, id, e.key === "ArrowUp" ? -1 : 1));
+        // A central idea has no siblings to speak of; Enter grows the map.
+        add(details().get(id)?.parent ? "sibling" : "child");
       } else if (
-        arrow &&
-        !e.shiftKey &&
+        e.key === "Tab" &&
+        e.shiftKey &&
         !e.ctrlKey &&
         !e.altKey &&
         !e.metaKey
       ) {
         e.preventDefault();
-        const target = navigationTarget(visibleForest(), selectedId()!, arrow);
+        insertParent();
+      } else if (arrow && plain) {
+        e.preventDefault();
+        const target =
+          navigationTarget(visibleForest(), id, arrow) ?? nearbyIdea(id, arrow);
         if (target) {
           setColorScope("node");
           setSelectedId(target);
         }
-      } else if (e.key === "F2") {
+      } else if (e.key === "F2" || (plain && e.key === " ")) {
         e.preventDefault();
-        write(selectedId()!);
+        write(id);
+      } else if (
+        // One character, including emoji outside the Basic Multilingual Plane.
+        [...e.key].length === 1 &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey
+      ) {
+        // Typing replaces the idea's text: writing starts before the key's
+        // default action, so the character lands in the selected editor.
+        write(id);
       }
     };
     const wheel = (e: WheelEvent) => {
@@ -1702,8 +2868,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       )
         return;
       e.preventDefault();
-      if (!pointer)
-        changeZoom(zoom() * Math.exp(-e.deltaY * 0.002), e.clientX, e.clientY);
+      if (pointer) return;
+      const unit =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE
+          ? 16
+          : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? canvas.clientHeight
+            : 1;
+      // Trackpad pinches arrive as ctrl+wheel. Plain scrolling pans, matching
+      // two-finger trackpad movement; the preference switches mouse wheels to zoom.
+      if (e.ctrlKey || e.metaKey || wheelMode() === "zoom")
+        changeZoom(
+          // Clamped so a mouse-wheel notch and a pinch both zoom smoothly.
+          zoom() *
+            Math.exp(-Math.max(-30, Math.min(30, e.deltaY * unit)) * 0.01),
+          e.clientX,
+          e.clientY,
+        );
+      else
+        batch(() => {
+          setLeft(
+            left() - (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit,
+          );
+          setTop(top() - (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * unit);
+        });
     };
     const saveShortcut = (event: KeyboardEvent | null) => {
       if (
@@ -1732,7 +2920,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const target = event.target;
       const textEditor =
         target instanceof Element &&
-        target.matches('textarea[aria-label="Node text"]');
+        target.matches(
+          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"]',
+        );
       if (
         target instanceof Element &&
         target.closest("input, textarea, [contenteditable=true]") &&
@@ -1746,41 +2936,56 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         manager.finishGroup();
         if (action === "undo") manager.undo();
         else manager.redo();
+        // If the restored state is not an edit, keep keys working on the map.
+        queueMicrotask(() => {
+          if (!writing() && document.activeElement === document.body)
+            canvas.focus({ preventScroll: true });
+        });
       } else if (action === "undo") undo();
       else redo();
     };
     // Let the callback decide whether the target accepts text before suppressing
     // the browser's native save dialog.
-    createShortcut(["Control", "S"], saveShortcut, { preventDefault: false });
-    createShortcut(["Meta", "S"], saveShortcut, { preventDefault: false });
-    createShortcut(
-      ["Control", "Z"],
-      (event) => historyShortcut(event, "undo"),
-      { preventDefault: false },
-    );
-    createShortcut(["Meta", "Z"], (event) => historyShortcut(event, "undo"), {
-      preventDefault: false,
-    });
-    createShortcut(
-      ["Control", "Shift", "Z"],
-      (event) => historyShortcut(event, "redo"),
-      { preventDefault: false },
-    );
-    createShortcut(
-      ["Meta", "Shift", "Z"],
-      (event) => historyShortcut(event, "redo"),
-      { preventDefault: false },
-    );
-    createShortcut(
-      ["Control", "Y"],
-      (event) => historyShortcut(event, "redo"),
-      { preventDefault: false },
-    );
-    createShortcut(["Meta", "Y"], (event) => historyShortcut(event, "redo"), {
-      preventDefault: false,
-    });
+    const shortcuts = (event: KeyboardEvent) => {
+      // A modal dialog owns the keyboard; map shortcuts would act behind it.
+      if (showPreferences() || showHelp()) return;
+      // F6 moves between the canvas and the toolbars from anywhere, including
+      // text fields, without tabbing through the map (Tab adds ideas there).
+      if (
+        event.key === "F6" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        finishWriting();
+        cycleRegions(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (matchesLetter(event, "f") && !event.shiftKey) {
+        if (!storageReady() || showPreferences()) return;
+        event.preventDefault();
+        openSearch();
+        return;
+      }
+      if (matchesLetter(event, "s") && !event.shiftKey) saveShortcut(event);
+      else if (matchesLetter(event, "z"))
+        historyShortcut(event, event.shiftKey ? "redo" : "undo");
+      else if (matchesLetter(event, "y") && !event.shiftKey)
+        historyShortcut(event, "redo");
+    };
+    window.addEventListener("keydown", shortcuts);
+    onCleanup(() => window.removeEventListener("keydown", shortcuts));
     window.addEventListener("keydown", keydown);
     const dismissContextMenu = (e: PointerEvent) => {
+      // Menus close on any press outside them, like native menus.
+      if (
+        menuOpen() &&
+        e.target instanceof Element &&
+        !e.target.closest('[aria-label="Project menu"]')
+      )
+        setMenuOpen(false);
       if (
         !(e.target instanceof Element) ||
         !e.target.closest("[data-context-menu]")
@@ -1790,6 +2995,106 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     window.addEventListener("pointerdown", dismissContextMenu);
     window.addEventListener("pointerup", stopOutside);
     canvas.addEventListener("wheel", wheel, { passive: false });
+    const canvasClipboard = (e: ClipboardEvent) =>
+      storageReady() &&
+      !writing() &&
+      !showPreferences() &&
+      !showHelp() &&
+      !searchOpen() &&
+      !(
+        e.target instanceof Element &&
+        e.target.closest("input, textarea, [contenteditable=true], dialog")
+      );
+    let lastCopy: { text: string; entry: OutlineEntry } | undefined;
+    const copyBranch = (e: ClipboardEvent) => {
+      const id = selectedId();
+      const node = id && findNode(forest(), id);
+      if (!node || !canvasClipboard(e) || !e.clipboardData) return;
+      e.preventDefault();
+      const text = branchOutline(node, (key) => view().text(key));
+      const entry = branchEntry(node, (key) => view().text(key));
+      e.clipboardData.setData("text/plain", text);
+      e.clipboardData.setData(BRANCH_MIME, JSON.stringify(entry));
+      // Some browsers drop custom clipboard types; the same text pasted back
+      // still restores notes and colors.
+      lastCopy = { text, entry };
+      if (e.type === "cut") removeSelected();
+      else
+        showNotice({
+          message: `Copied “${nodeLabel(node.id)}”${node.next?.length ? " with its branch" : ""}`,
+        });
+    };
+    const paste = (e: ClipboardEvent) => {
+      if (!canvasClipboard(e) || !e.clipboardData) return;
+      const text = e.clipboardData.getData("text/plain");
+      const rich =
+        parseBranchEntry(e.clipboardData.getData(BRANCH_MIME)) ??
+        (lastCopy?.text === text ? lastCopy.entry : undefined);
+      const entries = rich ? [rich] : parseOutline(text);
+      if (!entries.length) return;
+      e.preventDefault();
+      pasteOutline(entries);
+    };
+    window.addEventListener("copy", copyBranch);
+    window.addEventListener("cut", copyBranch);
+    window.addEventListener("paste", paste);
+    onCleanup(() => {
+      window.removeEventListener("copy", copyBranch);
+      window.removeEventListener("cut", copyBranch);
+      window.removeEventListener("paste", paste);
+    });
+    // Two fingers pinch to zoom and move together to pan. A pinch replaces
+    // any one-finger pan or drag already in progress.
+    const touches = new Map<number, { x: number; y: number }>();
+    let pinch:
+      | { distance: number; x: number; y: number; zoom: number }
+      | undefined;
+    const pinchFrame = () => {
+      const [a, b] = [...touches.values()];
+      return {
+        distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+      };
+    };
+    const touchDown = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        cancelPointer();
+        pinch = { ...pinchFrame(), zoom: zoom() };
+      }
+    };
+    const touchMove = (e: PointerEvent) => {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (!pinch || touches.size !== 2) return;
+      const next = pinchFrame();
+      batch(() => {
+        setLeft(left() + next.x - pinch!.x);
+        setTop(top() + next.y - pinch!.y);
+        changeZoom(
+          (pinch!.zoom * next.distance) / pinch!.distance,
+          next.x,
+          next.y,
+        );
+      });
+      pinch = { ...pinch, x: next.x, y: next.y };
+    };
+    const touchUp = (e: PointerEvent) => {
+      touches.delete(e.pointerId);
+      if (touches.size < 2) pinch = undefined;
+    };
+    canvas.addEventListener("pointerdown", touchDown, { capture: true });
+    window.addEventListener("pointermove", touchMove);
+    window.addEventListener("pointerup", touchUp);
+    window.addEventListener("pointercancel", touchUp);
+    onCleanup(() => {
+      canvas.removeEventListener("pointerdown", touchDown, { capture: true });
+      window.removeEventListener("pointermove", touchMove);
+      window.removeEventListener("pointerup", touchUp);
+      window.removeEventListener("pointercancel", touchUp);
+    });
     function stopOutside(e: PointerEvent) {
       stopPointer(e, true);
     }
@@ -1804,9 +3109,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   createEffect(() => {
     if (!contextMenu()) return;
     queueMicrotask(() => {
-      contextMenuElement
-        ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
-        ?.focus();
+      const element = contextMenuElement;
+      if (!element) return;
+      // Keep the whole menu on screen whatever its length.
+      const bounds = element.getBoundingClientRect();
+      const shiftY = Math.min(0, window.innerHeight - 8 - bounds.bottom);
+      const shiftX = Math.min(0, window.innerWidth - 8 - bounds.right);
+      if (shiftY || shiftX)
+        setContextMenu(
+          (menu) =>
+            menu && {
+              ...menu,
+              x: Math.max(8, menu.x + shiftX),
+              y: Math.max(menu.above ? bounds.height + 8 : 8, menu.y + shiftY),
+            },
+        );
+      element.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     });
   });
 
@@ -1824,9 +3142,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       onPointerMove={movePointer}
       onPointerUp={(e) => stopPointer(e, true)}
       onPointerCancel={(e) => stopPointer(e, false)}
-      onLostPointerCapture={(e) => stopPointer(e, false)}
+      onLostPointerCapture={(e) => {
+        // Touch gives the idea under the finger an implicit capture; moving it
+        // to the canvas when a drag starts is not a cancellation.
+        if (e.target === canvas) stopPointer(e, false);
+      }}
       onContextMenu={openContextMenu}
-      class="overflow-hidden w-screen h-screen bg-stone-200 text-stone-900 relative touch-none select-none outline-none"
+      class="map-canvas overflow-hidden w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
       <ProjectPreferences
@@ -1840,140 +3162,366 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
       />
-      <div
-        data-no-pan
-        data-toolbar
-        class="map-toolbar absolute top-4 left-4 z-20 flex w-64 max-w-[calc(100%-2rem)] flex-col gap-1 cursor-default"
-      >
-        <label class="flex flex-col gap-1">
-          <span class="px-2 pt-1 text-xs font-medium text-stone-500">
-            Project name
-          </span>
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-14.75rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
+        <section
+          data-no-pan
+          data-toolbar
+          aria-label="Project"
+          class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
+        >
+          <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
           <input
             type="text"
             required
-            class="min-w-0 rounded-md px-2 py-1 text-base select-text cursor-text outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+            aria-label="Project name"
+            class="project-name"
+            style={{
+              width: `${Math.min(28, Math.max(6, (projectNameDraft() ?? view().name()).length + 1))}ch`,
+            }}
             value={projectNameDraft() ?? view().name()}
             onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
             onBlur={finishProjectName}
             onKeyDown={(e) => {
-              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Enter" || e.key === "Escape")
+                e.currentTarget.blur();
             }}
           />
-        </label>
-        <fieldset
-          class="flex flex-wrap items-center text-sm"
-          aria-label="Project actions"
-          disabled={fileBusy()}
-        >
           <button
             type="button"
-            class="map-control"
-            disabled={!storageReady()}
-            onClick={() => void createNewProject()}
-          >
-            New
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            disabled={!storageReady()}
-            onClick={save}
-          >
-            Save
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            aria-label="Undo"
-            disabled={!storageReady() || !canUndo()}
-            onClick={undo}
-          >
-            Undo
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            aria-label="Redo"
-            disabled={!storageReady() || !canRedo()}
-            onClick={redo}
-          >
-            Redo
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            aria-expanded={showLoad()}
-            aria-controls="saved-projects"
-            disabled={!storageReady()}
-            onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
-          >
-            Load
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            disabled={!storageReady()}
-            onClick={() => void importProjectFromFile()}
-          >
-            Import
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            onClick={() => void exportCurrentProject()}
-          >
-            Export
-          </button>
-          <button
-            type="button"
-            class="map-control"
-            disabled={!storageReady()}
-            aria-haspopup="dialog"
+            class="icon-button"
+            aria-label="Project menu"
+            title="Project menu"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen()}
             onClick={() => {
               finishWriting();
               finishProjectName();
-              setShowPreferences(true);
+              setShowLoad(false);
+              setMenuOpen((open) => !open);
             }}
           >
-            Project preferences
+            <ChevronDownIcon />
           </button>
-          <span role="status" class="ml-auto px-2 text-xs text-stone-500">
-            {!view().saving().local
-              ? "Local saving off"
-              : saveStatus() === "saving"
-                ? "Saving…"
-                : saveStatus() === "done"
-                  ? "Saved locally"
+          <span class="mx-1 h-5 w-px shrink-0 bg-stone-200" />
+          <fieldset
+            aria-label="Project actions"
+            class="flex min-w-0 items-center gap-2 pr-2 text-xs text-stone-500"
+          >
+            <span
+              role="status"
+              class="save-state"
+              // With cloud saving healthy, one status is enough; the local one
+              // stays available to assistive technology.
+              classList={{
+                "sr-only":
+                  view().saving().local &&
+                  view().saving().cloud &&
+                  saveStatus() !== "error" &&
+                  ["saved", "saving", "offline"].includes(
+                    cloudStatus()?.status ?? "",
+                  ),
+              }}
+              data-tone={
+                !view().saving().local
+                  ? "muted"
+                  : saveStatus() === "error"
+                    ? "error"
+                    : saveStatus() === "saving"
+                      ? "busy"
+                      : "ok"
+              }
+            >
+              {!view().saving().local
+                ? "Local saving off"
+                : saveStatus() === "saving"
+                  ? "Saving…"
                   : saveStatus() === "error"
                     ? "Save failed"
-                    : ""}
-          </span>
-        </fieldset>
-        <Show when={cloudStatus()}>
-          {(status) => (
-            <div class="flex items-center gap-1 px-2 py-1 text-xs text-stone-500">
-              <span role="status">
-                {status().status === "disabled"
-                  ? "Cloud saving off"
-                  : status().status === "deleting"
-                    ? "Deleting cloud copy…"
-                    : status().status === "saved"
-                      ? "Saved to cloud"
-                      : status().status === "saving"
-                        ? "Saving to cloud…"
-                        : status().status === "offline"
-                          ? "Offline · cloud save pending"
-                          : "message" in status()
-                            ? (status() as { message: string }).message
-                            : ""}
-              </span>
+                    : "Saved locally"}
+            </span>
+            <Show when={cloudStatus()}>
+              {(status) => (
+                <span
+                  role="status"
+                  class="save-state"
+                  data-tone={
+                    status().status === "saved"
+                      ? "ok"
+                      : status().status === "saving" ||
+                          status().status === "deleting"
+                        ? "busy"
+                        : status().status === "disabled"
+                          ? "muted"
+                          : "warn"
+                  }
+                >
+                  {status().status === "disabled"
+                    ? "Cloud saving off"
+                    : status().status === "deleting"
+                      ? "Deleting cloud copy…"
+                      : status().status === "saved"
+                        ? "Saved to cloud"
+                        : status().status === "saving"
+                          ? "Saving to cloud…"
+                          : status().status === "offline"
+                            ? "Offline · cloud save pending"
+                            : "message" in status()
+                              ? (status() as { message: string }).message
+                              : ""}
+                </span>
+              )}
+            </Show>
+          </fieldset>
+        </section>
+        <Show when={menuOpen()}>
+          <div
+            ref={projectMenu}
+            data-no-pan
+            data-toolbar
+            role="menu"
+            aria-label="Project menu"
+            class="map-toolbar menu-panel pointer-events-auto w-72 cursor-default"
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                closeProjectMenu();
+              } else menuArrowKeys(e);
+            }}
+            onFocusOut={(e) => {
+              // Tabbing out of the menu closes it, like a native menu.
+              const next = e.relatedTarget;
+              if (
+                next instanceof Element &&
+                !e.currentTarget.contains(next) &&
+                !next.closest('[aria-label="Project menu"]')
+              )
+                setMenuOpen(false);
+            }}
+          >
+            <fieldset disabled={fileBusy()} class="contents">
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                disabled={!storageReady()}
+                onClick={() => {
+                  setMenuOpen(false);
+                  createNewProject();
+                }}
+              >
+                New map
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                aria-expanded={showLoad()}
+                aria-controls="saved-projects"
+                disabled={!storageReady()}
+                onClick={() =>
+                  showLoad() ? setShowLoad(false) : void openLoad()
+                }
+              >
+                Open map…
+                <ChevronRightIcon
+                  class={`ml-auto size-4 transition-transform ${showLoad() ? "rotate-90" : ""}`}
+                />
+              </button>
+              <Show when={showLoad()}>
+                <Show when={savedProjects().length > 6}>
+                  <input
+                    type="search"
+                    aria-label="Filter maps"
+                    placeholder="Filter maps"
+                    class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    value={mapFilter()}
+                    onInput={(e) => setMapFilter(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      // Arrow keys stay in the field; Escape clears, then closes.
+                      if (e.key !== "Escape") {
+                        e.stopPropagation();
+                        return;
+                      }
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (mapFilter()) setMapFilter("");
+                      else closeProjectMenu();
+                    }}
+                  />
+                </Show>
+                <ul
+                  id="saved-projects"
+                  aria-label="Available projects"
+                  class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
+                >
+                  <For
+                    each={listedProjects()}
+                    fallback={
+                      <li class="px-2 py-2 text-stone-500">
+                        {mapFilter().trim()
+                          ? "No maps match."
+                          : "No saved projects yet."}
+                      </li>
+                    }
+                  >
+                    {(project) => (
+                      <li>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          class="menu-item"
+                          aria-label={`${project.name} · ${project.id.slice(0, 8)}`}
+                          aria-current={
+                            project.id === doc().id ? "true" : undefined
+                          }
+                          onClick={() => {
+                            setMenuOpen(false);
+                            load(project.id);
+                          }}
+                        >
+                          <span class="min-w-0 flex-1">
+                            <span class="block truncate">{project.name}</span>
+                            <span class="block text-[11px] font-normal text-stone-500">
+                              {project.id === doc().id
+                                ? "Open now"
+                                : `Created ${formatDate(project.createdAt)}`}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                disabled={!storageReady()}
+                onClick={() => {
+                  setMenuOpen(false);
+                  importProjectFromFile();
+                }}
+              >
+                Import backup…
+              </button>
+              <div class="menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                disabled={!storageReady()}
+                onClick={() => {
+                  setMenuOpen(false);
+                  save();
+                }}
+              >
+                Save now
+                <kbd class="ml-auto">{MOD_LABEL}S</kbd>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  exportCurrentProject();
+                }}
+              >
+                Export backup (.json)
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                onClick={() => {
+                  setMenuOpen(false);
+                  void exportMarkdown();
+                }}
+              >
+                Export outline (.md)
+              </button>
+              <div class="menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                disabled={!storageReady()}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  finishWriting();
+                  finishProjectName();
+                  setShowPreferences(true);
+                }}
+              >
+                Project preferences…
+              </button>
+            </fieldset>
+          </div>
+        </Show>
+        <Show
+          when={
+            storageMessage() ||
+            recoveryPending() ||
+            !storageReady() ||
+            saveStatus() === "error" ||
+            memoryOnly() ||
+            ["retrying", "blocked", "auth"].includes(
+              cloudStatus()?.status ?? "",
+            )
+          }
+        >
+          <div
+            data-no-pan
+            data-toolbar
+            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2 text-xs text-stone-600 cursor-default"
+          >
+            <Show when={memoryOnly()}>
+              <p role="status" class="text-amber-800">
+                Memory only · Export before closing this tab.
+              </p>
+            </Show>
+            <p role="status" class="empty:hidden">
+              {storageMessage()}
+            </p>
+            <Show when={recoveryPending()}>
+              <p role="status">
+                Edits from the previous account could not be saved. They remain
+                in memory; retry before leaving.
+              </p>
+            </Show>
+            <div class="flex flex-wrap gap-1 empty:hidden">
               <Show
-                when={["retrying", "blocked", "auth"].includes(status().status)}
+                when={
+                  recoveryPending() ||
+                  !storageReady() ||
+                  saveStatus() === "error"
+                }
               >
                 <button
                   type="button"
-                  class="map-control"
+                  class="map-control text-xs"
+                  onClick={() =>
+                    void retryLocalSaving().catch(() =>
+                      setStorageMessage(
+                        "Browser storage is still unavailable. Free up space and retry.",
+                      ),
+                    )
+                  }
+                >
+                  Retry local saving
+                </button>
+              </Show>
+              <Show
+                when={["retrying", "blocked", "auth"].includes(
+                  cloudStatus()?.status ?? "",
+                )}
+              >
+                <button
+                  type="button"
+                  class="map-control text-xs"
                   onClick={() => {
                     if (account().status === "expired") void auth.check();
                     else cloud?.retry();
@@ -1983,177 +3531,666 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 </button>
               </Show>
             </div>
-          )}
-        </Show>
-        <Show when={!view().saving().local && !view().saving().cloud}>
-          <p role="status" class="px-2 py-1 text-xs text-amber-800">
-            Memory only · Export before closing this tab.
-          </p>
-        </Show>
-        <Show when={showLoad()}>
-          <div id="saved-projects" class="border-t border-stone-200 pt-2">
-            <p class="px-2 text-xs text-stone-500">Available projects</p>
-            <ul class="max-h-60 overflow-y-auto text-sm">
-              <For
-                each={savedProjects()}
-                fallback={
-                  <li class="px-2 py-2 text-stone-500">
-                    No saved projects yet.
-                  </li>
-                }
-              >
-                {(project) => (
-                  <li>
-                    <button
-                      type="button"
-                      class="map-control w-full text-left whitespace-normal! break-words"
-                      onClick={() => load(project.id)}
-                    >
-                      {project.name} · {project.id.slice(0, 8)}
-                    </button>
-                  </li>
-                )}
-              </For>
-            </ul>
           </div>
         </Show>
-        <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
-          {storageMessage()}
-        </p>
-        <Show when={recoveryPending()}>
-          <p role="status" class="px-2 text-xs text-stone-600">
-            Edits from the previous account could not be saved. They remain in
-            memory; retry before leaving.
-          </p>
-        </Show>
-        <Show
-          when={
-            recoveryPending() || !storageReady() || saveStatus() === "error"
-          }
-        >
-          <button
-            type="button"
-            class="map-control text-xs"
-            onClick={() =>
-              void retryLocalSaving().catch(() =>
-                setStorageMessage(
-                  "Browser storage is still unavailable. Free up space and retry.",
-                ),
-              )
-            }
-          >
-            Retry local saving
-          </button>
-        </Show>
-        <AccountControls
-          state={account()}
-          beforeNavigate={saveBeforeAuth}
-          onRetry={() => void auth.check()}
-          claimCount={claimCount()}
-          claiming={claiming()}
-          claimMessage={claimMessage()}
-          onClaim={() => void addAnonymousProjects()}
-        />
       </div>
-      <Show when={selectedId() && !writing()}>
+      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+        <div class="flex flex-col items-end gap-2 sm:flex-row sm:items-start">
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Editing"
+            class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
+          >
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Search"
+              title={`Search (${MOD_LABEL}F)`}
+              aria-expanded={searchOpen()}
+              disabled={!storageReady()}
+              onClick={() => (searchOpen() ? closeSearch(false) : openSearch())}
+            >
+              <SearchIcon />
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Outline"
+              title={`Outline (${ALT_LABEL}O)`}
+              aria-pressed={outlineOpen()}
+              disabled={!storageReady()}
+              onClick={() => setOutlineOpen((open) => !open)}
+            >
+              <OutlineIcon />
+            </button>
+            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Undo"
+              title={`Undo (${MOD_LABEL}Z)`}
+              disabled={!storageReady() || !canUndo()}
+              onClick={undo}
+            >
+              <UndoIcon />
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Redo"
+              title={`Redo (${MOD_LABEL}⇧Z)`}
+              disabled={!storageReady() || !canRedo()}
+              onClick={redo}
+            >
+              <RedoIcon />
+            </button>
+          </nav>
+          <AccountControls
+            state={account()}
+            beforeNavigate={saveBeforeAuth}
+            onRetry={() => void auth.check()}
+            claiming={claiming()}
+            claimMessage={claimMessage()}
+          />
+        </div>
+        <Show when={searchOpen()}>
+          <search
+            data-no-pan
+            data-toolbar
+            aria-label="Search ideas"
+            class="map-toolbar pointer-events-auto flex w-80 max-w-[calc(100vw-1.5rem)] flex-col cursor-default"
+          >
+            <div class="flex items-center gap-2 px-2">
+              <SearchIcon class="size-4 shrink-0 text-stone-400" />
+              <input
+                ref={searchInput}
+                type="search"
+                aria-label="Search ideas"
+                aria-controls="search-results"
+                aria-activedescendant={
+                  searchResults()[searchIndex()]
+                    ? `search-result-${searchIndex()}`
+                    : undefined
+                }
+                placeholder={
+                  focusId() ? "Search this branch" : "Search this map"
+                }
+                class="search-field min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-500"
+                value={searchQuery()}
+                onInput={(e) => {
+                  batch(() => {
+                    setSearchQuery(e.currentTarget.value);
+                    setSearchIndex(0);
+                  });
+                }}
+                onKeyDown={(e) => {
+                  const count = searchResults().length;
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    closeSearch(false);
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    closeSearch(count > 0);
+                  } else if (
+                    count &&
+                    (e.key === "ArrowDown" || e.key === "ArrowUp")
+                  ) {
+                    e.preventDefault();
+                    setSearchIndex(
+                      (index) =>
+                        (index + (e.key === "ArrowDown" ? 1 : -1) + count) %
+                        count,
+                    );
+                  }
+                }}
+              />
+              <button
+                type="button"
+                class="icon-button -mr-1"
+                aria-label="Close search"
+                title="Close search and return (Esc)"
+                onClick={() => closeSearch(false)}
+              >
+                <CloseIcon class="size-4" />
+              </button>
+            </div>
+            <Show when={searchQuery().trim()}>
+              <div
+                id="search-results"
+                role="listbox"
+                aria-label="Search results"
+                class="max-h-80 overflow-y-auto border-t border-stone-100 p-1"
+              >
+                <For
+                  each={searchResults()}
+                  fallback={
+                    <p class="px-2 py-3 text-center text-xs text-stone-500">
+                      No ideas match “{truncate(searchQuery().trim(), 24)}”
+                    </p>
+                  }
+                >
+                  {(result, index) => (
+                    // biome-ignore lint/a11y/useKeyWithClickEvents: The search field owns keyboard selection through aria-activedescendant.
+                    <div
+                      id={`search-result-${index()}`}
+                      role="option"
+                      tabIndex={-1}
+                      aria-selected={index() === searchIndex()}
+                      class="search-result"
+                      onPointerEnter={() => setSearchIndex(index())}
+                      onClick={() => {
+                        setSearchIndex(index());
+                        closeSearch(true);
+                      }}
+                    >
+                      <span class="block truncate text-sm text-stone-800">
+                        {result.text.slice(0, result.match[0])}
+                        <mark>
+                          {result.text.slice(result.match[0], result.match[1])}
+                        </mark>
+                        {result.text.slice(result.match[1])}
+                      </span>
+                      <Show when={result.path.length}>
+                        <span class="block truncate text-xs text-stone-500">
+                          {/* The nearest parents matter most; earlier ones collapse. */}
+                          {[
+                            ...(result.path.length > 3 ? ["…"] : []),
+                            ...result.path
+                              .slice(-3)
+                              .map((part) => truncate(part, 20)),
+                          ].join(" › ")}
+                        </span>
+                      </Show>
+                    </div>
+                  )}
+                </For>
+              </div>
+              <p class="flex justify-between gap-2 border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
+                <span>
+                  {searchResults().length}
+                  {searchHits().length > SEARCH_LIMIT ? "+" : ""}{" "}
+                  {searchResults().length === 1 ? "match" : "matches"} in{" "}
+                  {focusId() ? "this branch" : "this map"}
+                </span>
+                <span class="keyboard-hint">
+                  ↑↓ preview · Enter go · Esc back
+                </span>
+              </p>
+            </Show>
+          </search>
+        </Show>
+      </div>
+      <Show when={notesOpen()}>
+        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+          <NotesPanel
+            doc={session().doc}
+            id={selectedId()}
+            title={nodeLabel(selectedId() ?? "")}
+            onFocusChange={() => session().undo.finishGroup()}
+            onClose={() => toggleNotes(false)}
+          />
+        </div>
+      </Show>
+      <Show when={outlineOpen()}>
+        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+          <Outline
+            roots={scopeForest()}
+            text={(id) => view().text(id)}
+            selectedId={selectedId()}
+            collapsed={collapsedIds()}
+            onSelect={(id, via) => {
+              finishWriting();
+              setColorScope("node");
+              setSelectedId(id);
+              // On narrow screens the outline covers the map, so picking an idea
+              // by tap returns to the map; arrow keys keep browsing the outline.
+              if (via === "pointer" && canvasSize().width < 640)
+                setOutlineOpen(false);
+            }}
+            onToggle={(id) => toggleCollapse(id, false)}
+            onEdit={write}
+            onClose={() => {
+              setOutlineOpen(false);
+              canvas.focus({ preventScroll: true });
+            }}
+          />
+        </div>
+      </Show>
+      <Show when={claimCount() > 0 && !claimDismissed()}>
         <section
           data-no-pan
           data-toolbar
-          aria-label="Selected node color controls"
-          class="node-color-panel map-toolbar absolute top-4 right-4 z-20 flex flex-col gap-2 cursor-default"
+          aria-label="Maps from before sign-in"
+          class="map-toolbar absolute top-16 left-1/2 z-30 w-[28rem] max-w-[calc(100%-1.5rem)] -translate-x-1/2 p-3 cursor-default"
         >
-          <div class="px-2 pt-1">
-            <p class="text-xs font-medium text-stone-500">Node color</p>
-            <p class="max-w-60 truncate text-sm font-semibold text-stone-800">
-              {selectedText() || "New idea"}
-            </p>
-          </div>
-          <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
-            <legend class="sr-only">Apply color to</legend>
-            <label
-              class="color-scope"
-              classList={{ "color-scope-selected": colorScope() === "node" }}
-            >
-              <input
-                class="sr-only"
-                type="radio"
-                name="node-color-scope"
-                value="node"
-                checked={colorScope() === "node"}
-                onChange={() => setColorScope("node")}
-              />
-              <span>This node</span>
-            </label>
-            <label
-              class="color-scope"
-              classList={{
-                "color-scope-selected": colorScope() === "branch",
-              }}
-            >
-              <input
-                class="sr-only"
-                type="radio"
-                name="node-color-scope"
-                value="branch"
-                checked={colorScope() === "branch"}
-                onChange={() => setColorScope("branch")}
-              />
-              <span>This branch</span>
-            </label>
-          </fieldset>
-          <fieldset class="grid grid-cols-4 gap-1 px-1 pb-1">
-            <legend class="sr-only">
-              Choose a color for{" "}
-              {colorScope() === "node" ? "this node" : "this branch"}
-            </legend>
-            <For each={NODE_COLORS}>
-              {(color) => (
-                <button
-                  type="button"
-                  class="color-choice"
-                  aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
-                  aria-pressed={
-                    (selectedNode()?.color ?? "blue") === color.value
-                  }
-                  title={`${color.label} · ${colorScope() === "node" ? "This node" : "This branch"}`}
-                  onClick={() => colorSelectedNode(color.value)}
-                >
-                  <span
-                    aria-hidden="true"
-                    class={`grid size-8 place-items-center rounded-full border-2 ${color.swatchClass}`}
-                  >
-                    <Show
-                      when={(selectedNode()?.color ?? "blue") === color.value}
-                    >
-                      <svg
-                        viewBox="0 0 20 20"
-                        fill="none"
-                        class="size-4 text-slate-950"
-                        aria-hidden="true"
-                      >
-                        <path
-                          d="m4 10 4 4 8-8"
-                          stroke="currentColor"
-                          stroke-linecap="round"
-                          stroke-linejoin="round"
-                          stroke-width="2.5"
-                        />
-                      </svg>
-                    </Show>
-                  </span>
-                </button>
-              )}
-            </For>
-          </fieldset>
-          <p class="px-2 pb-1 text-xs text-stone-500">
-            {colorScope() === "node"
-              ? "Changes only the selected node."
-              : "Changes this node and all its descendants."}
+          <p class="text-sm font-semibold text-stone-800">
+            Your earlier work is safe
           </p>
+          <p class="mt-0.5 text-xs leading-5 text-stone-600">
+            {claimCount() === 1
+              ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
+              : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
+          </p>
+          <div class="mt-2.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              class="primary-button px-3! py-1.5! text-xs!"
+              disabled={claiming()}
+              onClick={() => void addAnonymousProjects()}
+            >
+              {claiming()
+                ? "Adding projects…"
+                : "Add anonymous projects to this account"}
+            </button>
+            <button
+              type="button"
+              class="map-control text-xs"
+              disabled={claiming()}
+              onClick={() => setClaimDismissed(true)}
+            >
+              Not now
+            </button>
+          </div>
         </section>
       </Show>
+      <Show when={returnView()}>
+        <nav
+          data-no-pan
+          data-toolbar
+          aria-label="Return from search"
+          class="map-toolbar absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
+          classList={{ "top-16": !focusId(), "top-[7.25rem]": !!focusId() }}
+        >
+          <button
+            type="button"
+            class="map-control flex items-center gap-1.5"
+            title="Restore the view and folds from before the search"
+            onClick={() => {
+              const back = returnView();
+              setReturnView(undefined);
+              if (back) restoreView(back);
+              canvas.focus({ preventScroll: true });
+            }}
+          >
+            <ArrowLeftIcon class="size-4" />
+            Back to where you were
+          </button>
+          <button
+            type="button"
+            class="icon-button size-8!"
+            aria-label="Stay here"
+            title="Stay here"
+            onClick={() => setReturnView(undefined)}
+          >
+            <CloseIcon class="size-4" />
+          </button>
+        </nav>
+      </Show>
+      <Show when={focusId()}>
+        <nav
+          data-no-pan
+          data-toolbar
+          aria-label="Branch focus"
+          class="map-toolbar absolute top-16 left-1/2 z-20 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
+        >
+          <button
+            type="button"
+            class="map-control flex items-center gap-1.5"
+            title="Show the whole map (Esc)"
+            onClick={exitFocus}
+          >
+            <ArrowLeftIcon class="size-4" />
+            Whole map
+          </button>
+          <For each={focusPath()}>
+            {(id, index) => (
+              <>
+                <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
+                <Show
+                  when={index() < focusPath().length - 1}
+                  fallback={
+                    <span
+                      aria-current="location"
+                      class="max-w-48 truncate px-2 font-medium text-stone-800"
+                    >
+                      {nodeLabel(id)}
+                    </span>
+                  }
+                >
+                  <button
+                    type="button"
+                    class="map-control max-w-36 truncate"
+                    onClick={() => focusBranch(id)}
+                  >
+                    {nodeLabel(id)}
+                  </button>
+                </Show>
+              </>
+            )}
+          </For>
+        </nav>
+      </Show>
+      {/* The notice keeps its place above the selection toolbar's slot, so the
+          toolbar reappearing (when an edit ends on press) never moves it from
+          under the pointer. */}
+      <div class="pointer-events-none absolute bottom-[8.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center sm:bottom-[4.25rem]">
+        <Show when={notice()}>
+          {(current) => (
+            <div
+              role="status"
+              data-no-pan
+              data-toolbar
+              class="notice pointer-events-auto flex items-center gap-3 cursor-default"
+            >
+              <span class="min-w-0 truncate">{current().message}</span>
+              <Show when={current().action}>
+                {(action) => (
+                  <button
+                    type="button"
+                    class="notice-action"
+                    onClick={() => {
+                      setNotice(undefined);
+                      const undoing = action().run === undo;
+                      action().run();
+                      if (undoing)
+                        showNotice({
+                          message: "Undone",
+                          action: { label: "Redo", run: redo },
+                        });
+                    }}
+                  >
+                    {action().label}
+                  </button>
+                )}
+              </Show>
+            </div>
+          )}
+        </Show>
+      </div>
+      <div class="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-20 flex sm:bottom-3 w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+        <Show when={selectedId() && !writing() && !drag()}>
+          <section
+            data-no-pan
+            data-toolbar
+            aria-label="Selected idea"
+            class="map-toolbar pointer-events-auto relative flex items-center gap-0.5 cursor-default"
+          >
+            <Show when={colorOpen()}>
+              <section
+                aria-label="Selected node color controls"
+                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2"
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setColorOpen(false);
+                    document
+                      .querySelector<HTMLButtonElement>(
+                        'button[aria-label="Color"]',
+                      )
+                      ?.focus();
+                  }
+                }}
+              >
+                <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
+                  <legend class="sr-only">Apply color to</legend>
+                  <label
+                    class="color-scope"
+                    classList={{
+                      "color-scope-selected": colorScope() === "node",
+                    }}
+                  >
+                    <input
+                      class="sr-only"
+                      type="radio"
+                      name="node-color-scope"
+                      value="node"
+                      checked={colorScope() === "node"}
+                      onChange={() => setColorScope("node")}
+                    />
+                    <span>This node</span>
+                  </label>
+                  <label
+                    class="color-scope"
+                    classList={{
+                      "color-scope-selected": colorScope() === "branch",
+                    }}
+                  >
+                    <input
+                      class="sr-only"
+                      type="radio"
+                      name="node-color-scope"
+                      value="branch"
+                      checked={colorScope() === "branch"}
+                      onChange={() => setColorScope("branch")}
+                    />
+                    <span>This branch</span>
+                  </label>
+                </fieldset>
+                <fieldset class="grid grid-cols-4 gap-1 px-1">
+                  <legend class="sr-only">
+                    Choose a color for{" "}
+                    {colorScope() === "node" ? "this node" : "this branch"}
+                  </legend>
+                  <For each={NODE_COLORS}>
+                    {(color) => (
+                      <button
+                        type="button"
+                        class="color-choice"
+                        aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
+                        aria-pressed={
+                          (selectedNode()?.color ?? "blue") === color.value
+                        }
+                        title={`${color.label} · ${colorScope() === "node" ? "This node" : "This branch"}`}
+                        onClick={() => colorSelectedNode(color.value)}
+                      >
+                        <span
+                          aria-hidden="true"
+                          class={`grid size-7 place-items-center rounded-full border-2 ${color.swatchClass}`}
+                        >
+                          <Show
+                            when={
+                              (selectedNode()?.color ?? "blue") === color.value
+                            }
+                          >
+                            <svg
+                              viewBox="0 0 20 20"
+                              fill="none"
+                              class="size-4 text-slate-950"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="m4 10 4 4 8-8"
+                                stroke="currentColor"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2.5"
+                              />
+                            </svg>
+                          </Show>
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </fieldset>
+                <p class="px-2 pb-1 text-xs text-stone-500">
+                  {colorScope() === "node"
+                    ? "Changes only the selected node."
+                    : "Changes this node and all its descendants."}
+                </p>
+              </section>
+            </Show>
+            <button
+              type="button"
+              class="tool-button"
+              title="Add a child idea (Tab)"
+              onClick={() => add("child")}
+            >
+              <ChildIcon />
+              <span class="max-sm:sr-only">Child</span>
+            </button>
+            <button
+              type="button"
+              class="tool-button"
+              title="Add a sibling idea (Enter)"
+              disabled={selectedId() === focusId()}
+              onClick={() => add("sibling")}
+            >
+              <SiblingIcon />
+              <span class="max-sm:sr-only">Sibling</span>
+            </button>
+            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Color"
+              title="Color"
+              aria-expanded={colorOpen()}
+              onClick={() => setColorOpen((open) => !open)}
+            >
+              <span
+                aria-hidden="true"
+                class={`size-4.5 rounded-full border-2 ${(NODE_COLORS.find((color) => color.value === (selectedNode()?.color ?? "blue")) ?? NODE_COLORS[0]).swatchClass}`}
+              />
+            </button>
+            <button
+              type="button"
+              class="icon-button relative"
+              aria-label="Notes"
+              title={`Notes (${ALT_LABEL}N)`}
+              aria-pressed={notesOpen()}
+              onClick={() => toggleNotes()}
+            >
+              <NoteIcon />
+              <Show
+                when={view()
+                  .note(selectedId() ?? "")
+                  .trim()}
+              >
+                <span
+                  aria-hidden="true"
+                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue-600"
+                />
+              </Show>
+            </button>
+            <Show when={details().get(selectedId() ?? "")?.descendants}>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label={
+                  collapsedIds().has(selectedId() ?? "")
+                    ? "Expand children"
+                    : "Collapse children"
+                }
+                title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
+                onClick={() => toggleCollapse(selectedId() as string)}
+              >
+                <Show
+                  when={collapsedIds().has(selectedId() ?? "")}
+                  fallback={<FoldIcon />}
+                >
+                  <UnfoldIcon />
+                </Show>
+              </button>
+              <button
+                type="button"
+                class="icon-button narrow-hide"
+                aria-label={
+                  focusId() === selectedId() ? "Leave focus" : "Focus branch"
+                }
+                title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
+                aria-pressed={focusId() === selectedId()}
+                onClick={() =>
+                  focusId() === selectedId() ? exitFocus() : focusBranch()
+                }
+              >
+                <FocusIcon />
+              </button>
+            </Show>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="More actions"
+              title="More actions"
+              aria-haspopup="menu"
+              onClick={(e) => {
+                const bounds = e.currentTarget.getBoundingClientRect();
+                const id = selectedId();
+                setContextMenu({
+                  x: Math.max(
+                    8,
+                    Math.min(bounds.left, window.innerWidth - 232),
+                  ),
+                  y: bounds.top - 8,
+                  nodeId: id,
+                  above: true,
+                });
+              }}
+            >
+              <MoreIcon />
+            </button>
+            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <button
+              type="button"
+              class="icon-button hover:text-rose-700!"
+              aria-label="Delete idea"
+              title={`Delete with its children (Delete)`}
+              onClick={removeSelected}
+            >
+              <TrashIcon />
+            </button>
+          </section>
+        </Show>
+      </div>
+      <Show
+        when={
+          !hintDismissed() &&
+          !outlineOpen() &&
+          forest().length > 0 &&
+          details().size <= 4
+        }
+      >
+        <aside
+          data-no-pan
+          data-toolbar
+          aria-label="Getting started"
+          class="map-toolbar absolute bottom-3 left-3 z-10 hidden w-64 cursor-default p-3 text-xs leading-5 text-stone-600 lg:block"
+        >
+          <div class="mb-1 flex items-center justify-between">
+            <p class="text-sm font-semibold text-stone-800">Quick start</p>
+            <button
+              type="button"
+              class="icon-button -mr-1.5 -mt-1.5"
+              aria-label="Dismiss quick start"
+              onClick={dismissHint}
+            >
+              <CloseIcon class="size-4" />
+            </button>
+          </div>
+          <ul class="space-y-0.5">
+            <li>
+              <kbd>Tab</kbd> adds a child, <kbd>Enter</kbd> a sibling
+            </li>
+            <li>Type to rewrite the selected idea</li>
+            <li>Drag an idea onto another to move it under</li>
+            <li>
+              <kbd>{MOD_LABEL}Z</kbd> undoes anything
+            </li>
+          </ul>
+          <button
+            type="button"
+            class="mt-2 font-medium text-blue-700 hover:underline"
+            onClick={() => setShowHelp(true)}
+          >
+            All shortcuts
+          </button>
+        </aside>
+      </Show>
       <div
-        class="absolute w-full h-full origin-top-left"
+        class="map-layer absolute w-full h-full origin-top-left"
+        classList={{ "map-layer-easing": easingView() }}
+        data-dropping={dropTarget() ? "" : undefined}
         style={{
           left: "50%",
           top: "50%",
@@ -2161,16 +4198,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }}
       >
         <svg
-          class="absolute inset-0 w-full h-full overflow-visible pointer-events-none stroke-stone-700"
+          class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
           aria-hidden="true"
         >
-          <For each={layout().connections}>
-            {(connection) => (
-              <path
-                d={connectionPath(connection)}
-                fill="none"
-                stroke-width="1"
-              />
+          {/* Keyed by child id so a layout change updates path data in place
+              instead of recreating every connection. */}
+          <For each={nodeIds()}>
+            {(id) => (
+              <Show when={connections().get(id)}>
+                {(connection) => (
+                  <path d={connectionPath(connection())} fill="none" />
+                )}
+              </Show>
             )}
           </For>
         </svg>
@@ -2188,6 +4227,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 selected={selectedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
+                root={!details().get(id)?.parent || focusId() === id}
+                note={!!view().note(id).trim()}
                 descendants={details().get(id)?.descendants ?? 0}
                 collapsed={collapsedIds().has(id)}
                 onToggleCollapse={() => {
@@ -2200,168 +4241,336 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 onFinish={() => {
                   if (selectedId() === id) finishWriting();
                 }}
+                onTab={(shift) => (shift ? insertParent() : add("child"))}
                 onSelectionChange={recordEditorSelection}
                 onPointerDown={(e) => startPointer(e, id)}
               />
             );
           }}
         </For>
+        <Show when={dropTarget()}>
+          {(target) => (
+            <Show when={positionedNodes().get(target().id)}>
+              {(rect) => (
+                <div
+                  aria-hidden="true"
+                  class="drop-indicator"
+                  data-kind={target().kind}
+                  style={{
+                    transform: `translate(${rect().x}px, ${
+                      target().kind === "before"
+                        ? rect().y - 8
+                        : target().kind === "after"
+                          ? rect().y + rect().height + 5
+                          : rect().y
+                    }px)`,
+                    width: `${rect().width}px`,
+                    height:
+                      target().kind === "inside"
+                        ? `${rect().height}px`
+                        : undefined,
+                  }}
+                />
+              )}
+            </Show>
+          )}
+        </Show>
       </div>
+      <Show when={drag() && dragPointer()}>
+        <div
+          aria-hidden="true"
+          class="drag-label"
+          style={{
+            left: `${(dragPointer()?.x ?? 0) + 14}px`,
+            top: `${(dragPointer()?.y ?? 0) - 40}px`,
+          }}
+        >
+          {dragLabel()}
+        </div>
+      </Show>
       <Show when={!forest().length}>
         <div
           data-no-pan
           data-toolbar
-          class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center cursor-default"
+          class="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 text-center cursor-default"
         >
-          <p class="mb-3">Your canvas is empty.</p>
-          <button type="button" class="map-control" onClick={() => add("root")}>
+          <p class="text-lg font-semibold text-stone-800">
+            Your canvas is empty
+          </p>
+          <p class="max-w-64 text-sm text-stone-500">
+            Start with the central idea. Press <kbd>Enter</kbd> anytime to add
+            one.
+          </p>
+          <button
+            type="button"
+            class="primary-button"
+            disabled={!storageReady()}
+            onClick={() => add("root")}
+          >
             Create an idea
           </button>
         </div>
       </Show>
       <Show when={contextMenu()}>
-        <div
-          ref={contextMenuElement}
+        {(menu) => (
+          <div
+            ref={contextMenuElement}
+            data-no-pan
+            data-toolbar
+            data-context-menu
+            role="menu"
+            aria-label={menu().nodeId ? "Node actions" : "Canvas actions"}
+            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default"
+            style={{
+              left: `${menu().x}px`,
+              top: `${menu().y}px`,
+              transform: menu().above ? "translateY(-100%)" : undefined,
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu(undefined);
+                canvas.focus({ preventScroll: true });
+                return;
+              }
+              menuArrowKeys(e);
+            }}
+          >
+            <Show
+              when={menu().nodeId}
+              fallback={
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    const position = menu().rootPosition;
+                    setContextMenu(undefined);
+                    add("root", position);
+                  }}
+                >
+                  Create root node
+                </button>
+              }
+            >
+              {(nodeId) => {
+                const run = (action: () => void) => () => {
+                  setContextMenu(undefined);
+                  setSelectedId(nodeId());
+                  action();
+                };
+                const siblings = () =>
+                  childrenOf(details().get(nodeId())?.parent);
+                return (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      onClick={run(() => add("child"))}
+                    >
+                      Add child node
+                      <kbd class="ml-auto">Tab</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={nodeId() === focusId()}
+                      onClick={run(() => add("sibling"))}
+                    >
+                      Add sibling
+                      <kbd class="ml-auto">Enter</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={nodeId() === focusId()}
+                      onClick={run(insertParent)}
+                    >
+                      Insert parent
+                      <kbd class="ml-auto">⇧Tab</kbd>
+                    </button>
+                    <div class="menu-divider" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={siblings()[0]?.id === nodeId()}
+                      onClick={run(indentSelected)}
+                    >
+                      Move under idea above
+                      <kbd class="ml-auto">{ALT_LABEL}→</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={
+                        !details().get(nodeId())?.parent ||
+                        nodeId() === focusId()
+                      }
+                      onClick={run(outdentSelected)}
+                    >
+                      Move out to parent level
+                      <kbd class="ml-auto">{ALT_LABEL}←</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      onClick={run(() => toggleNotes(true))}
+                    >
+                      {view().note(nodeId()).trim()
+                        ? "Open notes"
+                        : "Add notes"}
+                      <kbd class="ml-auto">{ALT_LABEL}N</kbd>
+                    </button>
+                    <Show when={placedIds(nodeId()).length}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        onClick={run(() => resetPlacement(nodeId()))}
+                      >
+                        Reset placement
+                      </button>
+                    </Show>
+                    <Show when={details().get(nodeId())?.descendants}>
+                      <div class="menu-divider" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        onClick={() => {
+                          setContextMenu(undefined);
+                          toggleCollapse(nodeId());
+                        }}
+                      >
+                        {collapsedIds().has(nodeId())
+                          ? "Expand children"
+                          : "Collapse children"}
+                        <kbd class="ml-auto">{ALT_LABEL}G</kbd>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        onClick={run(() =>
+                          focusId() === nodeId() ? exitFocus() : focusBranch(),
+                        )}
+                      >
+                        {focusId() === nodeId()
+                          ? "Leave focus"
+                          : "Focus on this branch"}
+                        <kbd class="ml-auto">{ALT_LABEL}F</kbd>
+                      </button>
+                    </Show>
+                    <div class="menu-divider" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item text-rose-700"
+                      onClick={run(removeSelected)}
+                    >
+                      Delete
+                      <kbd class="ml-auto">⌫</kbd>
+                    </button>
+                  </>
+                );
+              }}
+            </Show>
+          </div>
+        )}
+      </Show>
+      <div class="pointer-events-none absolute right-3 bottom-3 z-20 flex items-center gap-2">
+        <fieldset
           data-no-pan
           data-toolbar
-          data-context-menu
-          role="menu"
-          aria-label={contextMenu()?.nodeId ? "Node actions" : "Canvas actions"}
-          class="map-toolbar fixed z-50 flex min-w-52 flex-col gap-1 text-sm cursor-default"
-          style={{
-            left: `${contextMenu()?.x ?? 0}px`,
-            top: `${contextMenu()?.y ?? 0}px`,
-          }}
-          onPointerDown={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.preventDefault();
-              e.stopPropagation();
-              setContextMenu(undefined);
-              canvas.focus({ preventScroll: true });
-              return;
-            }
-            if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-            e.preventDefault();
-            const items = Array.from(
-              e.currentTarget.querySelectorAll<HTMLButtonElement>(
-                '[role="menuitem"]',
-              ),
-            );
-            const current = items.indexOf(
-              document.activeElement as HTMLButtonElement,
-            );
-            const direction = e.key === "ArrowDown" ? 1 : -1;
-            items[(current + direction + items.length) % items.length]?.focus();
-          }}
+          aria-label="Canvas zoom"
+          class="map-toolbar pointer-events-auto flex items-center gap-0.5 text-sm cursor-default"
         >
-          <Show
-            when={contextMenu()?.nodeId}
-            fallback={
-              <button
-                type="button"
-                role="menuitem"
-                class="map-control w-full text-left"
-                onClick={() => {
-                  const position = contextMenu()?.rootPosition;
-                  setContextMenu(undefined);
-                  add("root", position);
-                }}
-              >
-                Create root node
-              </button>
-            }
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Zoom out"
+            title={`Zoom out (${MOD_LABEL}−)`}
+            disabled={zoom() <= ZOOM_MIN}
+            onClick={() => changeZoom(zoom() / 1.2)}
           >
-            <button
-              type="button"
-              role="menuitem"
-              class="map-control w-full text-left"
-              onClick={() => {
-                const id = contextMenu()?.nodeId;
-                setContextMenu(undefined);
-                if (id) {
-                  setSelectedId(id);
-                  removeSelected();
-                }
-              }}
-            >
-              Delete
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              class="map-control w-full text-left"
-              onClick={() => {
-                const id = contextMenu()?.nodeId;
-                setContextMenu(undefined);
-                if (id) {
-                  setSelectedId(id);
-                  add("child");
-                }
-              }}
-            >
-              Add child node
-            </button>
-            <Show
-              when={details().get(contextMenu()?.nodeId ?? "")?.descendants}
-            >
-              <button
-                type="button"
-                role="menuitem"
-                class="map-control w-full text-left"
-                onClick={() => {
-                  const id = contextMenu()?.nodeId;
-                  setContextMenu(undefined);
-                  if (id) toggleCollapse(id);
-                }}
-              >
-                {collapsedIds().has(contextMenu()?.nodeId ?? "")
-                  ? "Expand children"
-                  : "Collapse children"}
-              </button>
-            </Show>
-          </Show>
+            <MinusIcon />
+          </button>
+          <button
+            type="button"
+            class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
+            aria-label="Zoom to 100%"
+            title={`Zoom to 100% (${MOD_LABEL}0)`}
+            onClick={() => changeZoom(1)}
+          >
+            {Math.round(zoom() * 100)}%
+          </button>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Zoom in"
+            title={`Zoom in (${MOD_LABEL}+)`}
+            disabled={zoom() >= ZOOM_MAX}
+            onClick={() => changeZoom(zoom() * 1.2)}
+          >
+            <PlusIcon />
+          </button>
+          <span class="mx-0.5 h-5 w-px bg-stone-200" />
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Fit map"
+            title={`Fit map (${ALT_LABEL}1)`}
+            disabled={!forest().length}
+            onClick={fitMap}
+          >
+            <FitMapIcon />
+          </button>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Fit selection"
+            title={`Fit selection (${ALT_LABEL}2)`}
+            disabled={!selectedId()}
+            onClick={() => fitSelection()}
+          >
+            <FitSelectionIcon />
+          </button>
+        </fieldset>
+        <div
+          data-no-pan
+          data-toolbar
+          class="map-toolbar pointer-events-auto flex cursor-default"
+        >
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Keyboard shortcuts and navigation"
+            title="Shortcuts and navigation (?)"
+            aria-haspopup="dialog"
+            onClick={() => setShowHelp(true)}
+          >
+            <HelpIcon />
+          </button>
         </div>
-      </Show>
-      <fieldset
-        data-no-pan
-        data-toolbar
-        aria-label="Canvas zoom"
-        class="map-toolbar absolute bottom-4 right-4 flex items-center text-sm cursor-default"
-      >
-        <button
-          type="button"
-          class="map-control"
-          aria-label="Zoom out"
-          disabled={zoom() <= 0.25}
-          onClick={() => changeZoom(zoom() / 1.2)}
-        >
-          −
-        </button>
-        <button
-          type="button"
-          class="map-control min-w-14 tabular-nums"
-          aria-label="Reset view"
-          title="Reset view"
-          onClick={() => {
-            setLeft(0);
-            setTop(0);
-            setZoom(1);
-          }}
-        >
-          {Math.round(zoom() * 100)}%
-        </button>
-        <button
-          type="button"
-          class="map-control"
-          aria-label="Zoom in"
-          disabled={zoom() >= 2.5}
-          onClick={() => changeZoom(zoom() * 1.2)}
-        >
-          +
-        </button>
-      </fieldset>
+      </div>
+      <ShortcutsDialog
+        open={showHelp()}
+        onClose={() => {
+          setShowHelp(false);
+          canvas.focus({ preventScroll: true });
+        }}
+        wheelMode={wheelMode()}
+        onWheelMode={setWheelMode}
+      />
     </section>
   );
 }
