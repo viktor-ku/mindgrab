@@ -130,7 +130,7 @@ export class ProjectDocument {
     for (const listener of this.#before) listener();
     const version = this.version();
     const result = action();
-    if (this.version() !== version) {
+    if (this.#snapshots.size && this.version() !== version) {
       const bytes = this.snapshot();
       for (const listener of this.#snapshots) listener(bytes, origin);
     }
