@@ -71,6 +71,9 @@ import {
   writeProjectFile,
 } from "./project-import-export";
 import { MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
+import { Outline } from "./Outline";
+import { branchOutline, outlineSize, parseOutline } from "./outline-text";
+import type { OutlineEntry } from "./outline-text";
 import {
   ArrowLeftIcon,
   BrandMark,
@@ -85,6 +88,7 @@ import {
   HelpIcon,
   MinusIcon,
   MoreIcon,
+  OutlineIcon,
   PlusIcon,
   RedoIcon,
   SearchIcon,
@@ -156,15 +160,19 @@ function storedFlag(key: string) {
     return false;
   }
 }
-function storeFlag(key: string) {
+function storeFlag(key: string, value = true) {
   try {
-    localStorage.setItem(key, "1");
+    if (value) localStorage.setItem(key, "1");
+    else localStorage.removeItem(key);
   } catch {
     // Without storage the flag lasts for this tab only.
   }
 }
 
-// Screen space kept clear of floating toolbars when fitting or following nodes.
+const OUTLINE_KEY = "mindgrab:outline-open";
+
+// Screen space kept clear of floating toolbars and panels when fitting or
+// following nodes.
 const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
 
 function NodeEditor(props: {
@@ -1106,8 +1114,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     bounds: NonNullable<ReturnType<typeof nodeBounds>>,
     maxZoom: number,
   ) {
-    const width = canvas.clientWidth - VIEW_INSETS.left - VIEW_INSETS.right;
-    const height = canvas.clientHeight - VIEW_INSETS.top - VIEW_INSETS.bottom;
+    const width = canvas.clientWidth - viewInsets().left - viewInsets().right;
+    const height = canvas.clientHeight - viewInsets().top - viewInsets().bottom;
     const next = Math.min(
       maxZoom,
       ZOOM_MAX,
@@ -1123,10 +1131,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     moveView({
       zoom: next,
       left:
-        (VIEW_INSETS.left - VIEW_INSETS.right) / 2 -
+        (viewInsets().left - viewInsets().right) / 2 -
         next * ((bounds.minX + bounds.maxX) / 2 - origin.x),
       top:
-        (VIEW_INSETS.top - VIEW_INSETS.bottom) / 2 -
+        (viewInsets().top - viewInsets().bottom) / 2 -
         next * ((bounds.minY + bounds.maxY) / 2 - origin.y),
     });
   }
@@ -1175,14 +1183,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const dx = shift(
       screenLeft,
       screenRight,
-      -halfWidth + VIEW_INSETS.left,
-      halfWidth - VIEW_INSETS.right,
+      -halfWidth + viewInsets().left,
+      halfWidth - viewInsets().right,
     );
     const dy = shift(
       screenTop,
       screenBottom,
-      -halfHeight + VIEW_INSETS.top,
-      halfHeight - VIEW_INSETS.bottom,
+      -halfHeight + viewInsets().top,
+      halfHeight - viewInsets().bottom,
     );
     if (dx || dy) moveView({ left: left() + dx, top: top() + dy });
   }
@@ -1211,10 +1219,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const origin = viewOrigin();
     moveView({
       left:
-        (VIEW_INSETS.left - VIEW_INSETS.right) / 2 -
+        (viewInsets().left - viewInsets().right) / 2 -
         zoom() * (node.x + node.width / 2 - origin.x),
       top:
-        (VIEW_INSETS.top - VIEW_INSETS.bottom) / 2 -
+        (viewInsets().top - viewInsets().bottom) / 2 -
         zoom() * (node.y + node.height / 2 - origin.y),
     });
   }
@@ -1415,6 +1423,50 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             : "Could not export the outline.",
         );
     }
+  }
+
+  const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
+  createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
+  const viewInsets = () =>
+    outlineOpen() && canvas.clientWidth >= 640
+      ? { ...VIEW_INSETS, left: 316 }
+      : VIEW_INSETS;
+  // Branches travel through the clipboard as indented Markdown lists, so they
+  // paste into other apps and pasted outlines become branches here.
+  function pasteOutline(entries: OutlineEntry[]) {
+    const parent = selectedId() ?? focusId();
+    const count = outlineSize(entries);
+    let first: string | undefined;
+    try {
+      command((doc) => {
+        const make = (list: OutlineEntry[], under: string | undefined) => {
+          for (const entry of list) {
+            const init = { text: entry.text.slice(0, LIMITS.text) };
+            const id = under
+              ? createChild(doc, under, init)
+              : createRoot(doc, init);
+            first ??= id;
+            make(entry.children, id);
+          }
+        };
+        make(entries, parent);
+      });
+    } catch (error) {
+      showNotice({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not paste these ideas.",
+      });
+      return;
+    }
+    if (!first) return;
+    if (parent) revealNode(first);
+    setSelectedId(first);
+    showNotice({
+      message: `Pasted ${count} ${count === 1 ? "idea" : "ideas"}${parent ? ` under “${nodeLabel(parent)}”` : ""}`,
+      action: { label: "Undo", run: undo },
+    });
   }
 
   const [showHelp, setShowHelp] = createSignal(false);
@@ -1819,7 +1871,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (next.size !== collapsedIds().size) setCollapsedIds(next);
   }
 
-  function toggleCollapse(id: string) {
+  function toggleCollapse(id: string, focusCanvas = true) {
     if (!details().get(id)?.descendants) return;
     cancelPointer();
     const node = positionedNodes().get(id);
@@ -1831,7 +1883,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return next;
       });
     });
-    canvas.focus({ preventScroll: true });
+    if (focusCanvas) canvas.focus({ preventScroll: true });
   }
 
   // One editing session is one undo step.
@@ -2260,6 +2312,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setShowHelp((open) => !open);
         return;
       }
+      if (
+        matchesLetter(e, "o") &&
+        !e.repeat &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey
+      ) {
+        e.preventDefault();
+        setOutlineOpen((open) => !open);
+        return;
+      }
       // Physical keys keep view shortcuts working on every keyboard layout.
       const mod = e.ctrlKey || e.metaKey;
       if (mod && !e.altKey && ["Equal", "NumpadAdd"].includes(e.code)) {
@@ -2496,6 +2560,98 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     window.addEventListener("pointerdown", dismissContextMenu);
     window.addEventListener("pointerup", stopOutside);
     canvas.addEventListener("wheel", wheel, { passive: false });
+    const canvasClipboard = (e: ClipboardEvent) =>
+      storageReady() &&
+      !writing() &&
+      !showPreferences() &&
+      !showHelp() &&
+      !searchOpen() &&
+      !(
+        e.target instanceof Element &&
+        e.target.closest("input, textarea, [contenteditable=true], dialog")
+      );
+    const copyBranch = (e: ClipboardEvent) => {
+      const id = selectedId();
+      const node = id && findNode(forest(), id);
+      if (!node || !canvasClipboard(e) || !e.clipboardData) return;
+      e.preventDefault();
+      e.clipboardData.setData(
+        "text/plain",
+        branchOutline(node, (key) => view().text(key)),
+      );
+      if (e.type === "cut") removeSelected();
+      else
+        showNotice({
+          message: `Copied “${nodeLabel(node.id)}”${node.next?.length ? " with its branch" : ""}`,
+        });
+    };
+    const paste = (e: ClipboardEvent) => {
+      if (!canvasClipboard(e) || !e.clipboardData) return;
+      const entries = parseOutline(e.clipboardData.getData("text/plain"));
+      if (!entries.length) return;
+      e.preventDefault();
+      pasteOutline(entries);
+    };
+    window.addEventListener("copy", copyBranch);
+    window.addEventListener("cut", copyBranch);
+    window.addEventListener("paste", paste);
+    onCleanup(() => {
+      window.removeEventListener("copy", copyBranch);
+      window.removeEventListener("cut", copyBranch);
+      window.removeEventListener("paste", paste);
+    });
+    // Two fingers pinch to zoom and move together to pan. A pinch replaces
+    // any one-finger pan or drag already in progress.
+    const touches = new Map<number, { x: number; y: number }>();
+    let pinch:
+      | { distance: number; x: number; y: number; zoom: number }
+      | undefined;
+    const pinchFrame = () => {
+      const [a, b] = [...touches.values()];
+      return {
+        distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+      };
+    };
+    const touchDown = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        cancelPointer();
+        pinch = { ...pinchFrame(), zoom: zoom() };
+      }
+    };
+    const touchMove = (e: PointerEvent) => {
+      if (!touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (!pinch || touches.size !== 2) return;
+      const next = pinchFrame();
+      batch(() => {
+        setLeft(left() + next.x - pinch!.x);
+        setTop(top() + next.y - pinch!.y);
+        changeZoom(
+          (pinch!.zoom * next.distance) / pinch!.distance,
+          next.x,
+          next.y,
+        );
+      });
+      pinch = { ...pinch, x: next.x, y: next.y };
+    };
+    const touchUp = (e: PointerEvent) => {
+      touches.delete(e.pointerId);
+      if (touches.size < 2) pinch = undefined;
+    };
+    canvas.addEventListener("pointerdown", touchDown, { capture: true });
+    window.addEventListener("pointermove", touchMove);
+    window.addEventListener("pointerup", touchUp);
+    window.addEventListener("pointercancel", touchUp);
+    onCleanup(() => {
+      canvas.removeEventListener("pointerdown", touchDown, { capture: true });
+      window.removeEventListener("pointermove", touchMove);
+      window.removeEventListener("pointerup", touchUp);
+      window.removeEventListener("pointercancel", touchUp);
+    });
     function stopOutside(e: PointerEvent) {
       stopPointer(e, true);
     }
@@ -2887,7 +3043,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </Show>
       </div>
       <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
-        <div class="flex items-start gap-2">
+        <div class="flex flex-col items-end gap-2 sm:flex-row sm:items-start">
           <nav
             data-no-pan
             data-toolbar
@@ -2904,6 +3060,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               onClick={() => (searchOpen() ? closeSearch(false) : openSearch())}
             >
               <SearchIcon />
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Outline"
+              title="Outline (O)"
+              aria-pressed={outlineOpen()}
+              disabled={!storageReady()}
+              onClick={() => setOutlineOpen((open) => !open)}
+            >
+              <OutlineIcon />
             </button>
             <span class="mx-0.5 h-5 w-px bg-stone-200" />
             <button
@@ -3052,6 +3219,27 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </search>
         </Show>
       </div>
+      <Show when={outlineOpen()}>
+        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col">
+          <Outline
+            roots={scopeForest()}
+            text={(id) => view().text(id)}
+            selectedId={selectedId()}
+            collapsed={collapsedIds()}
+            onSelect={(id) => {
+              finishWriting();
+              setColorScope("node");
+              setSelectedId(id);
+            }}
+            onToggle={(id) => toggleCollapse(id, false)}
+            onEdit={write}
+            onClose={() => {
+              setOutlineOpen(false);
+              canvas.focus({ preventScroll: true });
+            }}
+          />
+        </div>
+      </Show>
       <Show when={focusId()}>
         <nav
           data-no-pan
@@ -3096,7 +3284,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </For>
         </nav>
       </Show>
-      <div class="pointer-events-none absolute bottom-3 left-1/2 z-20 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+      <div class="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-20 flex sm:bottom-3 w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
         <Show when={notice()}>
           {(current) => (
             <div
@@ -3238,7 +3426,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               onClick={() => add("child")}
             >
               <ChildIcon />
-              <span>Child</span>
+              <span class="max-sm:sr-only">Child</span>
             </button>
             <button
               type="button"
@@ -3248,7 +3436,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               onClick={() => add("sibling")}
             >
               <SiblingIcon />
-              <span>Sibling</span>
+              <span class="max-sm:sr-only">Sibling</span>
             </button>
             <span class="mx-0.5 h-5 w-px bg-stone-200" />
             <button
@@ -3334,7 +3522,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </Show>
       </div>
       <Show
-        when={!hintDismissed() && forest().length > 0 && details().size <= 4}
+        when={
+          !hintDismissed() &&
+          !outlineOpen() &&
+          forest().length > 0 &&
+          details().size <= 4
+        }
       >
         <aside
           data-no-pan
@@ -3673,7 +3866,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </button>
           <button
             type="button"
-            class="map-control min-w-14 px-1! text-xs tabular-nums"
+            class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
             aria-label="Zoom to 100%"
             title={`Zoom to 100% (${MOD_LABEL}0)`}
             onClick={() => changeZoom(1)}

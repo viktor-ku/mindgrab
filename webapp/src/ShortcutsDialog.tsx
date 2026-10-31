@@ -29,6 +29,10 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Drag onto an idea", "Move under it, or before/after at its edges"],
       ["G", "Collapse or expand children"],
       ["Delete", "Delete the idea and its children"],
+      [
+        `${MOD_LABEL}C · ${MOD_LABEL}X · ${MOD_LABEL}V`,
+        "Copy, cut, paste branches as outlines",
+      ],
     ],
   },
   {
@@ -36,6 +40,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     items: [
       [`${MOD_LABEL}F · /`, "Search; Esc returns to where you were"],
       ["F", "Focus on the selected branch"],
+      ["O", "Show or hide the outline"],
       ["⇧1", "Fit the whole map"],
       ["⇧2", "Fit the selected branch"],
       [`${MOD_LABEL}+ · ${MOD_LABEL}−`, "Zoom around the selection"],

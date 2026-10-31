@@ -168,3 +168,10 @@ export const BrandMark = (props: IconProps) => (
     <circle cx="16" cy="17" r="2" fill="#86efac" />
   </svg>
 );
+
+export const OutlineIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M7.5 5h9M10 10h6.5M10 15h6.5" />
+    <path d="M3.5 5h.01M6 10h.01M6 15h.01" stroke-width="2.4" />
+  </Icon>
+);
