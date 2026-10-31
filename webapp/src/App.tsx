@@ -65,6 +65,7 @@ import {
   parseProjectFile,
   prepareProjectImport,
   PROJECT_FILE_MAX_BYTES,
+  PROJECT_FILE_MAX_DEPTH as MAX_DEPTH,
   ProjectFileError,
   projectMarkdown,
   readProjectFile,
@@ -1633,15 +1634,51 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   };
   // Branches travel through the clipboard as indented Markdown lists, so they
   // paste into other apps and pasted outlines become branches here.
+  // Levels from the top (1 for a central idea) and the levels a branch spans.
+  function depthOf(id: string) {
+    let depth = 1;
+    for (let p = details().get(id)?.parent; p; p = details().get(p)?.parent)
+      depth++;
+    return depth;
+  }
+  function branchHeight(id: string) {
+    const height = (node: MindMapNode): number =>
+      1 + Math.max(0, ...(node.next ?? []).map(height));
+    const node = findNode(forest(), id);
+    return node ? height(node) : 1;
+  }
+  function tooDeep() {
+    showNotice({
+      message: `Maps can be at most ${MAX_DEPTH} levels deep, so backups stay readable.`,
+    });
+  }
+
   function pasteOutline(entries: OutlineEntry[]) {
     const parent = selectedId() ?? focusId();
     const count = outlineSize(entries);
+    if (details().size + count > LIMITS.nodes) {
+      showNotice({
+        message: `A map holds at most ${LIMITS.nodes.toLocaleString()} ideas; this paste would add ${count.toLocaleString()}.`,
+      });
+      return;
+    }
+    const start = parent ? depthOf(parent) + 1 : 1;
+    if (start > MAX_DEPTH) return tooDeep();
     let first: string | undefined;
+    // Backups keep at most MAX_DEPTH levels; deeper lines join the deepest
+    // allowed level instead of making the map impossible to back up.
+    let flattened = false;
+    let shortened = false;
     try {
       command((doc) =>
         doc.batch(() => {
-          const make = (list: OutlineEntry[], under: string | undefined) => {
+          const make = (
+            list: OutlineEntry[],
+            under: string | undefined,
+            depth: number,
+          ) => {
             for (const entry of list) {
+              if (entry.text.length > LIMITS.text) shortened = true;
               const init = {
                 text: entry.text.slice(0, LIMITS.text),
                 ...(entry.color && { color: entry.color }),
@@ -1652,10 +1689,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               if (entry.note)
                 setNodeNote(doc, id, entry.note.slice(0, LIMITS.note));
               first ??= id;
-              make(entry.children, id);
+              if (entry.children.length && depth >= MAX_DEPTH) flattened = true;
+              if (depth >= MAX_DEPTH) make(entry.children, under, depth);
+              else make(entry.children, id, depth + 1);
             }
           };
-          make(entries, parent);
+          make(entries, parent, start);
         }),
       );
     } catch (error) {
@@ -1677,7 +1716,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       );
     }
     showNotice({
-      message: `Pasted ${count} ${count === 1 ? "idea" : "ideas"}${parent ? ` under “${nodeLabel(parent)}”` : ""}`,
+      message: `Pasted ${count} ${count === 1 ? "idea" : "ideas"}${parent ? ` under “${nodeLabel(parent)}”` : ""}${
+        flattened
+          ? ` · levels past ${MAX_DEPTH} were flattened`
+          : shortened
+            ? ` · long text was shortened to ${LIMITS.text.toLocaleString()} characters`
+            : ""
+      }`,
       action: { label: "Undo", run: undo },
     });
   }
@@ -2232,6 +2277,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   function add(kind: "child" | "sibling" | "root", position?: NodePosition) {
     finishWriting();
+    const current = selectedId();
+    if (kind === "child" && current && depthOf(current) >= MAX_DEPTH)
+      return tooDeep();
     // Siblings and new roots of a focused branch would appear outside the view.
     if (
       focusId() &&
@@ -2283,6 +2331,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (blockedByFocus(id, "move")) return;
     const parent =
       target.kind === "inside" ? target.id : details().get(target.id)?.parent;
+    if ((parent ? depthOf(parent) : 0) + branchHeight(id) > MAX_DEPTH)
+      return tooDeep();
     const siblings = childrenOf(parent).filter((node) => node.id !== id);
     const index =
       target.kind === "inside"
@@ -2335,6 +2385,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   function insertParent() {
     const id = selectedId();
     if (!id) return;
+    if (depthOf(id) + branchHeight(id) > MAX_DEPTH) return tooDeep();
     if (id === focusId()) {
       showNotice({
         message: "Leave focus to add a parent above this branch",

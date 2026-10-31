@@ -59,7 +59,8 @@ const PositionSchema = z.strictObject({
 const ViewportSchema = z.strictObject({
   left: z.number().finite(),
   top: z.number().finite(),
-  zoom: z.number().finite().min(0.25).max(2.5),
+  // The editor zooms out to 10% to fit large maps; backups keep that view.
+  zoom: z.number().finite().min(0.1).max(2.5),
 });
 const AnchorSchema = z.strictObject({
   id: z.string().min(1),
@@ -152,10 +153,13 @@ function checkedFile(value: unknown): ProjectFile {
     }
   }
   const parsed = PortableProjectSchema.safeParse(value);
-  if (!parsed.success)
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const where = issue?.path.length ? ` (at ${issue.path.join(".")})` : "";
     throw new ProjectFileError(
-      parsed.error.issues[0]?.message ?? "Invalid project file.",
+      `This Mindgrab backup is damaged: ${issue?.message ?? "invalid content"}${where}.`,
     );
+  }
   return parsed.data;
 }
 
@@ -198,10 +202,16 @@ export function serializeProjectFile(
 export function parseProjectFile(json: string): ProjectFile {
   if (new TextEncoder().encode(json).length > PROJECT_FILE_MAX_BYTES)
     throw new ProjectFileError("Project file exceeds the 10 MiB size limit.");
+  if (!json.trim()) throw new ProjectFileError("The file is empty.");
   let value: unknown;
   try {
     value = JSON.parse(json);
   } catch {
+    // Outline exports are Markdown; their text pastes into a map instead.
+    if (/^\s*([#>*+-]|\d+[.)])\s/.test(json))
+      throw new ProjectFileError(
+        "This looks like a Markdown outline, not a backup. Copy its text and paste it into a map instead.",
+      );
     throw new ProjectFileError("Project file is not valid JSON.");
   }
   if (typeof value !== "object" || value === null || Array.isArray(value))

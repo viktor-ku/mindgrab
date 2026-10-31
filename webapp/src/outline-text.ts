@@ -53,7 +53,8 @@ export function parseBranchEntry(data: string): OutlineEntry | undefined {
 }
 
 // Bullets and numbering that mark list items in pasted outlines.
-const MARKER = /^(?:[-*+•◦▪‣]|\d+[.)]|\[[ xX]\])\s+/;
+// Numbering is at most three digits so prose like "2024. A good year" survives.
+const MARKER = /^(?:[-*+•◦▪‣]|\d{1,3}[.)]|\[[ xX]\])\s+/;
 
 // Turns indented text (Markdown lists, tab-indented outlines, plain lines)
 // into a tree. Each line becomes one idea; deeper indentation nests it under
@@ -73,10 +74,11 @@ export function parseOutline(text: string): OutlineEntry[] {
       : expanded.length - expanded.trimStart().length;
     if (heading) content = content.slice(heading[0].length);
     // A marker with nothing after it (trimmed "- ") is an empty item.
-    if (/^(?:[-*+•◦▪‣]|\d+[.)]|\[[ xX]\])$/.test(content)) continue;
+    if (/^(?:[-*+•◦▪‣]|\d{1,3}[.)]|\[[ xX]\])$/.test(content)) continue;
     content = content
       .replace(MARKER, "")
-      .replace(/^\\([#>+*-])/, "$1")
+      // Copied text escapes markers with one extra leading backslash.
+      .replace(/^\\(?=\\*(?:[#>+*-]|\d+[.)]))/, "")
       .trim();
     if (!content) continue;
     const entry: OutlineEntry = { text: content, children: [] };
@@ -100,7 +102,10 @@ export function branchOutline(
   const visit = (current: MindMapNode, depth: number) => {
     const value = text(current.id)
       .replace(/\s*\n\s*/g, " ")
-      .trim();
+      .trim()
+      // Escape text that would read as a heading, quote or list marker, and a
+      // backslash that would read as such an escape.
+      .replace(/^(?=\\+(?:[#>+*-]|\d+[.)])|(?:[#>+*-]|\d+[.)])\s)/, "\\");
     lines.push(`${"  ".repeat(depth)}- ${value || "New idea"}`);
     for (const child of current.next ?? []) visit(child, depth + 1);
   };
