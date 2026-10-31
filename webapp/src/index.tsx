@@ -4,11 +4,13 @@ import { queryClient, executeMutation } from "./query-client";
 import { RouterProvider } from "@tanstack/solid-router";
 import { Show } from "solid-js";
 import { offlineMessage, startOfflineShell } from "./offline-shell";
+import { startAnalytics } from "./analytics";
 import { render } from "solid-js/web";
 import { router } from "./router.tsx";
 import "./index.css";
 
 const root = document.getElementById("root");
+void startAnalytics();
 
 const upgradeMessage = await executeMutation(
   queryClient,

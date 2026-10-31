@@ -44,6 +44,8 @@ pub async fn guard(
             ("upload", 240)
         } else if path.starts_with("/sync/") {
             ("socket", 60)
+        } else if path.starts_with("/ingest/") {
+            ("ingest", 600)
         } else {
             ("api", 1200)
         };

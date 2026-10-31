@@ -23,6 +23,12 @@ export default defineConfig(({ mode }) => {
             env.VITE_BACKEND_URL ||
             "http://localhost:3000",
         },
+        "/ingest": {
+          target:
+            process.env.VITE_BACKEND_URL ||
+            env.VITE_BACKEND_URL ||
+            "http://localhost:3000",
+        },
         "/sync": {
           target:
             process.env.VITE_BACKEND_URL ||

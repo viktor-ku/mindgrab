@@ -1,4 +1,5 @@
 use crate::{
+    analytics::Analytics,
     config::{AuthMode, Config},
     error::{ApiError, Result},
 };
@@ -108,10 +109,17 @@ struct Session {
     access_token: String,
     refresh_token: String,
 }
+#[derive(FromRow)]
+struct Upserted {
+    #[sqlx(flatten)]
+    user: User,
+    created: bool,
+}
 #[derive(Clone)]
 pub struct Auth {
     pool: PgPool,
     config: Config,
+    analytics: Analytics,
     client: reqwest::Client,
     keys: Arc<Mutex<Option<(std::time::Instant, JwkSet)>>>,
 }
@@ -119,6 +127,7 @@ impl Auth {
     pub fn new(pool: PgPool, config: Config) -> Self {
         Self {
             pool,
+            analytics: Analytics::new(config.posthog.clone()),
             config,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(8))
@@ -257,7 +266,12 @@ impl Auth {
             vec![cookie(&self.config, STATE_COOKIE, &nonce, 600)],
         ))
     }
-    async fn callback_inner(&self, headers: &HeaderMap, query: &str) -> Result<String> {
+    /// Returns the session credential, and the user when the account is new.
+    async fn callback_inner(
+        &self,
+        headers: &HeaderMap,
+        query: &str,
+    ) -> Result<(String, Option<User>)> {
         let pairs: Vec<_> = reqwest::Url::parse(&format!("http://localhost/?{query}"))
             .map_err(|_| ApiError::invalid())?
             .query_pairs()
@@ -320,7 +334,7 @@ impl Auth {
         }
         let credential = token();
         let mut tx = self.pool.begin().await?;
-        let user = upsert(&mut tx, &auth.user).await?;
+        let Upserted { user, created } = upsert(&mut tx, &auth.user).await?;
         sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&credential)).bind(user.id).bind(claims.sid).bind(auth.access_token).bind(auth.refresh_token).execute(&mut *tx).await?;
         if let Some(previous) = self.browser_cookie(headers, SESSION_COOKIE) {
             sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1")
@@ -329,12 +343,15 @@ impl Auth {
                 .await?;
         }
         tx.commit().await?;
-        Ok(credential)
+        Ok((credential, created.then_some(user)))
     }
     pub async fn callback(&self, headers: &HeaderMap, query: &str) -> Response {
         let mut cookies = vec![cookie(&self.config, STATE_COOKIE, "", 0)];
         let destination = match self.callback_inner(headers, query).await {
-            Ok(credential) => {
+            Ok((credential, created)) => {
+                if let Some(user) = created {
+                    self.analytics.signed_up(&user, headers);
+                }
                 cookies.push(cookie(&self.config, SESSION_COOKIE, &credential, 2592000));
                 self.config.app_url.clone()
             }
@@ -377,7 +394,7 @@ impl Auth {
             let claims = self.verify(&auth.access_token).await?;
             if claims.exp<=now() || claims.sub!=user.external_id || claims.sid!=session.provider_session || auth.user.id!=user.external_id { return Err(ApiError::unauthorized()); }
             sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$2,refresh_token=$3 WHERE browser_hash=$1").bind(&browser_hash).bind(auth.access_token).bind(auth.refresh_token).execute(&mut *tx).await?;
-            upsert(&mut tx,&auth.user).await
+            upsert(&mut tx,&auth.user).await.map(|upserted| upserted.user)
         }.await;
         if result
             .as_ref()
@@ -435,7 +452,7 @@ impl Auth {
 async fn upsert(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user: &ProviderUser,
-) -> Result<User> {
+) -> Result<Upserted> {
     let name = [
         user.first_name.as_deref().unwrap_or_default(),
         user.last_name.as_deref().unwrap_or_default(),
@@ -444,5 +461,5 @@ async fn upsert(
     .trim()
     .to_string();
     let name = if name.is_empty() { &user.email } else { &name };
-    Ok(sqlx::query_as("INSERT INTO mindgrab_loro.users(external_id,name,email) VALUES($1,$2,$3) ON CONFLICT(external_id) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email RETURNING id,name,email,external_id").bind(&user.id).bind(name).bind(&user.email).fetch_one(&mut **tx).await?)
+    Ok(sqlx::query_as("INSERT INTO mindgrab_loro.users(external_id,name,email) VALUES($1,$2,$3) ON CONFLICT(external_id) DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email RETURNING id,name,email,external_id,(xmax=0) AS created").bind(&user.id).bind(name).bind(&user.email).fetch_one(&mut **tx).await?)
 }

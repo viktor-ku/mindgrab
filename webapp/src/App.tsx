@@ -110,6 +110,14 @@ import {
 } from "./icons";
 import { searchNodes } from "./search";
 import { AccountControls } from "./AccountControls";
+import {
+  analyticsEnabled,
+  consentOpen,
+  identify,
+  reviewConsent,
+  track,
+} from "./analytics";
+import { AnalyticsConsent } from "./AnalyticsConsent";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
 import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
@@ -516,8 +524,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     mutationKey: ["workspace", "account"],
     mutationFn: performAccountChanged,
   }));
-  const accountChanged = (state: SessionState) =>
-    accountMutation.mutateAsync(state);
+  const accountChanged = (state: SessionState) => {
+    if (state.status === "authenticated" || state.status === "anonymous")
+      identify(state.user);
+    return accountMutation.mutateAsync(state);
+  };
   const claimMutation = createMutation(() => ({
     mutationKey: ["workspace", "claim"],
     mutationFn: performAddAnonymousProjects,
@@ -719,7 +730,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }),
       target,
     );
-    if (target === repository && !disposed) selectFirstIdea();
+    if (target === repository && !disposed) {
+      selectFirstIdea();
+      track("project_created", { trigger: "first_open" });
+    }
   }
 
   async function performInitializeWorkspace() {
@@ -857,6 +871,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
       setClaimMessage("");
+      track("anonymous_maps_claimed", { count: ids.length });
       showNotice({
         message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
       });
@@ -1007,6 +1022,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setPreferencesError("");
     try {
       await owner.updateSaving(handle, value);
+      track("saving_changed", { local: value.local, cloud: value.cloud });
       if (!value.cloud && !cloud && (await owner.cloudAttempted(handle.id)))
         setCloudStatus({
           status: "auth",
@@ -1479,6 +1495,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     centerOn(id);
   }
   function closeSearch(keep: boolean) {
+    if (searchQuery().trim()) track("search_used", { kept_result: keep });
     const back = searchReturn;
     searchReturn = undefined;
     setReturnView(keep ? back : undefined);
@@ -1591,6 +1608,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         projectMarkdown(name, forest(), (id) => view().text(id)),
       );
       showNotice({ message: `Exported “${truncate(name, 40)}” as an outline` });
+      track("project_exported", {
+        format: "markdown",
+        idea_count: details().size,
+      });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError"))
         setStorageMessage(
@@ -1719,6 +1740,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     if (!first) return;
+    track("outline_pasted", { idea_count: count, flattened });
     if (parent) revealNode(first);
     setSelectedId(first);
     // Show what arrived once the new ideas have been measured.
@@ -1795,6 +1817,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   const [showHelp, setShowHelp] = createSignal(false);
+  // Feature discovery: count each opening, however it happened.
+  for (const [opened, event] of [
+    [outlineOpen, "outline_opened"],
+    [notesOpen, "notes_opened"],
+    [showHelp, "shortcuts_opened"],
+    [() => Boolean(focusId()), "branch_focused"],
+  ] as const)
+    createEffect(on(opened, (open) => open && track(event), { defer: true }));
   const [hintDismissed, setHintDismissed] = createSignal(storedFlag(HINT_KEY));
   function dismissHint() {
     setHintDismissed(true);
@@ -1883,7 +1913,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setReturnView(undefined);
       setFocusId(undefined);
     });
-    canvas.focus({ preventScroll: true });
+    // A first visit opens a project after the analytics banner has appeared;
+    // keep "Accept all" focused until the visitor chooses.
+    const banner = consentOpen()
+      ? document.querySelector<HTMLButtonElement>(
+          '[aria-label="Analytics choice"] button',
+        )
+      : null;
+    (banner ?? canvas).focus({ preventScroll: true });
   }
 
   async function performOpenProject(id: string) {
@@ -1895,6 +1932,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (target !== repository || disposed) return;
       const state = handle.state();
       if (state.status === "ready") {
+        track("project_opened", { idea_count: details().size });
         setStorageMessage("");
         showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
       } else setStorageMessage("Project is still loading.");
@@ -1925,6 +1963,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (target !== repository || disposed) return;
       setStorageMessage("");
       selectFirstIdea();
+      track("project_created", {
+        trigger: "menu",
+        project_count: projects.length + 1,
+      });
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
@@ -1939,7 +1981,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setProjectNameDraft(undefined);
     if (!name) return;
     try {
-      command((doc) => renameProject(doc, name));
+      if (command((doc) => renameProject(doc, name))) track("project_renamed");
     } catch {
       setStorageMessage("Project names can be at most 200 bytes long.");
     }
@@ -1960,6 +2002,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await handle.flush();
       if (repository !== owner || activeHandle !== handle || disposed) return;
       setSaveStatus("done");
+      track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
         showNotice({ message: "Saved locally." });
@@ -2031,6 +2074,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return false;
       await auth.prepareNavigation(action);
       leaving = true;
+      if (action === "login")
+        track("sign_in_started", { project_count: savedProjects().length });
+      else track("signed_out");
       return true;
     } catch {
       if (repository !== owner || disposed) return false;
@@ -2053,13 +2099,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const owner = repository;
     try {
       cloud?.retry();
-      await queryClient.fetchQuery({
+      const projects = await queryClient.fetchQuery({
         queryKey: catalogKey(owner.names.catalog),
         queryFn: () => owner.list(),
       });
       if (repository !== owner || disposed) return;
       setStorageMessage("");
       setShowLoad(true);
+      track("project_list_opened", { project_count: projects.length });
     } catch (error) {
       if (repository !== owner || disposed) return;
       setStorageMessage(
@@ -2084,6 +2131,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
       await writeProjectFile(name, json);
       showNotice({ message: `Exported “${truncate(name, 40)}”` });
+      track("project_exported", { format: "json", idea_count: details().size });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
@@ -2139,6 +2187,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
       showNotice({ message: `Imported “${truncate(content.name, 40)}”` });
+      track("project_imported", {
+        idea_count: details().size,
+        file_kb: Math.ceil(file.size / 1024),
+      });
     } catch (error) {
       if (owner !== repository || disposed) return;
       if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -2352,7 +2404,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             ? createChild(doc, id, init)
             : createSibling(doc, id, init),
       );
-      if (created) write(created);
+      if (!created) return;
+      write(created);
+      track("idea_added", {
+        kind: kind === "root" || !id ? "root" : kind,
+        depth: depthOf(created),
+        idea_count: details().size,
+      });
     });
   }
 
@@ -2393,6 +2451,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return clearPositions(doc, placed) || changed;
     });
     if (!moved) return;
+    track("idea_moved", { to_top_level: !parent });
     setSelectedId(id);
     showNotice({
       message: parent
@@ -2464,7 +2523,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       clearPositions(doc, placed);
       return wrapper;
     });
-    if (created) write(created);
+    if (!created) return;
+    write(created);
+    track("idea_added", {
+      kind: "parent",
+      depth: depthOf(created),
+      idea_count: details().size,
+    });
   }
 
   // Selection moves to the next sibling, else the previous one, else the
@@ -2482,6 +2547,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const text = view().text(id).trim() || "New idea";
     const removed = 1 + (details().get(id)?.descendants ?? 0);
     if (!command((doc) => deleteSubtree(doc, id))) return;
+    track("idea_deleted", { removed });
     setSelectedId(nextId);
     setColorScope("node");
     showNotice({
@@ -2497,7 +2563,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   function colorSelectedNode(color: NodeColor) {
     const id = selectedId();
     if (!id || writing()) return;
-    command((doc) => setNodeColor(doc, id, color, colorScope() === "branch"));
+    const scope = colorScope();
+    if (command((doc) => setNodeColor(doc, id, color, scope === "branch")))
+      track("idea_colored", { scope });
   }
 
   // Pointer zoom keeps the point under the pointer still. Button and keyboard
@@ -3458,6 +3526,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               >
                 Project preferences…
               </button>
+              <Show when={analyticsEnabled}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    reviewConsent();
+                  }}
+                >
+                  Analytics choice…
+                </button>
+              </Show>
             </fieldset>
           </div>
         </Show>
@@ -3757,6 +3838,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           />
         </div>
       </Show>
+      <AnalyticsConsent />
       <Show when={claimCount() > 0 && !claimDismissed()}>
         <section
           data-no-pan
@@ -3787,7 +3869,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="map-control text-xs"
               disabled={claiming()}
-              onClick={() => setClaimDismissed(true)}
+              onClick={() => {
+                track("anonymous_maps_claim_dismissed", {
+                  count: claimCount(),
+                });
+                setClaimDismissed(true);
+              }}
             >
               Not now
             </button>
