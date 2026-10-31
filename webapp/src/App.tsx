@@ -280,7 +280,6 @@ function Node(props: {
   dragging: boolean;
   root: boolean;
   note: boolean;
-  onOpenNote: () => void;
   descendants: number;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -367,19 +366,16 @@ function Node(props: {
           />
         </Show>
         <Show when={props.note && !props.writing}>
-          <button
-            type="button"
+          {/* An indicator only: short ideas are mostly badge, so a clickable
+              badge would open notes when people meant to select the idea. */}
+          <span
+            role="img"
             class="note-badge"
-            aria-label="Open notes"
-            title={`Has notes · open them (${ALT_LABEL}N)`}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              props.onOpenNote();
-            }}
+            aria-label="Has notes"
+            title={`Has notes · open them with ${ALT_LABEL}N`}
           >
             <NoteIcon class="size-3.5" />
-          </button>
+          </span>
         </Show>
         <Show when={props.collapsed}>
           <button
@@ -913,10 +909,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setHistoryRevision((n) => n + 1);
       const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
+      // Undo from inside the notes panel keeps the person writing notes
+      // instead of reopening the idea's title editor.
+      const resumeWriting =
+        selection.writing &&
+        !document.activeElement?.matches('textarea[aria-label="Idea notes"]');
       setSelectedId(selection.id);
-      setWriting(selection.writing);
+      setWriting(resumeWriting);
       editorSelection = selection.text;
-      if (selection.writing && selection.text) {
+      if (resumeWriting && selection.text) {
         queueMicrotask(() => {
           const editor = canvas.querySelector<HTMLTextAreaElement>(
             '[aria-label="Node text"]',
@@ -3922,10 +3923,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 dragging={draggingId() === id}
                 root={!details().get(id)?.parent || focusId() === id}
                 note={!!view().note(id).trim()}
-                onOpenNote={() => {
-                  select(id);
-                  toggleNotes(true);
-                }}
                 descendants={details().get(id)?.descendants ?? 0}
                 collapsed={collapsedIds().has(id)}
                 onToggleCollapse={() => {

@@ -702,7 +702,11 @@ describe("capture flow", () => {
     expect((await nodeData(child))?.note).toBe("Details here");
     await page.keyboard.press("Escape");
     await notes.waitFor({ state: "detached" });
-    await node(child).getByRole("button", { name: "Open notes" }).click();
+    await node(child).getByRole("img", { name: "Has notes" }).waitFor();
+    // The badge is only an indicator: clicking the idea selects it.
+    await node(child).click();
+    expect(await notes.count()).toBe(0);
+    await page.getByRole("button", { name: "Notes", exact: true }).click();
     expect(await notes.inputValue()).toBe("Details here");
   });
 });

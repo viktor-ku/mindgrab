@@ -38,7 +38,9 @@ export class EditHistory<Selection> {
     this.#restoreListeners.add(listener);
   }
   finishGroup() {
-    if (this.#doc.ready) {
+    // Restore listeners may resume writing during undo/redo; #pop starts the
+    // next group itself once they finish, and Loro rejects a second start.
+    if (this.#doc.ready && !this.#popping) {
       this.#doc.native().stopGroup();
       this.#doc.native().startGroup();
     }
