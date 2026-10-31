@@ -164,8 +164,13 @@ async function currentId(page: Page) {
   return project.projectId as string;
 }
 async function openNamed(page: Page, name: string) {
-  await page.getByRole("button", { name: "Load", exact: true }).click();
-  await page.getByRole("button").filter({ hasText: name }).click();
+  await page.getByRole("button", { name: "Project menu" }).click();
+  await page.getByRole("menuitem", { name: "Open map…" }).click();
+  await page
+    .locator("#saved-projects")
+    .getByRole("menuitem")
+    .filter({ hasText: name })
+    .click();
   await saved(page);
 }
 

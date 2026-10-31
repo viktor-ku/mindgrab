@@ -245,10 +245,15 @@ async function login(user = A) {
   await page.getByText(user.name, { exact: true }).waitFor();
   await ready();
 }
+async function projectMenu(item: string) {
+  await page.getByRole("button", { name: "Project menu" }).click();
+  // Menu item names include their shortcut hints, such as "Save now ⌘S".
+  await page.getByRole("menuitem", { name: item }).first().click();
+}
 async function rename(name: string) {
   await page.getByRole("textbox", { name: "Project name" }).fill(name);
   await page.getByRole("textbox", { name: "Project name" }).press("Enter");
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await projectMenu("Save now");
   await page.getByText("Saved locally.", { exact: true }).waitFor();
 }
 async function edit(text: string) {
@@ -486,9 +491,7 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await cloudSaved();
   const id = await call("id");
   expect(backend.projects.has(id)).toBe(true);
-  await page
-    .getByRole("button", { name: "Project preferences", exact: true })
-    .click();
+  await projectMenu("Project preferences…");
   const dialog = page.getByRole("dialog", { name: "Project preferences" });
   await dialog.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
   await page.getByText("Cloud saving off", { exact: true }).waitFor();
@@ -511,14 +514,14 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   const registrations = backend.registrations.length;
   await edit("Secret work stays here");
   await refreshAccount();
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await projectMenu("Save now");
   await page
     .getByText("Local saving is off. Export a copy to keep your work.")
     .waitFor();
   expect(backend.uploads).toHaveLength(uploads);
   expect(backend.registrations).toHaveLength(registrations);
   expect(backend.projects.has(id)).toBe(false);
-  await page.getByRole("button", { name: "New", exact: true }).click();
+  await projectMenu("New map");
   await page.waitForFunction((id) => window.accountHarness.id() !== id, id);
   expect(backend.registrations).toHaveLength(registrations);
   await page
@@ -531,17 +534,15 @@ test("cloud-only projects load after reload without leaving a local copy", async
   await rename("Cloud only project");
   await cloudSaved();
   const id = await call("id");
-  await page
-    .getByRole("button", { name: "Project preferences", exact: true })
-    .click();
+  await projectMenu("Project preferences…");
   await page.getByRole("switch", { name: "Save locally", exact: true }).click();
   await page.getByRole("button", { name: "Close project preferences" }).click();
   await cloudSaved();
   await page.reload();
   await ready();
-  await page.getByRole("button", { name: "Load", exact: true }).click();
+  await projectMenu("Open map…");
   await page
-    .getByRole("button", { name: `Cloud only project · ${id.slice(0, 8)}` })
+    .getByRole("menuitem", { name: `Cloud only project · ${id.slice(0, 8)}` })
     .click();
   await page.getByText("Local saving off", { exact: true }).waitFor();
   expect(await call("id")).toBe(id);
@@ -558,9 +559,7 @@ test("cloud-only projects load after reload without leaving a local copy", async
 
 test("anonymous projects with cloud saving off are never offered for account upload", async () => {
   const id = await call("id");
-  await page
-    .getByRole("button", { name: "Project preferences", exact: true })
-    .click();
+  await projectMenu("Project preferences…");
   await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
   await page.getByRole("button", { name: "Close project preferences" }).click();
   await login();
