@@ -170,7 +170,7 @@ describe("Markdown outline", () => {
         "  - First line",
         "    second line",
         "",
-        "      indented",
+        "    indented",
         "    - New idea",
         "  - Plain #hash and a - dash",
         "- \\# not a heading",

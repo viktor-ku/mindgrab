@@ -2157,14 +2157,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const { undo } = session();
     undo.finishGroup();
     undo.undo();
-    canvas.focus({ preventScroll: true });
+    focusAfterHistory();
   }
 
   function redo() {
     const { undo } = session();
     undo.finishGroup();
     undo.redo();
-    canvas.focus({ preventScroll: true });
+    focusAfterHistory();
+  }
+
+  // An open idea editor always has keyboard focus, however it opened (undo,
+  // redo, a toolbar button), unless someone is typing in the notes panel.
+  createEffect(
+    on([writing, selectedId], ([open]) => {
+      if (!open) return;
+      queueMicrotask(() => {
+        const editor = canvas.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="Node text"]',
+        );
+        const active = document.activeElement;
+        if (
+          editor &&
+          active !== editor &&
+          !active?.matches('textarea[aria-label="Idea notes"], input')
+        )
+          editor.focus({ preventScroll: true });
+      });
+    }),
+  );
+
+  // A restored edit keeps its editor focused; otherwise keys go to the map.
+  function focusAfterHistory() {
+    if (!writing()) return canvas.focus({ preventScroll: true });
+    canvas
+      .querySelector<HTMLTextAreaElement>('textarea[aria-label="Node text"]')
+      ?.focus({ preventScroll: true });
   }
 
   const canUndo = () => {
@@ -2919,15 +2947,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // Let the callback decide whether the target accepts text before suppressing
     // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
+      // A modal dialog owns the keyboard; map shortcuts would act behind it.
+      if (showPreferences() || showHelp()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
       // text fields, without tabbing through the map (Tab adds ideas there).
       if (
         event.key === "F6" &&
         !event.ctrlKey &&
         !event.metaKey &&
-        !event.altKey &&
-        !showPreferences() &&
-        !showHelp()
+        !event.altKey
       ) {
         event.preventDefault();
         finishWriting();

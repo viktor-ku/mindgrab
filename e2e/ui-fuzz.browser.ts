@@ -703,7 +703,8 @@ const isField = (focus: string) =>
 // Mirrors the editor's history shortcut: ignored from other inputs, while a
 // menu is open, and while writing with focus elsewhere.
 function undoBlocked(state: State) {
-  if (!state.ready || state.contextMenu) return true;
+  // A modal dialog (shortcuts, preferences) owns the keyboard.
+  if (!state.ready || state.contextMenu || state.dialog) return true;
   if (state.focus.startsWith("input:")) return true;
   if (state.editors.length && !state.editors.some((e) => e.focused))
     return true;

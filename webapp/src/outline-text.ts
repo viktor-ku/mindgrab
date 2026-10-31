@@ -52,6 +52,17 @@ export function parseBranchEntry(data: string): OutlineEntry | undefined {
   }
 }
 
+// Anything parseOutline reads as structure at the start of a line: a heading,
+// quote, bullet, checkbox or number. Copied and exported text escapes it (and a
+// backslash before it) with one extra leading backslash, which pasting removes.
+const STRUCTURE = String.raw`(?:#+|[>*+•◦▪‣-]|\d+[.)]|\[[ xX]\])`;
+const NEEDS_ESCAPE = new RegExp(
+  String.raw`^(?=\\+` + STRUCTURE + "|" + STRUCTURE + String.raw`(?:\s|$))`,
+);
+const ESCAPED = new RegExp(String.raw`^\\(?=\\*` + STRUCTURE + ")");
+export const escapeLine = (line: string) => line.replace(NEEDS_ESCAPE, "\\");
+const unescapeLine = (line: string) => line.replace(ESCAPED, "");
+
 // Bullets and numbering that mark list items in pasted outlines.
 // Numbering is at most three digits so prose like "2024. A good year" survives.
 const MARKER = /^(?:[-*+•◦▪‣]|\d{1,3}[.)]|\[[ xX]\])\s+/;
@@ -65,21 +76,18 @@ export function parseOutline(text: string): OutlineEntry[] {
   const stack: { indent: number; entry: OutlineEntry }[] = [];
   for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
     if (!raw.trim()) continue;
-    const expanded = raw.replace(/\t/g, "    ");
-    let content = expanded.trim();
+    // Tabs count as four spaces of indentation; tabs inside text stay tabs.
+    const leading = (/^[ \t]*/.exec(raw) as RegExpExecArray)[0];
+    let content = raw.trim();
     // A heading contains everything until the next heading of its level.
     const heading = /^(#{1,6})\s+/.exec(content);
     const indent = heading
       ? heading[1].length - 100
-      : expanded.length - expanded.trimStart().length;
+      : leading.replace(/\t/g, "    ").length;
     if (heading) content = content.slice(heading[0].length);
     // A marker with nothing after it (trimmed "- ") is an empty item.
     if (/^(?:[-*+•◦▪‣]|\d{1,3}[.)]|\[[ xX]\])$/.test(content)) continue;
-    content = content
-      .replace(MARKER, "")
-      // Copied text escapes markers with one extra leading backslash.
-      .replace(/^\\(?=\\*(?:[#>+*-]|\d+[.)]))/, "")
-      .trim();
+    content = unescapeLine(content.replace(MARKER, "")).trim();
     if (!content) continue;
     const entry: OutlineEntry = { text: content, children: [] };
     while (stack.length && stack[stack.length - 1].indent >= indent)
@@ -100,12 +108,11 @@ export function branchOutline(
 ): string {
   const lines: string[] = [];
   const visit = (current: MindMapNode, depth: number) => {
-    const value = text(current.id)
-      .replace(/\s*\n\s*/g, " ")
-      .trim()
-      // Escape text that would read as a heading, quote or list marker, and a
-      // backslash that would read as such an escape.
-      .replace(/^(?=\\+(?:[#>+*-]|\d+[.)])|(?:[#>+*-]|\d+[.)])\s)/, "\\");
+    const value = escapeLine(
+      text(current.id)
+        .replace(/\s*[\r\n]+\s*/g, " ")
+        .trim(),
+    );
     lines.push(`${"  ".repeat(depth)}- ${value || "New idea"}`);
     for (const child of current.next ?? []) visit(child, depth + 1);
   };

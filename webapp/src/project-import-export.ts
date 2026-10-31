@@ -7,6 +7,7 @@ import {
   SCHEMA_VERSION,
 } from "./project-document";
 import type { ProjectDocument, DocumentView } from "./project-document";
+import { escapeLine } from "./outline-text";
 import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
@@ -67,13 +68,21 @@ const AnchorSchema = z.strictObject({
   centerY: z.number().finite(),
 });
 
+// Text must be valid Unicode: a lone surrogate cannot be stored or synced.
+const wellFormed = (value: string) =>
+  !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+    value,
+  );
+const WELL_FORMED = "Text contains an invalid character.";
+
 function nodeSchema(depth: number): z.ZodType<ProjectFileNode> {
   return z.lazy(() =>
     z.strictObject({
       id: z.string().min(1).max(128),
-      text: z.string().max(LIMITS.text),
+      text: z.string().max(LIMITS.text).refine(wellFormed, WELL_FORMED),
       note: z
         .string()
+        .refine(wellFormed, WELL_FORMED)
         .refine(
           (note) => note.length <= LIMITS.note,
           `Note must be at most ${LIMITS.note} UTF-16 units.`,
@@ -97,6 +106,7 @@ const PortableProjectSchema = z
       name: z
         .string()
         .refine((name) => name.trim().length > 0, "Project name is required.")
+        .refine(wellFormed, WELL_FORMED)
         .refine(
           (name) => new TextEncoder().encode(name).length <= LIMITS.nameBytes,
           `Project name must be at most ${LIMITS.nameBytes} bytes.`,
@@ -374,7 +384,9 @@ export function projectMarkdown(
   text: (id: string) => string,
   note?: (id: string) => string,
 ) {
-  const lines = [`# ${escapeMarkdown(name.trim() || "Untitled map")}`, ""];
+  // The title is one heading line, whatever the name contains.
+  const title = name.replace(/\s*[\r\n]+\s*/g, " ").trim() || "Untitled map";
+  const lines = [`# ${escapeMarkdown(title)}`, ""];
   const visit = (nodes: readonly OutlineNode[], depth: number) => {
     for (const node of nodes) {
       const indent = "  ".repeat(depth);
@@ -395,10 +407,9 @@ export function projectMarkdown(
   return `${lines.join("\n")}\n`;
 }
 
-// Leading list, heading and quote markers would change the outline structure.
-function escapeMarkdown(line: string) {
-  return line.replace(/^(\s*)([#>+*-]|\d+[.)])(\s)/, "$1\\$2$3");
-}
+// Leading headings, quotes, bullets, checkboxes and numbers would change the
+// outline structure when pasted back; leading spaces are dropped by pasting.
+const escapeMarkdown = (line: string) => escapeLine(line.trimStart());
 
 async function writeFile(
   suggestedName: string,
