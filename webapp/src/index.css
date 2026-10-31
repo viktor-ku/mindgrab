@@ -558,3 +558,24 @@ kbd {
   border-radius: 999px;
   background: #d6d3d1;
 }
+.note-badge {
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  flex-shrink: 0;
+  margin-right: -0.25rem;
+  border-radius: 0.3rem;
+  opacity: 0.7;
+  cursor: pointer;
+}
+.note-badge:hover {
+  background: #ffffff59;
+  opacity: 1;
+}
+.notes-panel {
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}

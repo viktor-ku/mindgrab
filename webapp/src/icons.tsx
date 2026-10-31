@@ -175,3 +175,10 @@ export const OutlineIcon = (props: IconProps) => (
     <path d="M3.5 5h.01M6 10h.01M6 15h.01" stroke-width="2.4" />
   </Icon>
 );
+
+export const NoteIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M5 3.5h7l3 3v10H5z" />
+    <path d="M12 3.5v3h3M7.5 10h5M7.5 13h3.5" />
+  </Icon>
+);

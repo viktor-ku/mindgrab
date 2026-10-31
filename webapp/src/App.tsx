@@ -72,6 +72,7 @@ import {
 } from "./project-import-export";
 import { MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
 import { Outline } from "./Outline";
+import { NotesPanel } from "./NotesPanel";
 import { branchOutline, outlineSize, parseOutline } from "./outline-text";
 import type { OutlineEntry } from "./outline-text";
 import {
@@ -88,6 +89,7 @@ import {
   HelpIcon,
   MinusIcon,
   MoreIcon,
+  NoteIcon,
   OutlineIcon,
   PlusIcon,
   RedoIcon,
@@ -205,7 +207,7 @@ function NodeEditor(props: {
   });
 
   return (
-    <div class="relative min-w-px">
+    <div class="relative min-w-px flex-1">
       <span
         class="block whitespace-pre-wrap wrap-anywhere invisible"
         aria-hidden="true"
@@ -271,6 +273,8 @@ function Node(props: {
   writing: boolean;
   dragging: boolean;
   root: boolean;
+  note: boolean;
+  onOpenNote: () => void;
   descendants: number;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -329,11 +333,8 @@ function Node(props: {
         />
       </Show>
       <div
-        class={`map-node-card relative grid items-center box-border border ${fill()}`}
-        classList={{
-          "grid-cols-[minmax(0,1fr)_auto] gap-x-2": props.collapsed,
-          "map-node-selected": props.selected,
-        }}
+        class={`map-node-card relative flex items-center gap-2 box-border border ${fill()}`}
+        classList={{ "map-node-selected": props.selected }}
         style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
       >
         <Show
@@ -344,7 +345,7 @@ function Node(props: {
               aria-pressed={props.selected}
               aria-expanded={props.descendants ? !props.collapsed : undefined}
               aria-keyshortcuts={props.descendants ? "g" : undefined}
-              class="w-full min-w-0 whitespace-pre-wrap wrap-anywhere cursor-pointer outline-none"
+              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere cursor-pointer outline-none"
             >
               {props.text || "New idea"}
             </button>
@@ -356,6 +357,21 @@ function Node(props: {
             onFinish={props.onFinish}
             onSelectionChange={props.onSelectionChange}
           />
+        </Show>
+        <Show when={props.note && !props.writing}>
+          <button
+            type="button"
+            class="note-badge"
+            aria-label="Open notes"
+            title="Has notes · open them (N)"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              props.onOpenNote();
+            }}
+          >
+            <NoteIcon class="size-3.5" />
+          </button>
         </Show>
         <Show when={props.collapsed}>
           <button
@@ -1474,11 +1490,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
+  const [notesOpen, setNotesOpen] = createSignal(false);
+  // Opening notes from the keyboard moves focus into them; closing returns it.
+  function toggleNotes(open = !notesOpen()) {
+    finishWriting();
+    setNotesOpen(open);
+    if (open && selectedId())
+      queueMicrotask(() =>
+        document
+          .querySelector<HTMLTextAreaElement>(
+            'textarea[aria-label="Idea notes"]',
+          )
+          ?.focus(),
+      );
+    else canvas.focus({ preventScroll: true });
+  }
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
-  const viewInsets = () =>
-    outlineOpen() && canvasSize().width >= 640
-      ? { ...VIEW_INSETS, left: 316 }
-      : VIEW_INSETS;
+  const viewInsets = () => {
+    const wide = canvasSize().width >= 640;
+    return {
+      ...VIEW_INSETS,
+      ...(wide && outlineOpen() && { left: 316 }),
+      ...(wide && notesOpen() && { right: 348 }),
+    };
+  };
   // Branches travel through the clipboard as indented Markdown lists, so they
   // paste into other apps and pasted outlines become branches here.
   function pasteOutline(entries: OutlineEntry[]) {
@@ -2374,6 +2409,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setOutlineOpen((open) => !open);
         return;
       }
+      if (
+        matchesLetter(e, "n") &&
+        !e.repeat &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey
+      ) {
+        e.preventDefault();
+        toggleNotes();
+        return;
+      }
       // Physical keys keep view shortcuts working on every keyboard layout.
       const mod = e.ctrlKey || e.metaKey;
       if (mod && !e.altKey && ["Equal", "NumpadAdd"].includes(e.code)) {
@@ -2564,7 +2611,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const target = event.target;
       const textEditor =
         target instanceof Element &&
-        target.matches('textarea[aria-label="Node text"]');
+        target.matches(
+          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"]',
+        );
       if (
         target instanceof Element &&
         target.closest("input, textarea, [contenteditable=true]") &&
@@ -3284,6 +3333,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </search>
         </Show>
       </div>
+      <Show when={notesOpen()}>
+        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col">
+          <NotesPanel
+            doc={session().doc}
+            id={selectedId()}
+            title={nodeLabel(selectedId() ?? "")}
+            onFocusChange={() => session().undo.finishGroup()}
+            onClose={() => toggleNotes(false)}
+          />
+        </div>
+      </Show>
       <Show when={outlineOpen()}>
         <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col">
           <Outline
@@ -3517,6 +3577,26 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 class={`size-4.5 rounded-full border-2 ${(NODE_COLORS.find((color) => color.value === (selectedNode()?.color ?? "blue")) ?? NODE_COLORS[0]).swatchClass}`}
               />
             </button>
+            <button
+              type="button"
+              class="icon-button relative"
+              aria-label="Notes"
+              title="Notes (N)"
+              aria-pressed={notesOpen()}
+              onClick={() => toggleNotes()}
+            >
+              <NoteIcon />
+              <Show
+                when={view()
+                  .note(selectedId() ?? "")
+                  .trim()}
+              >
+                <span
+                  aria-hidden="true"
+                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue-600"
+                />
+              </Show>
+            </button>
             <Show when={details().get(selectedId() ?? "")?.descendants}>
               <button
                 type="button"
@@ -3672,6 +3752,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
                 root={!details().get(id)?.parent || focusId() === id}
+                note={!!view().note(id).trim()}
+                onOpenNote={() => {
+                  select(id);
+                  toggleNotes(true);
+                }}
                 descendants={details().get(id)?.descendants ?? 0}
                 collapsed={collapsedIds().has(id)}
                 onToggleCollapse={() => {
@@ -3860,6 +3945,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     >
                       Move out to parent level
                       <kbd class="ml-auto">Ctrl←</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      onClick={run(() => toggleNotes(true))}
+                    >
+                      {view().note(nodeId()).trim()
+                        ? "Open notes"
+                        : "Add notes"}
+                      <kbd class="ml-auto">N</kbd>
                     </button>
                     <Show when={placedIds(nodeId()).length}>
                       <button

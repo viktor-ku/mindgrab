@@ -40,6 +40,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     items: [
       [`${MOD_LABEL}F · /`, "Search; Esc returns to where you were"],
       ["F", "Focus on the selected branch"],
+      ["N", "Open notes for the selected idea"],
       ["O", "Show or hide the outline"],
       ["⇧1", "Fit the whole map"],
       ["⇧2", "Fit the selected branch"],
