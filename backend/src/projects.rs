@@ -41,6 +41,8 @@ struct Create {
 struct Page {
     limit: Option<i64>,
     cursor: Option<Uuid>,
+    // One page of the most recently updated projects, for opening on a new device.
+    recent: Option<bool>,
 }
 fn parse<T: serde::de::DeserializeOwned>(headers: &HeaderMap, body: &Bytes) -> Result<T> {
     if headers
@@ -150,12 +152,13 @@ pub async fn rpc(
         "listProjects" => {
             let args: Page = parse(&headers, &body)?;
             let limit = args.limit.unwrap_or(100);
-            if !(1..=100).contains(&limit) {
+            let recent = args.recent.unwrap_or(false);
+            // Recency order has no stable cursor, so it is a single page.
+            if !(1..=100).contains(&limit) || (recent && args.cursor.is_some()) {
                 return Err(ApiError::invalid());
             }
-            // updatedAt lets a new device open the most recently changed map.
-            let rows: Vec<(Uuid,Option<String>,String)> = sqlx::query_as("SELECT id,name,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).fetch_all(&app.pool).await?;
-            let cursor = if rows.len() > limit as usize {
+            let rows: Vec<(Uuid,Option<String>,String)> = sqlx::query_as("SELECT id,name,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY CASE WHEN $4 THEN updated_at END DESC, id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).bind(recent).fetch_all(&app.pool).await?;
+            let cursor = if rows.len() > limit as usize && !recent {
                 rows.get(limit as usize - 1).map(|row| row.0)
             } else {
                 None

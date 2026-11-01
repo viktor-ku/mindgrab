@@ -395,65 +395,86 @@ export async function discoverProjects(
     signal.throwIfAborted();
     const known = knownProjects.get(project.projectId);
     if (known?.saving?.cloud === false) continue;
-    const snapshot = await api.snapshot(project.projectId, signal);
-    signal.throwIfAborted();
-    // Inspect cloud preferences before opening any writable local database.
-    const handle = await repository.open(project.projectId, {
-      remember: false,
-      initialSnapshot: decodeBase64(snapshot.data),
-    });
-    try {
-      signal.throwIfAborted();
-      await handle.flush();
-      signal.throwIfAborted();
-      await handle.refreshMetadata();
-      signal.throwIfAborted();
-      await repository.markRegistered(handle.id);
-    } finally {
-      await handle.close();
-    }
+    const handle = await importCloudProject(
+      repository,
+      api,
+      project.projectId,
+      signal,
+    );
+    await handle.close();
   }
 }
 
-// A browser without local history for an account opens the account's most
-// recently updated cloud map, so signing in never needs to seed an empty one.
-// Projects this device keeps out of the cloud are left to local discovery.
-export async function openLatestCloudProject(
+// Stores one cloud project locally, marks it registered and leaves it open.
+async function importCloudProject(
   repository: ProjectRepository,
   api: LoroApi,
+  id: string,
   signal: AbortSignal,
-): Promise<ProjectHandle | undefined> {
-  const projects = await api.list(signal);
+) {
+  const snapshot = await api.snapshot(id, signal);
   signal.throwIfAborted();
-  const known = new Map(
-    (await repository.list()).map((entry) => [entry.id, entry]),
-  );
-  const updated = (project: (typeof projects)[number]) =>
-    Date.parse(project.updatedAt ?? "") || 0;
-  const latest = projects
-    .filter((project) => known.get(project.projectId)?.saving?.cloud !== false)
-    .reduce<(typeof projects)[number] | undefined>(
-      (best, project) =>
-        !best || updated(project) > updated(best) ? project : best,
-      undefined,
-    );
-  if (!latest) return;
-  const snapshot = await api.snapshot(latest.projectId, signal);
-  signal.throwIfAborted();
-  const handle = await repository.open(latest.projectId, {
+  // Inspect cloud preferences before opening any writable local database.
+  const handle = await repository.open(id, {
     remember: false,
     initialSnapshot: decodeBase64(snapshot.data),
   });
   try {
     signal.throwIfAborted();
     await handle.flush();
+    signal.throwIfAborted();
     await handle.refreshMetadata();
+    signal.throwIfAborted();
     await repository.markRegistered(handle.id);
-    await repository.setLatestProject(handle.id);
     return handle;
   } catch (error) {
-    await handle.close();
+    await handle.close().catch(() => {});
     throw error;
+  }
+}
+
+// A browser without local projects for an account opens the account's most
+// recently changed cloud map, so signing in never needs to seed an empty one.
+// Projects this device keeps out of the cloud, and claim copies that are not
+// registered yet, are skipped. Transient failures retry until `signal` ends.
+export async function openLatestCloudProject(
+  repository: ProjectRepository,
+  api: LoroApi,
+  signal: AbortSignal,
+): Promise<ProjectHandle | undefined> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const recent = await api.recent(signal);
+      signal.throwIfAborted();
+      const known = new Map(
+        (await repository.list({ includeClaims: true })).map((entry) => [
+          entry.id,
+          entry,
+        ]),
+      );
+      const latest = recent.find(({ projectId }) => {
+        const entry = known.get(projectId);
+        return entry?.saving?.cloud !== false && !entry?.claimPending;
+      });
+      if (!latest) return;
+      const handle = await importCloudProject(
+        repository,
+        api,
+        latest.projectId,
+        signal,
+      );
+      await repository.setLatestProject(handle.id).catch(() => {});
+      return handle;
+    } catch (error) {
+      if (
+        signal.aborted ||
+        attempt >= 2 ||
+        (error instanceof SyncError && error.kind !== "retry")
+      )
+        throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+    signal.throwIfAborted();
   }
 }
 

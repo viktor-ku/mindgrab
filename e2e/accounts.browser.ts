@@ -46,6 +46,8 @@ class Backend {
   meGate?: ReturnType<typeof deferred>;
   catalogGate?: ReturnType<typeof deferred>;
   catalogStarted = false;
+  // Fails this many "recent projects" requests with a transient 503.
+  recentFailures = 0;
   meStarted = false;
   lostRegistration = false;
   leaveCookieOnLogout = false;
@@ -128,11 +130,20 @@ class Backend {
       });
     }
     if (url.pathname === "/api/listProjects") {
-      this.catalogStarted = true;
-      // Like the server: ordered by UUID, not by recency.
+      const { recent = false, limit = 100 } = request.postDataJSON();
+      if (recent && this.recentFailures > 0) {
+        this.recentFailures--;
+        return error(503, "unavailable");
+      }
+      // Like the server: by UUID, or a single page with the latest change first.
       const projects = [...this.projects]
         .filter(([, entry]) => entry.ownerId === owner.id && entry.doc.ready)
-        .sort(([a], [b]) => a.localeCompare(b))
+        .sort(
+          ([a, x], [b, y]) =>
+            (recent && (y.updatedAt ?? "").localeCompare(x.updatedAt ?? "")) ||
+            a.localeCompare(b),
+        )
+        .slice(0, limit)
         .map(([projectId, entry]) => ({
           projectId,
           format: "mindgrab-loro-v1",
@@ -140,7 +151,11 @@ class Backend {
           name: null,
           ...(entry.updatedAt && { updatedAt: entry.updatedAt }),
         }));
-      await this.catalogGate?.promise;
+      // The gate holds background discovery, not a new browser's first open.
+      if (!recent) {
+        this.catalogStarted = true;
+        await this.catalogGate?.promise;
+      }
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
     if (url.pathname === "/api/deleteProject") {
@@ -334,8 +349,12 @@ test("signing in from fresh browsers opens the latest cloud map instead of addin
     await rename(name);
     const id = await call("id");
     const record = () => backend.projects.get(id)?.doc;
-    while (!record()?.ready || record()?.view().name !== name)
+    const deadline = Date.now() + 10_000;
+    while (!record()?.ready || record()?.view().name !== name) {
+      if (Date.now() > deadline)
+        throw new Error(`"${name}" (${id}) never reached the cloud`);
       await Bun.sleep(10);
+    }
     return id;
   };
   // An account without maps gets exactly one first map.
@@ -347,14 +366,20 @@ test("signing in from fresh browsers opens the latest cloud map instead of addin
   const latest = await renameInCloud("Podcast plan");
   expect(accountMaps()).toHaveLength(2);
   const registrations = backend.registrations.length;
-  for (const draft of ["First browser draft", "Second browser draft"]) {
+  for (const [draft, failures] of [
+    ["First browser draft", 0],
+    // A transient catalog failure is retried rather than seeding a map.
+    ["Second browser draft", 1],
+  ] as const) {
     await context.close();
     backend.user = undefined;
+    backend.recentFailures = failures;
     await openFreshBrowser();
     await edit(draft);
     await login();
-    // The most recently updated map opens, though the catalog lists it by UUID.
+    // The most recently changed map opens, not an empty new one.
     expect(await call("id")).toBe(latest);
+    expect(backend.recentFailures).toBe(0);
     expect(await page.getByLabel("Project name").inputValue()).toBe(
       "Podcast plan",
     );

@@ -114,6 +114,24 @@ export class LoroApi {
     return this.#read("catalog", signal, (signal) => this.#list(signal));
   }
 
+  // One page of this account's projects, most recently changed first.
+  recent(signal: AbortSignal) {
+    return this.#read(
+      "recent",
+      signal,
+      async (signal) =>
+        z
+          .object({ projects: z.array(record) })
+          .parse(
+            await this.#json(
+              "listProjects",
+              { limit: 20, recent: true },
+              signal,
+            ),
+          ).projects,
+    );
+  }
+
   snapshot(id: string, signal: AbortSignal) {
     return this.#read(
       "snapshot",

@@ -510,6 +510,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let disposed = false;
   let activation = 0;
   let claimAbort: AbortController | undefined;
+  // Ends a new browser's cloud lookup when its account leaves.
+  let cloudLookup: AbortController | undefined;
   const parked = new Set<{
     repository: ProjectRepository;
     handle: ProjectHandle;
@@ -719,32 +721,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (root) setSelectedId(root);
   }
 
-  // Without a remembered project, open an existing one before seeding a map.
-  // A new browser has no local history for an account, so its cloud catalog
+  // Without a remembered project, open an existing one before seeding a map:
+  // this device's newest, else the account's most recently changed cloud map.
+  // A new browser has no local projects for an account, so its cloud catalog
   // decides; otherwise every sign-in on a new device added an empty map.
   async function openExisting(target: ProjectRepository) {
-    const ownerId = activeUserId;
-    if (
-      ownerId &&
-      target.scope.namespace === accountNamespace(ownerId) &&
-      navigator.onLine !== false
-    ) {
-      try {
-        const handle = await openLatestCloudProject(
-          target,
-          new LoroApi(undefined, undefined, ownerId, queryClient),
-          AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
-        );
-        if (handle) return handle;
-      } catch {
-        // Offline or unavailable: this device's own projects decide instead.
-      }
-      if (target !== repository || disposed) return;
-    }
     const [local] = (await target.list()).sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt),
     );
-    return local && target.open(local.id);
+    if (local) return target.open(local.id);
+    const ownerId = activeUserId;
+    if (
+      target !== repository ||
+      disposed ||
+      !ownerId ||
+      target.scope.namespace !== accountNamespace(ownerId) ||
+      navigator.onLine === false
+    )
+      return;
+    cloudLookup?.abort();
+    const lookup = new AbortController();
+    cloudLookup = lookup;
+    try {
+      return await openLatestCloudProject(
+        target,
+        new LoroApi(undefined, undefined, ownerId, queryClient),
+        AbortSignal.any([
+          lookup.signal,
+          AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
+        ]),
+      );
+    } catch {
+      // Unavailable: a first map is still better than no editor.
+      return;
+    } finally {
+      if (cloudLookup === lookup) cloudLookup = undefined;
+    }
   }
 
   async function openLatestOrCreate(target = repository) {
@@ -842,6 +854,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     activation++;
+    cloudLookup?.abort();
     window.clearTimeout(viewSaveTimer);
     stopCatalog?.();
     stopDurability?.();
@@ -2753,6 +2766,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       disposed = true;
       activation++;
       claimAbort?.abort();
+      cloudLookup?.abort();
       stopAuth();
       auth.destroy();
       cloud?.destroy();
