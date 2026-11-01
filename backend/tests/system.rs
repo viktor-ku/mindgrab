@@ -232,6 +232,11 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
         .await
         .unwrap();
     assert_eq!(list["projects"][0]["name"], "Planning");
+    let updated_at = list["projects"][0]["updatedAt"].as_str().unwrap();
+    assert!(
+        updated_at.ends_with('Z') && updated_at.len() == 27,
+        "{updated_at}"
+    );
     let response=f.rpc("commandProject",&alice,json!({"projectId":id,"command":{"type":"createNode","parent":root,"index":null,"text":"Native Rust node","color":"teal"}})).await;
     assert_eq!(response.status(), 200);
     let (committed, _) = baseline(&f, &alice, id).await;
@@ -281,5 +286,65 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
         200
     );
     assert_eq!(upload(&f, &alice, id, &committed).await.status(), 200);
+    f.close().await;
+}
+
+async fn recent(f: &Fixture, browser: &str) -> Vec<String> {
+    let list: Value = f
+        .rpc("listProjects", browser, json!({"limit":100,"recent":true}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(list["nextCursor"].is_null());
+    list["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|project| project["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+#[tokio::test]
+async fn recent_project_listing_orders_by_last_committed_change() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let mut projects = Vec::new();
+    for name in ["First", "Second"] {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            f.rpc(
+                "createProject",
+                &alice,
+                json!({"projectId":id,"schemaVersion":1})
+            )
+            .await
+            .status(),
+            200
+        );
+        let project = Project::new(name).unwrap();
+        assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+        projects.push((id, project));
+    }
+    // An unchanged merge keeps the order; a real edit moves a project first.
+    let (first, project) = &mut projects[0];
+    assert_eq!(upload(&f, &alice, *first, project).await.status(), 200);
+    assert_eq!(recent(&f, &alice).await, ["Second", "First"]);
+    project
+        .apply(Command::Rename {
+            name: "First, edited".into(),
+        })
+        .unwrap();
+    assert_eq!(upload(&f, &alice, *first, project).await.status(), 200);
+    assert_eq!(recent(&f, &alice).await, ["First, edited", "Second"]);
+    assert_eq!(
+        f.rpc(
+            "listProjects",
+            &alice,
+            json!({"limit":1,"recent":true,"cursor":Uuid::new_v4()})
+        )
+        .await
+        .status(),
+        400
+    );
     f.close().await;
 }

@@ -130,7 +130,7 @@ import type {
   NodeSize,
 } from "./mind-map";
 import { backendDeployment } from "./backend";
-import { CloudWorkspace } from "./project-sync";
+import { CloudWorkspace, openLatestCloudProject } from "./project-sync";
 import type { CloudStatus } from "./project-sync";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
@@ -153,6 +153,9 @@ function matchesLetter(event: KeyboardEvent, letter: string) {
 
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 2.5;
+// How long a new browser waits for the account's cloud maps before falling
+// back to this device's own projects.
+const CLOUD_CATALOG_TIMEOUT_MS = 10_000;
 // A device-wide input preference: what a plain scroll wheel does on the canvas.
 type WheelMode = "pan" | "zoom";
 const WHEEL_MODE_KEY = "mindgrab:wheel-mode";
@@ -507,6 +510,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let disposed = false;
   let activation = 0;
   let claimAbort: AbortController | undefined;
+  // Ends a new browser's cloud lookup when its account leaves.
+  let cloudLookup: AbortController | undefined;
   const parked = new Set<{
     repository: ProjectRepository;
     handle: ProjectHandle;
@@ -716,6 +721,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (root) setSelectedId(root);
   }
 
+  // Without a remembered project, open an existing one before seeding a map:
+  // this device's newest, else the account's most recently changed cloud map.
+  // A new browser has no local projects for an account, so its cloud catalog
+  // decides; otherwise every sign-in on a new device added an empty map.
+  async function openExisting(target: ProjectRepository) {
+    const [local] = (await target.list()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
+    );
+    if (local) return target.open(local.id);
+    const ownerId = activeUserId;
+    if (
+      target !== repository ||
+      disposed ||
+      !ownerId ||
+      target.scope.namespace !== accountNamespace(ownerId) ||
+      navigator.onLine === false
+    )
+      return;
+    cloudLookup?.abort();
+    const lookup = new AbortController();
+    cloudLookup = lookup;
+    try {
+      return await openLatestCloudProject(
+        target,
+        new LoroApi(undefined, undefined, ownerId, queryClient),
+        AbortSignal.any([
+          lookup.signal,
+          AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
+        ]),
+      );
+    } catch {
+      // Unavailable: a first map is still better than no editor.
+      return;
+    } finally {
+      if (cloudLookup === lookup) cloudLookup = undefined;
+    }
+  }
+
   async function openLatestOrCreate(target = repository) {
     const latest = await target.latestProject();
     if (target !== repository || disposed) return;
@@ -723,6 +766,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(await target.open(latest), target);
       return;
     }
+    const existing = await openExisting(target);
+    if (existing) {
+      await activate(existing, target);
+      return;
+    }
+    if (target !== repository || disposed) return;
     await activate(
       await target.create({
         name: generateProjectName([]),
@@ -805,6 +854,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     activation++;
+    cloudLookup?.abort();
     window.clearTimeout(viewSaveTimer);
     stopCatalog?.();
     stopDurability?.();
@@ -2716,6 +2766,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       disposed = true;
       activation++;
       claimAbort?.abort();
+      cloudLookup?.abort();
       stopAuth();
       auth.destroy();
       cloud?.destroy();
@@ -3680,7 +3731,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             aria-label="Search ideas"
-            class="map-toolbar pointer-events-auto flex w-80 max-w-[calc(100vw-1.5rem)] flex-col cursor-default"
+            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default"
           >
             <div class="flex items-center gap-2 px-2">
               <SearchIcon class="size-4 shrink-0 text-stone-400" />
@@ -3787,15 +3838,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   )}
                 </For>
               </div>
-              <p class="flex justify-between gap-2 border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
-                <span>
-                  {searchResults().length}
-                  {searchHits().length > SEARCH_LIMIT ? "+" : ""}{" "}
-                  {searchResults().length === 1 ? "match" : "matches"} in{" "}
-                  {focusId() ? "this branch" : "this map"}
-                </span>
-                <span class="keyboard-hint">
-                  ↑↓ preview · Enter go · Esc back
+              <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
+                {/* One line: when both don't fit, the hint wraps out of view. */}
+                <span class="flex h-[1lh] flex-wrap justify-between gap-x-2 overflow-hidden">
+                  <span class="whitespace-nowrap">
+                    {searchResults().length}
+                    {searchHits().length > SEARCH_LIMIT ? "+" : ""}{" "}
+                    {searchResults().length === 1 ? "match" : "matches"} in{" "}
+                    {focusId() ? "this branch" : "this map"}
+                  </span>
+                  <span class="keyboard-hint whitespace-nowrap">
+                    ↑↓ preview · Enter go · Esc back
+                  </span>
                 </span>
               </p>
             </Show>

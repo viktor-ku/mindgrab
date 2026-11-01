@@ -14,6 +14,8 @@ const record = z.object({
   schemaVersion: z.literal(1),
   format: z.literal("mindgrab-loro-v1"),
   name: z.string().nullable(),
+  // Listed projects report their last committed change; registration does not.
+  updatedAt: z.string().optional(),
 });
 const snapshot = z.object({
   projectId,
@@ -110,6 +112,24 @@ export class LoroApi {
 
   list(signal: AbortSignal) {
     return this.#read("catalog", signal, (signal) => this.#list(signal));
+  }
+
+  // One page of this account's projects, most recently changed first.
+  recent(signal: AbortSignal) {
+    return this.#read(
+      "recent",
+      signal,
+      async (signal) =>
+        z
+          .object({ projects: z.array(record) })
+          .parse(
+            await this.#json(
+              "listProjects",
+              { limit: 20, recent: true },
+              signal,
+            ),
+          ).projects,
+    );
   }
 
   snapshot(id: string, signal: AbortSignal) {

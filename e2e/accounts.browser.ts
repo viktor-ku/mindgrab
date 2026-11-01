@@ -46,12 +46,19 @@ class Backend {
   meGate?: ReturnType<typeof deferred>;
   catalogGate?: ReturnType<typeof deferred>;
   catalogStarted = false;
+  // Fails this many "recent projects" requests with a transient 503.
+  recentFailures = 0;
   meStarted = false;
   lostRegistration = false;
   leaveCookieOnLogout = false;
   loginRequests = 0;
   logoutRequests = 0;
-  projects = new Map<string, { ownerId: number; doc: ProjectDocument }>();
+  projects = new Map<
+    string,
+    { ownerId: number; doc: ProjectDocument; updatedAt?: string }
+  >();
+  // Commit times are strictly increasing, like the server's updated_at.
+  clock = Date.parse("2026-01-01T00:00:00Z");
   registrations: string[] = [];
   uploads: {
     projectId: string;
@@ -123,16 +130,32 @@ class Backend {
       });
     }
     if (url.pathname === "/api/listProjects") {
-      this.catalogStarted = true;
+      const { recent = false, limit = 100 } = request.postDataJSON();
+      if (recent && this.recentFailures > 0) {
+        this.recentFailures--;
+        return error(503, "unavailable");
+      }
+      // Like the server: by UUID, or a single page with the latest change first.
       const projects = [...this.projects]
         .filter(([, entry]) => entry.ownerId === owner.id && entry.doc.ready)
-        .map(([projectId]) => ({
+        .sort(
+          ([a, x], [b, y]) =>
+            (recent && (y.updatedAt ?? "").localeCompare(x.updatedAt ?? "")) ||
+            a.localeCompare(b),
+        )
+        .slice(0, limit)
+        .map(([projectId, entry]) => ({
           projectId,
           format: "mindgrab-loro-v1",
           schemaVersion: 1,
           name: null,
+          ...(entry.updatedAt && { updatedAt: entry.updatedAt }),
         }));
-      await this.catalogGate?.promise;
+      // The gate holds background discovery, not a new browser's first open.
+      if (!recent) {
+        this.catalogStarted = true;
+        await this.catalogGate?.promise;
+      }
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
     if (url.pathname === "/api/deleteProject") {
@@ -160,7 +183,10 @@ class Backend {
       return route.fulfill({ json: response() });
     if (operation === "/api/mergeProject") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
+      const before = record.doc.version();
       record.doc.merge(bytes);
+      if (record.doc.version() !== before)
+        record.updatedAt = new Date(this.clock++).toISOString();
       this.uploads.push({ projectId: id, ownerId: owner.id, expected });
       return route.fulfill({ json: response() });
     }
@@ -197,10 +223,9 @@ afterAll(async () => {
   await browser?.close();
   await server?.close();
 });
-beforeEach(async () => {
-  backend = new Backend();
+// A fresh browser context has no local projects, account hints or cookies.
+async function openFreshBrowser() {
   context = await browser.newContext();
-  errors = [];
   context.on("page", (page) =>
     page.on("pageerror", (error) => errors.push(error)),
   );
@@ -209,6 +234,11 @@ beforeEach(async () => {
   await page.goto(appUrl);
   await ready(page);
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+}
+beforeEach(async () => {
+  backend = new Backend();
+  errors = [];
+  await openFreshBrowser();
 });
 afterEach(async () => {
   backend.meGate?.resolve();
@@ -310,6 +340,60 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
   const pending = await call("historyClaim", A.id);
   expect(pending.equal).toBe(true);
   expect(pending.after).toEqual(pending.before);
+});
+
+test("signing in from fresh browsers opens the latest cloud map instead of adding an empty one", async () => {
+  const accountMaps = () =>
+    [...backend.projects.values()].filter((entry) => entry.ownerId === A.id);
+  const renameInCloud = async (name: string) => {
+    await rename(name);
+    const id = await call("id");
+    const record = () => backend.projects.get(id)?.doc;
+    const deadline = Date.now() + 10_000;
+    while (!record()?.ready || record()?.view().name !== name) {
+      if (Date.now() > deadline)
+        throw new Error(`"${name}" (${id}) never reached the cloud`);
+      await Bun.sleep(10);
+    }
+    return id;
+  };
+  // An account without maps gets exactly one first map.
+  await login();
+  const older = await renameInCloud("Older plan");
+  expect(accountMaps()).toHaveLength(1);
+  await projectMenu("New map");
+  await page.waitForFunction((id) => window.accountHarness.id() !== id, older);
+  const latest = await renameInCloud("Podcast plan");
+  expect(accountMaps()).toHaveLength(2);
+  const registrations = backend.registrations.length;
+  for (const [draft, failures] of [
+    ["First browser draft", 0],
+    // A transient catalog failure is retried rather than seeding a map.
+    ["Second browser draft", 1],
+  ] as const) {
+    await context.close();
+    backend.user = undefined;
+    backend.recentFailures = failures;
+    await openFreshBrowser();
+    await edit(draft);
+    await login();
+    // The most recently changed map opens, not an empty new one.
+    expect(await call("id")).toBe(latest);
+    expect(backend.recentFailures).toBe(0);
+    expect(await page.getByLabel("Project name").inputValue()).toBe(
+      "Podcast plan",
+    );
+    await cloudSaved();
+    // Signed-out work is still offered, not replaced by an empty map.
+    await claim().waitFor();
+    // Background discovery brings the older map to this browser as well.
+    await page.waitForFunction(
+      async () =>
+        (await window.accountHarness.catalog("account-1")).length === 2,
+    );
+    expect(accountMaps()).toHaveLength(2);
+    expect(backend.registrations).toHaveLength(registrations);
+  }
 });
 
 test("a UUID owned elsewhere is copied to a new UUID without merging unrelated content", async () => {
