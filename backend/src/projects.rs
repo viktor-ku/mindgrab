@@ -153,13 +153,14 @@ pub async fn rpc(
             if !(1..=100).contains(&limit) {
                 return Err(ApiError::invalid());
             }
-            let rows: Vec<(Uuid,Option<String>)> = sqlx::query_as("SELECT id,name FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).fetch_all(&app.pool).await?;
+            // updatedAt lets a new device open the most recently changed map.
+            let rows: Vec<(Uuid,Option<String>,String)> = sqlx::query_as("SELECT id,name,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).fetch_all(&app.pool).await?;
             let cursor = if rows.len() > limit as usize {
                 rows.get(limit as usize - 1).map(|row| row.0)
             } else {
                 None
             };
-            Ok(Json(json!({"projects":rows.into_iter().take(limit as usize).map(|(id,name)|record(id,name)).collect::<Vec<_>>(),"nextCursor":cursor})).into_response())
+            Ok(Json(json!({"projects":rows.into_iter().take(limit as usize).map(|(id,name,updated_at)|{let mut project=record(id,name);project["updatedAt"]=json!(updated_at);project}).collect::<Vec<_>>(),"nextCursor":cursor})).into_response())
         }
         "getProjectSnapshot" => {
             let args: ProjectId = parse(&headers, &body)?;

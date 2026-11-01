@@ -415,6 +415,48 @@ export async function discoverProjects(
   }
 }
 
+// A browser without local history for an account opens the account's most
+// recently updated cloud map, so signing in never needs to seed an empty one.
+// Projects this device keeps out of the cloud are left to local discovery.
+export async function openLatestCloudProject(
+  repository: ProjectRepository,
+  api: LoroApi,
+  signal: AbortSignal,
+): Promise<ProjectHandle | undefined> {
+  const projects = await api.list(signal);
+  signal.throwIfAborted();
+  const known = new Map(
+    (await repository.list()).map((entry) => [entry.id, entry]),
+  );
+  const updated = (project: (typeof projects)[number]) =>
+    Date.parse(project.updatedAt ?? "") || 0;
+  const latest = projects
+    .filter((project) => known.get(project.projectId)?.saving?.cloud !== false)
+    .reduce<(typeof projects)[number] | undefined>(
+      (best, project) =>
+        !best || updated(project) > updated(best) ? project : best,
+      undefined,
+    );
+  if (!latest) return;
+  const snapshot = await api.snapshot(latest.projectId, signal);
+  signal.throwIfAborted();
+  const handle = await repository.open(latest.projectId, {
+    remember: false,
+    initialSnapshot: decodeBase64(snapshot.data),
+  });
+  try {
+    signal.throwIfAborted();
+    await handle.flush();
+    await handle.refreshMetadata();
+    await repository.markRegistered(handle.id);
+    await repository.setLatestProject(handle.id);
+    return handle;
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
 const silentProvider = (): SyncProvider => ({
   connect() {},
   disconnect() {},

@@ -14,6 +14,8 @@ const record = z.object({
   schemaVersion: z.literal(1),
   format: z.literal("mindgrab-loro-v1"),
   name: z.string().nullable(),
+  // Listed projects report their last committed change; registration does not.
+  updatedAt: z.string().optional(),
 });
 const snapshot = z.object({
   projectId,

@@ -232,6 +232,11 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
         .await
         .unwrap();
     assert_eq!(list["projects"][0]["name"], "Planning");
+    let updated_at = list["projects"][0]["updatedAt"].as_str().unwrap();
+    assert!(
+        updated_at.ends_with('Z') && updated_at.len() == 27,
+        "{updated_at}"
+    );
     let response=f.rpc("commandProject",&alice,json!({"projectId":id,"command":{"type":"createNode","parent":root,"index":null,"text":"Native Rust node","color":"teal"}})).await;
     assert_eq!(response.status(), 200);
     let (committed, _) = baseline(&f, &alice, id).await;
