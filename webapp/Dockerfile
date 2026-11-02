@@ -27,6 +27,7 @@ RUN bun --bun install --frozen-lockfile --filter mindgrab
 COPY webapp ./webapp
 COPY --from=state /bindings ./webapp/src/generated/mindgrab-state
 ARG VITE_BACKEND_URL
+ARG VITE_POSTHOG_KEY
 RUN bun --bun run --cwd webapp build
 
 FROM caddy:2.11.4-alpine
