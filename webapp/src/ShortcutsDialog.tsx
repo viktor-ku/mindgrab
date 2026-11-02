@@ -86,8 +86,8 @@ export function ShortcutsDialog(props: {
         if (e.target === dialog) props.onClose();
       }}
     >
-      <header class="flex items-center justify-between gap-4 border-b border-stone-200 px-6 py-4">
-        <h2 id="shortcuts-title" class="text-lg font-semibold">
+      <header class="flex items-center justify-between gap-4 border-b border-stone-100 px-6 py-4">
+        <h2 id="shortcuts-title" class="font-display text-xl font-semibold">
           Shortcuts and navigation
         </h2>
         <button
@@ -103,14 +103,14 @@ export function ShortcutsDialog(props: {
         <For each={GROUPS}>
           {(group) => (
             <section>
-              <h3 class="mb-2 text-xs font-semibold tracking-wide text-stone-500 uppercase">
+              <h3 class="mb-2.5 text-sm font-semibold text-stone-900">
                 {group.title}
               </h3>
-              <dl class="space-y-1.5 text-sm">
+              <dl class="space-y-2 text-sm">
                 <For each={group.items}>
                   {([keys, action]) => (
                     <div class="flex items-baseline justify-between gap-4">
-                      <dt class="text-stone-700">{action}</dt>
+                      <dt class="text-stone-600">{action}</dt>
                       <dd class="shrink-0">
                         <kbd>{keys}</kbd>
                       </dd>
@@ -122,7 +122,7 @@ export function ShortcutsDialog(props: {
           )}
         </For>
         <section class="sm:col-span-2">
-          <h3 class="mb-2 text-xs font-semibold tracking-wide text-stone-500 uppercase">
+          <h3 class="mb-2.5 text-sm font-semibold text-stone-900">
             Scrolling on the canvas
           </h3>
           <fieldset class="grid gap-2 sm:grid-cols-2">

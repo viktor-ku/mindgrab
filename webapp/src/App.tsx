@@ -348,11 +348,11 @@ function Node(props: {
       <Show when={props.collapsed}>
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-lg border pointer-events-none ${fill()}`}
+          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-[0.625rem] border pointer-events-none ${fill()}`}
         />
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-lg border pointer-events-none ${fill()}`}
+          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-[0.625rem] border pointer-events-none ${fill()}`}
         />
       </Show>
       <div
@@ -397,7 +397,7 @@ function Node(props: {
         <Show when={props.collapsed}>
           <button
             type="button"
-            class="rounded px-1.5 text-[10px] leading-4 font-medium whitespace-nowrap cursor-pointer bg-white/35 hover:bg-white/60 focus-visible:outline-2"
+            class="rounded-md border border-current/15 bg-white/60 px-1.5 text-[10px] leading-4 font-semibold whitespace-nowrap cursor-pointer hover:bg-white/90 focus-visible:outline-2"
             aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
             title={`Expand children (${ALT_LABEL}G)`}
             onPointerDown={(e) => e.stopPropagation()}
@@ -3321,7 +3321,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           >
             <ChevronDownIcon />
           </button>
-          <span class="mx-1 h-5 w-px shrink-0 bg-stone-200" />
+          <span class="toolbar-divider" />
           <fieldset
             aria-label="Project actions"
             class="flex min-w-0 items-center gap-2 pr-2 text-xs text-stone-500"
@@ -3453,7 +3453,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     type="search"
                     aria-label="Filter maps"
                     placeholder="Filter maps"
-                    class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     value={mapFilter()}
                     onInput={(e) => setMapFilter(e.currentTarget.value)}
                     onKeyDown={(e) => {
@@ -3696,7 +3696,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               <OutlineIcon />
             </button>
-            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <span class="toolbar-divider" />
             <button
               type="button"
               class="icon-button"
@@ -3857,7 +3857,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </Show>
       </div>
       <Show when={notesOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
           <NotesPanel
             doc={session().doc}
             id={selectedId()}
@@ -3868,7 +3868,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </div>
       </Show>
       <Show when={outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
           <Outline
             roots={scopeForest()}
             text={(id) => view().text(id)}
@@ -4181,7 +4181,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <SiblingIcon />
               <span class="max-sm:sr-only">Sibling</span>
             </button>
-            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <span class="toolbar-divider" />
             <button
               type="button"
               class="icon-button"
@@ -4211,7 +4211,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               >
                 <span
                   aria-hidden="true"
-                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-blue-600"
+                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-accent"
                 />
               </Show>
             </button>
@@ -4271,7 +4271,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               <MoreIcon />
             </button>
-            <span class="mx-0.5 h-5 w-px bg-stone-200" />
+            <span class="toolbar-divider" />
             <button
               type="button"
               class="icon-button hover:text-rose-700!"
@@ -4299,7 +4299,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           class="map-toolbar absolute bottom-3 left-3 z-10 hidden w-64 cursor-default p-3 text-xs leading-5 text-stone-600 lg:block"
         >
           <div class="mb-1 flex items-center justify-between">
-            <p class="text-sm font-semibold text-stone-800">Quick start</p>
+            <p class="panel-title">Quick start</p>
             <button
               type="button"
               class="icon-button -mr-1.5 -mt-1.5"
@@ -4321,7 +4321,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </ul>
           <button
             type="button"
-            class="mt-2 font-medium text-blue-700 hover:underline"
+            class="mt-2 font-medium text-accent-deep hover:underline"
             onClick={() => setShowHelp(true)}
           >
             All shortcuts
@@ -4348,7 +4348,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             {(id) => (
               <Show when={connections().get(id)}>
                 {(connection) => (
-                  <path d={connectionPath(connection())} fill="none" />
+                  <path
+                    d={connectionPath(connection())}
+                    fill="none"
+                    class={
+                      (
+                        NODE_COLORS.find(
+                          (option) => option.value === connection().to.color,
+                        ) ?? NODE_COLORS[0]
+                      ).lineClass
+                    }
+                  />
                 )}
               </Show>
             )}
@@ -4435,7 +4445,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           data-toolbar
           class="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 text-center cursor-default"
         >
-          <p class="text-lg font-semibold text-stone-800">
+          <p class="font-display text-2xl font-semibold text-stone-900">
             Your canvas is empty
           </p>
           <p class="max-w-64 text-sm text-stone-500">
@@ -4664,7 +4674,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           >
             <PlusIcon />
           </button>
-          <span class="mx-0.5 h-5 w-px bg-stone-200" />
+          <span class="toolbar-divider" />
           <button
             type="button"
             class="icon-button"

@@ -1,4 +1,5 @@
 import { createEffect, For, Show } from "solid-js";
+import { CloseIcon } from "./icons";
 import type { SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
 
@@ -27,21 +28,24 @@ export function ProjectPreferences(props: {
       onClose={props.onClose}
       onCancel={props.onClose}
     >
-      <header class="flex items-center justify-between gap-4 border-b border-stone-200 pb-5">
-        <h2 id="project-preferences-title" class="text-xl font-semibold">
+      <header class="flex items-center justify-between gap-4 border-b border-stone-100 pb-4">
+        <h2
+          id="project-preferences-title"
+          class="font-display text-xl font-semibold"
+        >
           Project preferences
         </h2>
         <button
           type="button"
-          class="map-control"
+          class="icon-button"
           aria-label="Close project preferences"
           onClick={props.onClose}
         >
-          ✕
+          <CloseIcon />
         </button>
       </header>
       <p class="my-6 text-sm leading-6 text-stone-600">
-        Choose where this project is saved. Turning a switch to NO deletes its
+        Choose where this project is saved. Turning a switch off deletes its
         existing copy from that location. Your open project stays available in
         this tab.
       </p>
@@ -89,7 +93,7 @@ export function ProjectPreferences(props: {
                   })
                 }
               >
-                {props.saving[option.key] ? "YES" : "NO"}
+                <span>{props.saving[option.key] ? "On" : "Off"}</span>
               </button>
             </div>
           )}
@@ -104,7 +108,7 @@ export function ProjectPreferences(props: {
       <Show
         when={!props.saving.local && (!props.saving.cloud || !props.signedIn)}
       >
-        <div class="mt-8 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+        <div class="mt-8 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
           <p class="font-semibold">This project lives only in memory.</p>
           <p>
             Export a file before closing or reloading this tab. Import it when
