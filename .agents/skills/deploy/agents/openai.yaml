@@ -1,0 +1,3 @@
+interface:
+  display_name: "Deploy"
+  short_description: "Go live on Railway, monitor, and hotfix via main"
