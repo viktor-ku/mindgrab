@@ -6,17 +6,20 @@ server runtime or separate implementation of document rules.
 
 ## Railway deployment
 
-Build the backend service from repository root `/`, using Dockerfile path
-`backend/Dockerfile`. Clear custom build/start commands and set the healthcheck
-path to `/checkhealth`. The old `/server` directory is no longer part of this
-repository. Apply these settings through Railway's dashboard or API.
+Railway runs one service for the API and the web app. Build it from repository
+root `/` using the root `Dockerfile`. Clear custom build/start commands and set
+the healthcheck path to `/checkhealth`. Apply these settings through Railway's
+dashboard or API. The image builds the WASM bindings and the Vite assets, and
+the backend serves them from `WEBAPP_DIST`. Any path the API does not handle
+falls back to `index.html`.
 
 Set `HOST=::` and `PORT=3000` so the API is reachable on Railway's public and
 private networks. Keep `DATABASE_URL` pointing at the project's Postgres
 service. Configure the WorkOS credentials, `APP_URL` and `WORKOS_REDIRECT_URI`
 as described below. Release builds use WorkOS authentication.
 
-The image contains the compiled native API and trusted HTTPS certificates.
+The image contains the compiled native API, the built web app and trusted HTTPS
+certificates.
 Postgres schema creation runs on startup. GET `/checkhealth` returns 200 when
 the database is reachable and 503 otherwise; no login is required.
 
