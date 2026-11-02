@@ -1,0 +1,9 @@
+.git
+**/node_modules
+**/dist
+target
+webapp/src/generated/mindgrab-state
+**/.env
+**/.env.*
+mise.local.toml
+*.log
