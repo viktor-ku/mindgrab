@@ -51,11 +51,22 @@ export function AccountControls(props: {
     }
   }
 
+  // With only the sign-in button to show, the button is the island itself
+  // instead of a dark pill boxed inside a white one.
+  const bare = () =>
+    props.state.status !== "authenticated" &&
+    props.state.status !== "checking" &&
+    props.state.status !== "unavailable" &&
+    props.state.status !== "expired" &&
+    !message() &&
+    !props.state.message &&
+    !props.claimMessage;
   return (
     <section
       data-no-pan
       data-toolbar
-      class="map-toolbar pointer-events-auto flex max-w-72 flex-col gap-1 text-sm cursor-default"
+      class="pointer-events-auto flex max-w-72 flex-col gap-1 text-sm cursor-default"
+      classList={{ "map-toolbar": !bare() }}
       aria-label="Account"
     >
       <div class="flex min-h-9 items-center gap-1">
@@ -103,7 +114,11 @@ export function AccountControls(props: {
         >
           <button
             type="button"
-            class="primary-button px-3! py-1.5! text-xs!"
+            class={
+              bare()
+                ? "primary-button account-signin"
+                : "primary-button px-3! py-1.5! text-xs!"
+            }
             disabled={navigating() || props.claiming}
             onClick={() => void navigate("login")}
           >

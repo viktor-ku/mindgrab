@@ -175,10 +175,8 @@ export function Outline(props: {
       aria-label="Outline"
       class="map-toolbar outline-panel pointer-events-auto flex flex-col cursor-default"
     >
-      <header class="flex items-center justify-between border-b border-stone-100 py-1 pr-1 pl-3">
-        <h2 class="text-xs font-semibold tracking-wide text-stone-500 uppercase">
-          Outline
-        </h2>
+      <header class="flex items-center justify-between border-b border-stone-100 py-1.5 pr-1.5 pl-3.5">
+        <h2 class="panel-title">Outline</h2>
         <button
           type="button"
           class="icon-button size-8!"

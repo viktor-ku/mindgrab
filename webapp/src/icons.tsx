@@ -155,17 +155,14 @@ export const BrandMark = (props: IconProps) => (
     aria-hidden="true"
     fill="none"
   >
-    <rect width="24" height="24" rx="7" fill="#1c1917" />
+    <rect width="24" height="24" rx="7" fill="#6b3df5" />
     <path
-      d="M8 12h2.5M14 7.5l-3.5 4.5 3.5 4.5"
-      stroke="#e7e5e4"
-      stroke-width="1.6"
-      stroke-linecap="round"
+      d="M13.2 4.5 7.5 13h4l-.7 6.5L16.5 11h-4z"
+      fill="#f3eeff"
+      stroke="#f3eeff"
+      stroke-width="1"
       stroke-linejoin="round"
     />
-    <circle cx="7" cy="12" r="2" fill="#93c5fd" />
-    <circle cx="16" cy="7" r="2" fill="#fcd34d" />
-    <circle cx="16" cy="17" r="2" fill="#86efac" />
   </svg>
 );
 

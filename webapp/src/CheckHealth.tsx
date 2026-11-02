@@ -111,7 +111,7 @@ function StatusLayout(props: { children: JSX.Element }) {
         <header class="mb-6 flex items-baseline justify-between">
           <Link
             to="/"
-            class="rounded text-sm font-semibold tracking-tight text-stone-900 hover:text-stone-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            class="rounded text-sm font-semibold tracking-tight text-stone-900 hover:text-stone-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             mindgrab
           </Link>
