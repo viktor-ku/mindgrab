@@ -16,10 +16,12 @@ erases anything that exists only on `live`.
 
 Use the Railway CLI. If `railway` is missing from `PATH`, prefix
 `PATH="$HOME/.railway/bin:$PATH"`. Pass the project, environment and service
-explicitly rather than relying on `railway link`:
+explicitly rather than relying on `railway link`. Use an array: the Bash tool runs zsh,
+which does not split a plain string variable into words. Shell state does not carry
+over between commands, so define `R` again in each one:
 
 ```sh
-R="-p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production -s mindgrab"
+R=(-p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production -s mindgrab)
 ```
 
 The CLI login is account-level. Never delete, disconnect or recreate services,
@@ -38,7 +40,7 @@ environment variable for the command. Never print it.
    commits would be lost, so first bring them to `main` (cherry-pick, commit, push).
 3. Show what will ship: `git log --oneline origin/live..main` and
    `git diff --stat origin/live..main`. If the range is empty, nothing will deploy.
-   Say so and stop, unless the user asked for a redeploy (`railway redeploy $R -y`).
+   Say so and stop, unless the user asked for a redeploy (`railway redeploy "${R[@]}" -y`).
 4. Review the diff for deploy risk and handle these **before** golive:
    - **Schema.** `backend/schema.sql` runs on startup against the production database.
      A redeploy does not reverse a schema change. Make sure the change is additive
@@ -46,7 +48,7 @@ environment variable for the command. Never print it.
      until the new one passes its healthcheck. Ask the user about anything destructive.
    - **New environment variables.** Look for new `env::var`, `std::env`,
      `import.meta.env` or `ARG` in the diff. Check them with `railway variables $R`.
-     Set missing ones with `railway variable set KEY=value $R --skip-deploys`, so the
+     Set missing ones with `railway variable set KEY=value "${R[@]}" --skip-deploys`, so the
      golive deploy picks them up. `VITE_*` values are baked in at build time: each
      needs an `ARG` in the `Dockerfile` and a Railway service variable.
    - **Dockerfile and build.** Railway requires cache mount IDs that start with
@@ -59,7 +61,7 @@ environment variable for the command. Never print it.
    `webapp:build`). If a check fails, stop and fix it on `main`. Changes to docs or
    agent files alone can skip this step.
 6. Record the rollback target, the current successful deployment:
-   `railway deployment list $R --limit 10 --json | jq -r 'map(select(.status=="SUCCESS"))[0] | "\(.id) \(.meta.commitHash)"'`.
+   `railway deployment list "${R[@]}" --limit 10 --json | jq -r 'map(select(.status=="SUCCESS"))[0] | "\(.id) \(.meta.commitHash)"'`.
 
 ## 2. Go live
 
@@ -83,15 +85,15 @@ It prints each status change and exits `0` on `SUCCESS`, `1` on
 `FAILED`/`CRASHED`/`REMOVED`/`SKIPPED`/`NEEDS_APPROVAL`, and `2` on timeout. If it
 stays `NOT_FOUND` for more than about 3 minutes, Railway did not pick up the push.
 Check that the service source branch is still `live` and that it has no watch
-patterns (`railway status $R`, or the Railway MCP `get-service-config`).
+patterns (`railway status -p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production`, or the Railway MCP `get-service-config`).
 
 When it exits with `SUCCESS`, verify production:
 
 ```sh
 curl -fsS -o /dev/null -w '%{http_code}\n' https://mindgrab.app/checkhealth   # 200 (503 = database unreachable)
 curl -fsS https://mindgrab.app/ | grep -q '<div id="root"\|<script' && echo webapp ok
-railway logs $R --since 10m --filter '@level:error'
-railway logs $R --http --since 10m --filter '@httpStatus:>=500'
+railway logs "${R[@]}" --since 10m --filter '@level:error'
+railway logs "${R[@]}" --http --since 10m --filter '@httpStatus:>=500'
 ```
 
 Then wait about 5 minutes and check again. The restart policy is `ON_FAILURE` with 10
@@ -108,8 +110,8 @@ users are affected. Mitigate those first (step 4.2).
 ### 4.1 Diagnose
 
 ```sh
-railway logs <deployment-id> $R --build -n 300       # build failures
-railway logs <deployment-id> $R --deployment -n 300  # startup, healthcheck, crashes
+railway logs <deployment-id> "${R[@]}" --build -n 300       # build failures
+railway logs <deployment-id> "${R[@]}" --deployment -n 300  # startup, healthcheck, crashes
 ```
 
 The Railway MCP `get-deployment-diagnosis` tool, when available, gives a quick
@@ -122,7 +124,7 @@ If users are affected, roll back to the target recorded in step 1.6 before you
 debug:
 
 ```sh
-railway redeploy $R --commit <last-good-sha> -y
+railway redeploy "${R[@]}" --commit <last-good-sha> -y
 .agents/skills/deploy/scripts/wait-for-deploy.sh <last-good-sha>   # the rollback deploy
 ```
 
@@ -143,7 +145,7 @@ fix forward instead and tell the user.
 
 For a **config** problem, fix it in Railway: `railway variable set …` without
 `--skip-deploys` triggers a redeploy. A changed `VITE_*` build variable needs a
-rebuild (`railway redeploy $R --from-source -y`). Record any lasting settings change
+rebuild (`railway redeploy "${R[@]}" --from-source -y`). Record any lasting settings change
 in `backend/README.md` on `main`. Agents learn these settings from there.
 
 Stop after **two** failed hotfix attempts. Make sure production is serving a good
