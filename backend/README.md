@@ -31,6 +31,11 @@ Vite proxies API and WebSocket requests on the web app's
 origin, keeping login callbacks and HttpOnly cookies on that origin. The backend
 also serves the production build in `webapp/dist`.
 
+Before removing a worktree, run `mise run worktree:settle`. It stops the dev
+servers listening on this worktree's ports, removes its Compose project with the
+Postgres container and data volume, and drops the generated variables from
+`mise.local.toml`. It does nothing in the main checkout.
+
 `schema.sql` installs a fresh `mindgrab_loro` schema. This is schema creation,
 not a conversion of previous data. Sessions and login attempts expire. Project
 UUIDs are globally reserved for their owner; deleting a cloud copy removes its

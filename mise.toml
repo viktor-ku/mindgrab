@@ -24,6 +24,12 @@ cd "$workspace_root"
 cargo run --release --locked --target-dir "$workspace_root/target" -p workspace-bootstrap -- "$workspace_root" "$worktree_root"
 '''
 
+[tasks."worktree:settle"]
+description = "Stop this worktree's dev servers and remove its Postgres container, volume and generated settings"
+dir = "{{config_root}}"
+raw = true
+run = "sh tooling/worktree-settle.sh"
+
 [tasks."tooling:test"]
 description = "Verify worktree bootstrap isolation and configuration"
 run = "cargo test --locked -p workspace-bootstrap"
