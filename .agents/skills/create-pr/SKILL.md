@@ -17,6 +17,7 @@ Keep the description short and use the following structure:
 
 1. Start with 1-2 sentences saying what was the purpose of this piece of work.
 2. Add a concise bullet list of the most important changes. 1-5 bullet points is expected.
-3. End with one sentence giving merge risk on a 0–10 scale and a brief reason. Use 0 for negligible production risk and 10 for very high risk, such as a broad change to a heavily used database table. Base the score on the actual affected behavior, data, and deployment impact; explain whether the change appears safe to merge.
 
-Do not add other sections or filler. Ensure the description matches the changes actually made and does not claim checks or hooks passed unless they did.
+## Recordings
+
+When asked to provide a screenshot or a demo recording, do so with upload via new `gh` CLI method or a t3 browser from the user perspective. Never create new branches for it, never plainly add demo files as git tracked files either.
