@@ -124,7 +124,8 @@ async function load() {
   loading ??= (async () => {
     try {
       const { default: posthog } = await import("posthog-js");
-      posthog.init(import.meta.env.VITE_POSTHOG_KEY, {
+      // Checked above; Bun's env typing (e2e) does not narrow across the closure.
+      posthog.init(import.meta.env.VITE_POSTHOG_KEY as string, {
         api_host: backendEndpoint("/ingest"),
         ui_host: "https://eu.posthog.com",
         defaults: "2026-08-30",
