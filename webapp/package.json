@@ -18,6 +18,8 @@
     "test:offline": "bun --bun run --cwd ../e2e test:offline"
   },
   "dependencies": {
+    "@solid-primitives/event-listener": "2.4.6",
+    "@solid-primitives/scheduled": "1.5.3",
     "@tanstack/solid-query": "5.104.1",
     "@tanstack/solid-router": "=1.170.36",
     "posthog-js": "1.444.0",

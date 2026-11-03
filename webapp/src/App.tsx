@@ -1,3 +1,5 @@
+import { makeEventListener } from "@solid-primitives/event-listener";
+import { debounce } from "@solid-primitives/scheduled";
 import { ProjectPreferences } from "./ProjectPreferences";
 import { ShareDialog } from "./ShareDialog";
 import {
@@ -867,7 +869,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     activation++;
     // Ends a new browser's cloud lookup when its account leaves.
     void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
-    window.clearTimeout(viewSaveTimer);
+    saveView.clear();
     stopCatalog?.();
     stopDurability?.();
     finishWriting();
@@ -1045,13 +1047,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // A short-lived confirmation for actions with broad effects, offering the
   // way back next to what happened.
   const [notice, setNotice] = createSignal<Notice>();
-  let noticeTimer: number | undefined;
+  const hideNotice = debounce(() => setNotice(undefined), 6000);
   function showNotice(next: Notice) {
-    window.clearTimeout(noticeTimer);
     setNotice({ ...next, revision: historyCount });
-    noticeTimer = window.setTimeout(() => setNotice(undefined), 6000);
+    hideNotice();
   }
-  onCleanup(() => window.clearTimeout(noticeTimer));
   createEffect(
     on(
       historyRevision,
@@ -1267,18 +1267,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   });
   // Programmatic view changes ease into place; direct manipulation does not.
   const [easingView, setEasingView] = createSignal(false);
-  let easeTimer: number | undefined;
+  const stopEasingView = debounce(() => setEasingView(false), 220);
   function moveView(next: { left: number; top: number; zoom?: number }) {
-    window.clearTimeout(easeTimer);
     batch(() => {
       setEasingView(true);
       setLeft(next.left);
       setTop(next.top);
       if (next.zoom !== undefined) setZoom(next.zoom);
     });
-    easeTimer = window.setTimeout(() => setEasingView(false), 220);
+    stopEasingView();
   }
-  onCleanup(() => window.clearTimeout(easeTimer));
 
   function nodeBounds(ids?: Iterable<string>) {
     const nodes = ids
@@ -1889,7 +1887,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     storeFlag(HINT_KEY);
   }
 
-  let viewSaveTimer: number | undefined;
+  const saveView = debounce(
+    (
+      owner: ProjectRepository,
+      handle: ProjectHandle,
+      value: ViewportPreference,
+    ) => {
+      if (repository !== owner || activeHandle !== handle) return;
+      viewportMutation.mutate({ owner, id: handle.id, value });
+    },
+    200,
+  );
   createEffect(() => {
     const handle = activeHandle;
     const owner = handleRepository;
@@ -1902,13 +1910,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       collapsed: [...collapsedIds()],
     };
     if (!handle || handle.doc !== currentDoc) return;
-    window.clearTimeout(viewSaveTimer);
-    viewSaveTimer = window.setTimeout(() => {
-      if (repository !== owner || activeHandle !== handle) return;
-      viewportMutation.mutate({ owner, id: handle.id, value });
-    }, 200);
+    saveView(owner, handle, value);
   });
-  onCleanup(() => window.clearTimeout(viewSaveTimer));
 
   // Nodes can disappear through remote edits or undo, including the one being
   // edited; local state that refers to them is released.
@@ -2804,8 +2807,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         event.returnValue = "";
       }
     };
-    window.addEventListener("beforeunload", beforeUnload);
-    onCleanup(() => window.removeEventListener("beforeunload", beforeUnload));
+    makeEventListener(window, "beforeunload", beforeUnload);
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
@@ -3103,9 +3105,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       else if (matchesLetter(event, "y") && !event.shiftKey)
         historyShortcut(event, "redo");
     };
-    window.addEventListener("keydown", shortcuts);
-    onCleanup(() => window.removeEventListener("keydown", shortcuts));
-    window.addEventListener("keydown", keydown);
+    makeEventListener(window, "keydown", shortcuts);
+    makeEventListener(window, "keydown", keydown);
     const dismissContextMenu = (e: PointerEvent) => {
       // Menus close on any press outside them, like native menus.
       if (
@@ -3128,9 +3129,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       )
         setContextMenu(undefined);
     };
-    window.addEventListener("pointerdown", dismissContextMenu);
-    window.addEventListener("pointerup", stopOutside);
-    canvas.addEventListener("wheel", wheel, { passive: false });
+    makeEventListener(window, "pointerdown", dismissContextMenu);
+    makeEventListener(window, "pointerup", (e) => stopPointer(e, true));
+    makeEventListener(canvas, "wheel", wheel, { passive: false });
     const canvasClipboard = (e: ClipboardEvent) =>
       storageReady() &&
       !writing() &&
@@ -3172,14 +3173,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       e.preventDefault();
       pasteOutline(entries);
     };
-    window.addEventListener("copy", copyBranch);
-    window.addEventListener("cut", copyBranch);
-    window.addEventListener("paste", paste);
-    onCleanup(() => {
-      window.removeEventListener("copy", copyBranch);
-      window.removeEventListener("cut", copyBranch);
-      window.removeEventListener("paste", paste);
-    });
+    makeEventListener(window, "copy", copyBranch);
+    makeEventListener(window, "cut", copyBranch);
+    makeEventListener(window, "paste", paste);
     // Two fingers pinch to zoom and move together to pan. A pinch replaces
     // any one-finger pan or drag already in progress.
     const touches = new Map<number, { x: number; y: number }>();
@@ -3222,25 +3218,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       touches.delete(e.pointerId);
       if (touches.size < 2) pinch = undefined;
     };
-    canvas.addEventListener("pointerdown", touchDown, { capture: true });
-    window.addEventListener("pointermove", touchMove);
-    window.addEventListener("pointerup", touchUp);
-    window.addEventListener("pointercancel", touchUp);
-    onCleanup(() => {
-      canvas.removeEventListener("pointerdown", touchDown, { capture: true });
-      window.removeEventListener("pointermove", touchMove);
-      window.removeEventListener("pointerup", touchUp);
-      window.removeEventListener("pointercancel", touchUp);
-    });
-    function stopOutside(e: PointerEvent) {
-      stopPointer(e, true);
-    }
-    onCleanup(() => {
-      window.removeEventListener("keydown", keydown);
-      window.removeEventListener("pointerdown", dismissContextMenu);
-      window.removeEventListener("pointerup", stopOutside);
-      canvas.removeEventListener("wheel", wheel);
-    });
+    makeEventListener(canvas, "pointerdown", touchDown, { capture: true });
+    makeEventListener(window, "pointermove", touchMove);
+    makeEventListener(window, "pointerup", touchUp);
+    makeEventListener(window, "pointercancel", touchUp);
   });
 
   createEffect(() => {
