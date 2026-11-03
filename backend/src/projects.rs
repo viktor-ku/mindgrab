@@ -194,8 +194,10 @@ pub async fn rpc(
             // disabling discards it so a later link is a new one.
             let mut tx = app.pool.begin().await?;
             let token: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.projects SET share_token=CASE WHEN $3 THEN COALESCE(share_token,$4) END WHERE id=$1 AND owner_id=$2 AND NOT deleted RETURNING share_token").bind(args.project_id).bind(user.id).bind(args.enabled).bind(crate::auth::token()).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
-            // Wake open viewers so a revoked link closes promptly.
-            notify(&mut tx, user.id, args.project_id).await?;
+            // Wake open viewers so a revoked link closes promptly. This uses
+            // its own channel: the content did not change, so the owner's
+            // editors have nothing to sync.
+            publish(&mut tx, format!("share/{}/{}", user.id, args.project_id)).await?;
             tx.commit().await?;
             Ok(Json(json!({"projectId":args.project_id,"token":token})).into_response())
         }
@@ -262,8 +264,11 @@ async fn notify(
     owner: i64,
     id: Uuid,
 ) -> Result<()> {
+    publish(tx, format!("{owner}/{id}")).await
+}
+async fn publish(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, payload: String) -> Result<()> {
     sqlx::query("SELECT pg_notify('mindgrab_loro',$1)")
-        .bind(format!("{owner}/{id}"))
+        .bind(payload)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -343,7 +348,7 @@ pub async fn socket(
         .max_message_size(1024)
         .max_frame_size(1024)
         .on_upgrade(move |socket| {
-            watch(socket, target, receiver, async move || {
+            watch(socket, vec![target], receiver, async move || {
                 if app.auth.identify(&headers).await.is_err() {
                     return Err("Sign in again");
                 }
@@ -404,13 +409,15 @@ pub async fn shared_socket(
     let project = shared_project(&app, &token).await?;
     let receiver = app.changes.subscribe();
     let target = format!("{}/{}", project.owner_id, project.id);
+    // Content changes and share link changes both concern viewers.
+    let targets = vec![format!("share/{target}"), target];
     Ok(ws
         .max_message_size(1024)
         .max_frame_size(1024)
         .on_upgrade(move |socket| {
             watch(
                 socket,
-                target,
+                targets,
                 receiver,
                 async move || match shared_project(&app, &token).await {
                     Ok(project) => Ok(project.revision),
@@ -419,18 +426,18 @@ pub async fn shared_socket(
             )
         }))
 }
-/// Sends the committed revision whenever `target` changes (and periodically),
-/// closing with `check`'s reason once access ends.
+/// Sends the committed revision whenever one of `targets` is notified (and
+/// periodically), closing with `check`'s reason once access ends.
 async fn watch(
     mut socket: WebSocket,
-    target: String,
+    targets: Vec<String>,
     mut receiver: tokio::sync::broadcast::Receiver<String>,
     mut check: impl AsyncFnMut() -> std::result::Result<i64, &'static str>,
 ) {
     let mut timer = tokio::time::interval(Duration::from_secs(20));
     loop {
         let changed = tokio::select! {
-            received = receiver.recv() => match received { Ok(value) => value==target, Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true, Err(_) => break },
+            received = receiver.recv() => match received { Ok(value) => targets.contains(&value), Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true, Err(_) => break },
             _ = timer.tick() => true,
             message = socket.recv() => match message { Some(Ok(Message::Ping(bytes))) => {if socket.send(Message::Pong(bytes)).await.is_err(){break;} false}, Some(Ok(Message::Pong(_))) => false, _ => break },
         };
