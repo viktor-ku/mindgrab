@@ -37,8 +37,8 @@ const register = () =>
   });
 
 // Keep discovery alive even if an offline startup/failed deployment prevents the
-// first registration. Browser reachability events are hints, so visible tabs also
-// retry periodically. Never activate or reload a running editor here.
+// first registration. Visible tabs retry periodically and on focus/reconnect
+// hints. Never activate or reload a running editor here.
 function monitorUpdates() {
   const observed = new WeakSet<ServiceWorkerRegistration>();
   const observe = (registration: ServiceWorkerRegistration) => {
@@ -79,13 +79,7 @@ function monitorUpdates() {
   const observer = new QueryObserver(queryClient, options);
   // This observer lives for the page lifetime, like the service worker listeners.
   observer.subscribe(() => {});
-  const check = () => {
-    if (navigator.onLine) void observer.refetch({ cancelRefetch: false });
-  };
-  // Reachability events are hints; an online event can arrive while the
-  // Query online manager already considers this browser online.
-  window.addEventListener("online", check);
-  window.addEventListener("focus", check);
+  const check = () => void observer.refetch({ cancelRefetch: false });
   return { observe, check };
 }
 

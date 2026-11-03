@@ -10,11 +10,16 @@ export function AccountControls(props: {
   claiming: boolean;
   claimMessage: string;
 }) {
-  const [message, setMessage] = createSignal("");
+  const [authError, setAuthError] = createSignal("");
   const navigation = createMutation(() => ({
     mutationKey: ["account", "navigation"],
     mutationFn: performNavigation,
+    onMutate: () => setAuthError(""),
   }));
+  const message = () =>
+    navigation.isError
+      ? "Could not save the account change in this browser. Free up browser storage and retry."
+      : authError();
   const navigating = () => navigation.isPending;
   const navigate = (action: "login" | "logout") => {
     if (!navigating()) navigation.mutate(action);
@@ -22,7 +27,7 @@ export function AccountControls(props: {
   onMount(() => {
     const url = new URL(window.location.href);
     if (!url.searchParams.has("auth_error")) return;
-    setMessage(
+    setAuthError(
       url.searchParams.get("auth_error") === "unavailable"
         ? "Sign-in is temporarily unavailable. Please try again."
         : "Sign-in did not complete. Please try again.",
@@ -32,23 +37,16 @@ export function AccountControls(props: {
   });
 
   async function performNavigation(action: "login" | "logout") {
-    setMessage("");
-    try {
-      if (!(await props.beforeNavigate(action))) return;
-      // Account transitions can remove these controls before navigation.
-      const form = document.createElement("form");
-      form.method = "post";
-      form.action = backendEndpoint(
-        action === "login" ? "/api/startLogin" : "/api/logout",
-      );
-      form.hidden = true;
-      document.body.append(form);
-      form.submit();
-    } catch {
-      setMessage(
-        "Could not save the account change in this browser. Free up browser storage and retry.",
-      );
-    }
+    if (!(await props.beforeNavigate(action))) return;
+    // Account transitions can remove these controls before navigation.
+    const form = document.createElement("form");
+    form.method = "post";
+    form.action = backendEndpoint(
+      action === "login" ? "/api/startLogin" : "/api/logout",
+    );
+    form.hidden = true;
+    document.body.append(form);
+    form.submit();
   }
 
   // With only the sign-in button to show, the button is the island itself

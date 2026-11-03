@@ -1,5 +1,18 @@
-import { QueryClient } from "@tanstack/solid-query";
+import { focusManager, QueryClient } from "@tanstack/solid-query";
 import type { MutationOptions, QueryKey } from "@tanstack/solid-query";
+
+// Window focus and reachability events are refetch hints too: an online event
+// can arrive while Query already considers the browser online. Queries opt in
+// with `refetchOnWindowFocus`.
+focusManager.setEventListener((onFocus) => {
+  if (typeof window === "undefined") return;
+  const hint = () => onFocus();
+  const events = ["visibilitychange", "focus", "online"] as const;
+  for (const name of events) window.addEventListener(name, hint);
+  return () => {
+    for (const name of events) window.removeEventListener(name, hint);
+  };
+});
 
 export function createQueryClient() {
   return new QueryClient({

@@ -80,29 +80,34 @@ export function pendingSnapshot(doc: ProjectDocument, committed: Uint8Array) {
 export interface SyncOptions {
   api?: LoroApi;
   provider?: (id: string, doc: ProjectDocument) => SyncProvider;
-  online?: () => boolean;
-  debounceMs?: number;
-  retryMs?: number;
+  // Syncs only on syncNow(): no retries, polling or focus/reconnect refetches.
+  manual?: boolean;
   onStatus?: (status: CloudStatus) => void;
 }
+const retryDelay = (attempt: number) =>
+  Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+const fenced = () => new DOMException("Disposed", "AbortError");
+
+// One query per project lifetime. Query serializes runs, retries transient
+// failures with backoff, pauses while offline, and refetches on focus,
+// reconnect and a slow poll. Local edits join a running sync, which uploads
+// until nothing is pending; socket notifications restart it.
 export class ProjectSync {
   readonly handle: ProjectHandle;
   readonly repository: ProjectRepository;
   readonly api: LoroApi;
   readonly #options: SyncOptions;
   readonly #abort = new AbortController();
+  readonly #queryKey: readonly string[];
+  readonly #observer: QueryObserver<null, Error, null, null, readonly string[]>;
   #provider?: SyncProvider;
   #registered = false;
   #registrationChecked = false;
   #deleted = false;
   #registrationStarted = false;
   #snapshot = new Uint8Array();
-  #generation = 0;
-  #pending?: { bytes: Uint8Array; generation: number };
-  #running?: Promise<void>;
-  #requested = false;
-  #timer?: ReturnType<typeof setTimeout>;
-  #attempt = 0;
+  // A sent snapshot whose acknowledgement may be lost is resent unchanged.
+  #pending?: Uint8Array;
   #paused = false;
   #authPaused = false;
   #status: CloudStatus = { status: "saving" };
@@ -121,11 +126,20 @@ export class ProjectSync {
         undefined,
         Number(repository.scope.namespace.replace("account-", "")),
       );
+    this.#queryKey = [
+      "cloud-sync",
+      repository.names.catalog,
+      handle.id,
+      crypto.randomUUID(),
+    ];
+    this.#observer = new QueryObserver(
+      this.api.queryClient,
+      this.#queryOptions(),
+    );
+    this.#observer.subscribe(({ fetchStatus }) => {
+      if (fetchStatus === "paused") this.#offline();
+    });
     handle.doc.on("snapshot", this.#onSnapshot);
-    globalThis.window?.addEventListener("online", this.#wake);
-    globalThis.window?.addEventListener("offline", this.#offline);
-    globalThis.document?.addEventListener("visibilitychange", this.#visible);
-    this.#schedule(0);
   }
   get status() {
     return this.#status;
@@ -133,16 +147,32 @@ export class ProjectSync {
   get destroyed() {
     return this.#abort.signal.aborted;
   }
-  #online() {
-    return this.#options.online?.() ?? globalThis.navigator?.onLine !== false;
+  #queryOptions() {
+    const manual = !!this.#options.manual;
+    return {
+      queryKey: this.#queryKey,
+      queryFn: ({ signal }: { signal: AbortSignal }) =>
+        this.#run(AbortSignal.any([this.#abort.signal, signal])),
+      enabled: !manual && !this.#paused,
+      networkMode: "online" as const,
+      refetchInterval: 30_000,
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
+      retry: (_count: number, error: Error) =>
+        !manual && error instanceof SyncError,
+      retryDelay,
+      gcTime: 0,
+    };
   }
-  #alive() {
-    if (
-      this.destroyed ||
-      this.#paused ||
-      !savingPreferences(this.handle.doc).cloud
-    )
-      throw new DOMException("Disposed", "AbortError");
+  // Restart cancels an in-flight run; otherwise a request joins it.
+  #trigger(restart: boolean) {
+    if (this.destroyed || this.#paused || this.#options.manual) return;
+    void this.#observer.refetch({ cancelRefetch: restart });
+  }
+  #alive(signal: AbortSignal) {
+    signal.throwIfAborted();
+    if (this.#paused || !savingPreferences(this.handle.doc).cloud)
+      throw fenced();
   }
   #setStatus(status: CloudStatus) {
     if (!this.destroyed) {
@@ -150,13 +180,19 @@ export class ProjectSync {
       this.#options.onStatus?.(status);
     }
   }
+  #pause(status: CloudStatus & { message: string }) {
+    this.#paused = true;
+    this.#authPaused = status.status === "auth";
+    this.#provider?.disconnect();
+    this.#setStatus(status);
+    this.#observer.setOptions(this.#queryOptions());
+  }
   #onSnapshot = (_bytes: Uint8Array, origin: unknown) => {
     if (!savingPreferences(this.handle.doc).cloud) {
       this.#provider?.destroy();
       this.#provider = undefined;
       this.#pending = undefined;
-      this.#requested = true;
-      this.#schedule(0);
+      this.#trigger(true);
       return;
     }
     if (this.#deleted) {
@@ -164,15 +200,12 @@ export class ProjectSync {
       this.#registered = false;
       this.#snapshot = new Uint8Array();
     }
-    if (origin === ORIGIN.remote || origin === this.#provider) return;
-    this.#generation++;
-    if (!this.#paused) {
-      this.#setStatus({ status: this.#online() ? "saving" : "offline" });
-      this.#schedule(this.#options.debounceMs ?? 250);
-    }
+    if (origin === ORIGIN.remote || origin === this.#provider || this.#paused)
+      return;
+    this.#setStatus({ status: "saving" });
+    this.#trigger(false);
   };
-  #wake = () => this.retry();
-  #offline = () => {
+  #offline() {
     this.#provider?.disconnect();
     this.#setStatus(
       savingPreferences(this.handle.doc).cloud
@@ -185,96 +218,57 @@ export class ProjectSync {
                 "Cloud deletion pending. Reconnect to delete the existing cloud copy.",
             },
     );
-  };
-  #visible = () => {
-    if (globalThis.document?.visibilityState === "visible") this.#wake();
-  };
+  }
   pauseForAuth(message: string) {
-    this.#paused = true;
-    this.#authPaused = true;
-    clearTimeout(this.#timer);
-    this.#provider?.disconnect();
-    this.#setStatus({ status: "auth", message });
+    this.#pause({ status: "auth", message });
   }
   retry() {
     if (this.destroyed || this.#authPaused) return;
     this.#paused = false;
-    this.#attempt = 0;
-    this.#schedule(0);
-  }
-  #schedule(ms: number) {
-    if (this.destroyed || this.#paused) return;
-    clearTimeout(this.#timer);
-    this.#timer = setTimeout(() => {
-      this.#timer = undefined;
-      void this.syncNow();
-    }, ms);
+    this.#observer.setOptions(this.#queryOptions());
+    this.#trigger(true);
   }
   async syncNow(): Promise<void> {
     if (this.destroyed || this.#paused) return;
-    clearTimeout(this.#timer);
-    if (!this.#online()) {
-      this.#offline();
-      return;
-    }
-    if (this.#running) {
-      this.#requested = true;
-      return this.#running;
-    }
-    const work = globalThis.navigator?.locks
-      ? navigator.locks.request(
-          `${this.repository.names.catalog}/cloud/${this.handle.id}`,
-          { signal: this.#abort.signal },
-          () => this.#sync(),
-        )
-      : this.#sync();
-    this.#running = work
-      .catch((error: unknown) => {
-        if (this.destroyed || this.#paused) return;
-        if (
-          !savingPreferences(this.handle.doc).cloud &&
-          error instanceof DOMException &&
-          error.name === "AbortError"
-        ) {
-          this.#schedule(0);
-          return;
-        }
-        const failure =
-          error instanceof SyncError
-            ? error
-            : new SyncError("Cloud saving is unavailable. Retrying…");
-        if (failure.kind !== "retry") {
-          this.#paused = true;
-          this.#authPaused = failure.kind === "auth";
-          this.#provider?.disconnect();
-          this.#setStatus({ status: failure.kind, message: failure.message });
-        } else {
-          this.#setStatus({
-            status: "retrying",
-            message: !savingPreferences(this.handle.doc).cloud
-              ? "Cloud deletion pending. Reconnect to finish deleting the cloud copy."
-              : failure.message,
-          });
-          this.#schedule(
-            Math.min(
-              30000,
-              (this.#options.retryMs ?? 1000) *
-                2 ** Math.min(this.#attempt++, 5),
-            ),
-          );
-        }
-      })
-      .finally(() => {
-        this.#running = undefined;
-        if (this.#requested) {
-          this.#requested = false;
-          this.#schedule(this.#options.debounceMs ?? 250);
-        }
-      });
-    return this.#running;
+    await this.#observer.refetch({ cancelRefetch: false });
   }
-  async #sync() {
-    const signal = this.#abort.signal;
+  async #run(signal: AbortSignal): Promise<null> {
+    try {
+      await (globalThis.navigator?.locks
+        ? navigator.locks.request(
+            `${this.repository.names.catalog}/cloud/${this.handle.id}`,
+            { signal },
+            () => this.#sync(signal),
+          )
+        : this.#sync(signal));
+    } catch (error) {
+      if (signal.aborted || this.#paused) throw error;
+      // Opting out fenced this run; the next one deletes the cloud copy.
+      if (
+        !savingPreferences(this.handle.doc).cloud &&
+        error instanceof DOMException &&
+        error.name === "AbortError"
+      )
+        return this.#run(signal);
+      const failure =
+        error instanceof SyncError
+          ? error
+          : new SyncError("Cloud saving is unavailable. Retrying…");
+      if (failure.kind !== "retry") {
+        this.#pause({ status: failure.kind, message: failure.message });
+        return null;
+      }
+      this.#setStatus({
+        status: "retrying",
+        message: !savingPreferences(this.handle.doc).cloud
+          ? "Cloud deletion pending. Reconnect to finish deleting the cloud copy."
+          : failure.message,
+      });
+      throw failure;
+    }
+    return null;
+  }
+  async #sync(signal: AbortSignal) {
     if (!savingPreferences(this.handle.doc).cloud) {
       if (
         !this.#deleted &&
@@ -297,7 +291,7 @@ export class ProjectSync {
     if (!this.#registrationChecked) {
       this.#registered = await this.repository.isRegistered(this.handle.id);
       this.#registrationChecked = true;
-      this.#alive();
+      this.#alive(signal);
     }
     // Pulling a remote change is not saving: only registration or an upload
     // shows "saving", so socket notifications don't flash it.
@@ -310,82 +304,74 @@ export class ProjectSync {
     if (!this.#registered) {
       this.#registrationStarted = true;
       await this.repository.markCloudAttempted(this.handle.id);
-      this.#alive();
+      this.#alive(signal);
       await this.api.register(this.handle.id, signal);
-      this.#alive();
+      this.#alive(signal);
       await this.repository.markRegistered(this.handle.id);
-      this.#alive();
+      this.#alive(signal);
       this.#registered = true;
     }
     const snapshot = await this.api.snapshot(this.handle.id, signal);
-    this.#alive();
-    this.#snapshot = decodeBase64(snapshot.data);
-    this.handle.doc.merge(this.#snapshot, ORIGIN.remote);
-    await this.handle.flush();
-    this.#alive();
-    await this.handle.refreshMetadata();
-    this.#alive();
-    if (!this.#pending) {
-      const bytes = pendingSnapshot(this.handle.doc, this.#snapshot);
-      if (bytes) this.#pending = { bytes, generation: this.#generation };
-    }
-    if (this.#pending) {
+    this.#alive(signal);
+    await this.#apply(decodeBase64(snapshot.data), signal);
+    // Edits made during an upload are uploaded by the same run.
+    for (;;) {
+      this.#pending ??= pendingSnapshot(this.handle.doc, this.#snapshot);
+      if (!this.#pending) break;
       this.#setStatus({ status: "saving" });
-      const pending = this.#pending;
       const receipt = await this.api.merge(
         this.handle.id,
-        pending.bytes,
+        this.#pending,
         signal,
       );
-      this.#alive();
-      const bytes = decodeBase64(receipt.data);
-      this.handle.doc.merge(bytes, ORIGIN.remote);
-      this.#snapshot = bytes;
+      this.#alive(signal);
       this.#pending = undefined;
-      await this.handle.flush();
-      this.#alive();
-      await this.handle.refreshMetadata();
-      this.#alive();
+      await this.#apply(decodeBase64(receipt.data), signal);
     }
-    if (!this.#provider) {
-      const provider = this.#options.provider
-        ? this.#options.provider(this.handle.id, this.handle.doc)
-        : websocketProvider(this.handle.id, this.handle.doc, this.api.ownerId);
-      this.#provider = provider;
-      provider.on("sync", () => {
-        if (!this.destroyed) this.#schedule(0);
-      });
-      provider.on("connection-close", (event) => {
-        if (this.destroyed || this.#paused || !event) return;
-        if (event.code === 1008) {
-          this.#paused = true;
-          this.#authPaused = event.reason === "Sign in again";
-          this.#setStatus({
-            status: this.#authPaused ? "auth" : "blocked",
-            message: event.reason,
-          });
-        } else
-          this.#schedule(
-            Math.min(30000, 1000 * 2 ** Math.min(this.#attempt++, 5)),
-          );
-      });
-    }
-    this.#provider.connect();
-    this.#attempt = 0;
-    if (pendingSnapshot(this.handle.doc, this.#snapshot)) {
-      this.#setStatus({ status: "saving" });
-      this.#schedule(this.#options.debounceMs ?? 250);
-    } else this.#setStatus({ status: "saved" });
+    this.#connect().connect();
+    this.#setStatus({ status: "saved" });
+  }
+  async #apply(committed: Uint8Array<ArrayBuffer>, signal: AbortSignal) {
+    this.handle.doc.merge(committed, ORIGIN.remote);
+    this.#snapshot = committed;
+    await this.handle.flush();
+    this.#alive(signal);
+    await this.handle.refreshMetadata();
+    this.#alive(signal);
+  }
+  #connect() {
+    if (this.#provider) return this.#provider;
+    const provider = this.#options.provider
+      ? this.#options.provider(this.handle.id, this.handle.doc)
+      : websocketProvider(this.handle.id, this.handle.doc, this.api.ownerId);
+    this.#provider = provider;
+    provider.on("sync", () => this.#trigger(true));
+    provider.on("connection-close", (event) => {
+      if (this.destroyed || this.#paused || !event) return;
+      if (event.code === 1008)
+        this.#pause({
+          status: event.reason === "Sign in again" ? "auth" : "blocked",
+          message: event.reason,
+        });
+      // Reconnect through a sync, at most once a second.
+      else if (!this.#options.manual)
+        void this.api.queryClient.prefetchQuery({
+          ...this.#queryOptions(),
+          staleTime: 1000,
+        });
+    });
+    return provider;
   }
   destroy() {
     if (this.destroyed) return;
     this.#abort.abort();
-    clearTimeout(this.#timer);
     this.handle.doc.off("snapshot", this.#onSnapshot);
     this.#provider?.destroy();
-    globalThis.window?.removeEventListener("online", this.#wake);
-    globalThis.window?.removeEventListener("offline", this.#offline);
-    globalThis.document?.removeEventListener("visibilitychange", this.#visible);
+    this.#observer.destroy();
+    this.api.queryClient.removeQueries({
+      queryKey: this.#queryKey,
+      exact: true,
+    });
   }
 }
 
@@ -444,46 +430,33 @@ async function importCloudProject(
 // A browser without local projects for an account opens the account's most
 // recently changed cloud map, so signing in never needs to seed an empty one.
 // Projects this device keeps out of the cloud, and claim copies that are not
-// registered yet, are skipped. Transient failures retry until `signal` ends.
+// registered yet, are skipped.
 export async function openLatestCloudProject(
   repository: ProjectRepository,
   api: LoroApi,
   signal: AbortSignal,
-): Promise<ProjectHandle | undefined> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const recent = await api.recent(signal);
-      signal.throwIfAborted();
-      const known = new Map(
-        (await repository.list({ includeClaims: true })).map((entry) => [
-          entry.id,
-          entry,
-        ]),
-      );
-      const latest = recent.find(({ projectId }) => {
-        const entry = known.get(projectId);
-        return entry?.saving?.cloud !== false && !entry?.claimPending;
-      });
-      if (!latest) return;
-      const handle = await importCloudProject(
-        repository,
-        api,
-        latest.projectId,
-        signal,
-      );
-      await repository.setLatestProject(handle.id).catch(() => {});
-      return handle;
-    } catch (error) {
-      if (
-        signal.aborted ||
-        attempt >= 2 ||
-        (error instanceof SyncError && error.kind !== "retry")
-      )
-        throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
-    signal.throwIfAborted();
-  }
+): Promise<ProjectHandle | null> {
+  const recent = await api.recent(signal);
+  signal.throwIfAborted();
+  const known = new Map(
+    (await repository.list({ includeClaims: true })).map((entry) => [
+      entry.id,
+      entry,
+    ]),
+  );
+  const latest = recent.find(({ projectId }) => {
+    const entry = known.get(projectId);
+    return entry?.saving?.cloud !== false && !entry?.claimPending;
+  });
+  if (!latest) return null;
+  const handle = await importCloudProject(
+    repository,
+    api,
+    latest.projectId,
+    signal,
+  );
+  await repository.setLatestProject(handle.id).catch(() => {});
+  return handle;
 }
 
 const silentProvider = (): SyncProvider => ({
@@ -537,18 +510,15 @@ export class CloudWorkspace {
       networkMode: "online",
       refetchInterval: 30_000,
       refetchIntervalInBackground: true,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
       retry: (_count, error) =>
         !this.#abort.signal.aborted &&
         !(error instanceof SyncError && error.kind === "auth"),
-      retryDelay: (attempt) =>
-        Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5)),
+      retryDelay,
       gcTime: 0,
     });
     this.#stopQuery = this.#observer.subscribe(() => {});
-    globalThis.window?.addEventListener("online", this.#wake);
-    globalThis.window?.addEventListener("focus", this.#wake);
   }
   activate(handle: ProjectHandle) {
     if (this.#abort.signal.aborted || this.#authPaused) return;
@@ -570,12 +540,9 @@ export class CloudWorkspace {
   }
   retry() {
     this.#active?.retry();
-    this.#wake();
-  }
-  #wake = () => {
     if (this.#authPaused || this.#abort.signal.aborted) return;
     void this.#observer.refetch({ cancelRefetch: false });
-  };
+  }
   async #refresh(): Promise<null> {
     if (this.#abort.signal.aborted || this.#authPaused) return null;
     const signal = this.#abort.signal;
@@ -594,6 +561,7 @@ export class CloudWorkspace {
           const sync = new ProjectSync(handle, this.repository, {
             api: this.api,
             provider: silentProvider,
+            manual: true,
           });
           this.#background = sync;
           await sync.syncNow();
@@ -638,7 +606,5 @@ export class CloudWorkspace {
     });
     this.#active?.destroy();
     this.#background?.destroy();
-    globalThis.window?.removeEventListener("online", this.#wake);
-    globalThis.window?.removeEventListener("focus", this.#wake);
   }
 }

@@ -112,9 +112,7 @@ function attach(doc: ProjectDocument, server: Server) {
   } as unknown as ProjectRepository;
   const sync = new ProjectSync(handle, repo, {
     api: server,
-    online: () => true,
-    debounceMs: 60000,
-    retryMs: 60000,
+    manual: true,
     provider: () => ({
       connect() {},
       disconnect() {},
@@ -138,7 +136,7 @@ function fixture() {
   return { doc, root, server, ...attach(doc, server) };
 }
 
-test("lost acknowledgements retry the same snapshot while later edits remain unsent", async () => {
+test("lost acknowledgements resend the same snapshot before later edits", async () => {
   const { doc, root, server, sync } = fixture();
   server.lost = true;
   await sync.syncNow();
@@ -146,8 +144,7 @@ test("lost acknowledgements retry the same snapshot while later edits remain uns
   editNodeText(doc, root, 0, 0, "Later ");
   await sync.syncNow();
   expect(server.merges[1]).toEqual(server.merges[0]);
-  expect(sync.status.status).toBe("saving");
-  await sync.syncNow();
+  expect(server.merges).toHaveLength(3);
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
 });
@@ -169,17 +166,17 @@ test("pulling with nothing to upload never reports saving", async () => {
   expect([...seen, sync.status.status]).not.toContain("saving");
   expect(sync.status.status).toBe("saved");
 });
-test("edits received during an in-flight merge cannot be acknowledged prematurely", async () => {
+test("edits received during an in-flight merge are uploaded by the same sync", async () => {
   const { doc, root, server, sync } = fixture();
   const pending = gate();
   server.mergeGate = pending.promise;
   const running = sync.syncNow();
   while (!server.merges.length) await Bun.sleep(1);
   editNodeText(doc, root, 0, 0, "During upload ");
+  expect(sync.status.status).toBe("saving");
   pending.resolve();
   await running;
-  expect(sync.status.status).toBe("saving");
-  await sync.syncNow();
+  expect(server.merges).toHaveLength(2);
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
 });
