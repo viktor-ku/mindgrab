@@ -502,12 +502,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     !view().saving().local &&
     (!view().saving().cloud || account().status !== "authenticated");
   const [claimDismissed, setClaimDismissed] = createSignal(false);
-  createEffect(
-    on(
-      () => account().user?.id,
-      () => setClaimDismissed(false),
-    ),
-  );
+  // Every account check emits a new state object; only a different account
+  // may bring the dismissed prompt back, so compare the id itself.
+  const accountId = createMemo(() => account().user?.id);
+  createEffect(on(accountId, () => setClaimDismissed(false)));
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopDurability: (() => void) | undefined;
