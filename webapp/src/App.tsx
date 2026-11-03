@@ -157,6 +157,7 @@ const ZOOM_MAX = 2.5;
 // How long a new browser waits for the account's cloud maps before falling
 // back to this device's own projects.
 const CLOUD_CATALOG_TIMEOUT_MS = 10_000;
+const CLOUD_LOOKUP_KEY = ["latest-cloud-project"] as const;
 // A device-wide input preference: what a plain scroll wheel does on the canvas.
 type WheelMode = "pan" | "zoom";
 const WHEEL_MODE_KEY = "mindgrab:wheel-mode";
@@ -515,14 +516,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let disposed = false;
   let activation = 0;
   let claimAbort: AbortController | undefined;
-  // Ends a new browser's cloud lookup when its account leaves.
-  let cloudLookup: AbortController | undefined;
   const parked = new Set<{
     repository: ProjectRepository;
     handle: ProjectHandle;
   }>();
   const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
-  const [claimMessage, setClaimMessage] = createSignal("");
   const [recoveryPending, setRecoveryPending] = createSignal(false);
 
   const initializeMutation = createMutation(() => ({
@@ -544,6 +542,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     mutationFn: performAddAnonymousProjects,
   }));
   const claiming = () => claimMutation.isPending;
+  const claimMessage = () =>
+    claimMutation.isError
+      ? "Could not finish adding anonymous projects. Your local work is retained; retry to continue."
+      : "";
   const addAnonymousProjects = () => {
     if (!claiming()) claimMutation.mutate();
   };
@@ -744,23 +746,27 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       navigator.onLine === false
     )
       return;
-    cloudLookup?.abort();
-    const lookup = new AbortController();
-    cloudLookup = lookup;
+    const deadline = AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS);
     try {
-      return await openLatestCloudProject(
-        target,
-        new LoroApi(undefined, undefined, ownerId, queryClient),
-        AbortSignal.any([
-          lookup.signal,
-          AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
-        ]),
-      );
+      const handle = await queryClient.fetchQuery({
+        queryKey: [...CLOUD_LOOKUP_KEY, target.names.catalog],
+        queryFn: ({ signal }) =>
+          openLatestCloudProject(
+            target,
+            new LoroApi(undefined, undefined, ownerId, queryClient),
+            AbortSignal.any([signal, deadline]),
+          ),
+        retry: (count, error) =>
+          count < 2 &&
+          !deadline.aborted &&
+          !(error instanceof SyncError && error.kind !== "retry"),
+        retryDelay: (attempt) => 500 * 2 ** attempt,
+        gcTime: 0,
+      });
+      return handle ?? undefined;
     } catch {
       // Unavailable: a first map is still better than no editor.
       return;
-    } finally {
-      if (cloudLookup === lookup) cloudLookup = undefined;
     }
   }
 
@@ -859,7 +865,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     activation++;
-    cloudLookup?.abort();
+    // Ends a new browser's cloud lookup when its account leaves.
+    void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
     window.clearTimeout(viewSaveTimer);
     stopCatalog?.();
     stopDurability?.();
@@ -888,7 +895,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setDoc(ephemeralDocument());
     setStorageReady(false);
     setStorageMessage("");
-    setClaimMessage("");
+    claimMutation.reset();
     watchCatalog(nextRepository);
     void retireWorkspace(previousRepository, previousHandle);
     try {
@@ -915,7 +922,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       deployment,
       namespace: ANONYMOUS_NAMESPACE,
     });
-    setClaimMessage("");
     try {
       const ids = await claimAnonymousProjects(
         source,
@@ -925,7 +931,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         new LoroApi(undefined, undefined, userId, queryClient),
       );
       if (owner !== repository || disposed || abort.signal.aborted) return;
-      setClaimMessage("");
       track("anonymous_maps_claimed", { count: ids.length });
       showNotice({
         message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
@@ -935,9 +940,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (ids[0]) await openProject(ids[0]);
     } catch (error) {
       if (owner !== repository || disposed || abort.signal.aborted) return;
-      setClaimMessage(
-        "Could not finish adding anonymous projects. Your local work is retained; retry to continue.",
-      );
       await refreshClaims(owner);
       if (error instanceof SyncError && error.kind === "auth") {
         auth.expire();
@@ -1066,16 +1068,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [showLoad, setShowLoad] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
   const [showShare, setShowShare] = createSignal(false);
-  const [preferencesBusy, setPreferencesBusy] = createSignal(false);
-  const [preferencesError, setPreferencesError] = createSignal("");
-  async function changeSaving(
+  const savingMutation = createMutation(() => ({
+    mutationKey: ["project", "saving"],
+    mutationFn: performChangeSaving,
+  }));
+  const preferencesError = () =>
+    savingMutation.error
+      ? `Could not finish updating storage: ${savingMutation.error.message || "Please retry."} Existing copies may remain.`
+      : "";
+  async function performChangeSaving(
     value: import("./project-document").SavingPreferences,
   ) {
     const handle = activeHandle;
     const owner = repository;
-    if (!handle || preferencesBusy()) return;
-    setPreferencesBusy(true);
-    setPreferencesError("");
+    if (!handle) return;
     try {
       await owner.updateSaving(handle, value);
       track("saving_changed", { local: value.local, cloud: value.cloud });
@@ -1087,12 +1093,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         });
       cloud?.retry();
     } catch (error) {
-      if (handle === activeHandle)
-        setPreferencesError(
-          `Could not finish updating storage: ${error instanceof Error ? error.message : "Please retry."} Existing copies may remain.`,
-        );
-    } finally {
-      setPreferencesBusy(false);
+      if (handle === activeHandle) throw error;
     }
   }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
@@ -2773,7 +2774,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       disposed = true;
       activation++;
       claimAbort?.abort();
-      cloudLookup?.abort();
+      void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
       stopAuth();
       auth.destroy();
       cloud?.destroy();
@@ -3283,8 +3284,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         open={showPreferences()}
         onClose={() => setShowPreferences(false)}
         saving={view().saving()}
-        onChange={(value) => void changeSaving(value)}
-        busy={preferencesBusy()}
+        onChange={(value) => {
+          if (!savingMutation.isPending) savingMutation.mutate(value);
+        }}
+        busy={savingMutation.isPending}
         error={preferencesError()}
         cloudStatus={cloudStatus()}
         signedIn={account().status === "authenticated"}

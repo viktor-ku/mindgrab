@@ -53,10 +53,8 @@ export class AuthSession {
     readonly string[]
   >;
   #stopQuery?: () => void;
-  #epoch = 0;
   #started = false;
   #disposed = false;
-  #hydration?: Promise<void>;
 
   constructor(deployment: string, client = createQueryClient()) {
     this.key = authStorageKey(deployment);
@@ -72,46 +70,47 @@ export class AuthSession {
       status: this.#record.signedOut ? "anonymous" : "checking",
     };
   }
-  hydrate(): Promise<void> {
-    if (this.#hydration) return this.#hydration;
-    this.#hydration = (async () => {
-      const stored = recordSchema.safeParse(await readAuthRecord(this.key));
-      if (this.#disposed) return;
-      const local = this.#read();
-      // Sequence is allocated under the IDB write lock, not a wall clock.
-      if (
-        stored.success &&
-        (!local || (stored.data.sequence ?? 0) > (local.sequence ?? 0))
-      ) {
-        this.#record = stored.data;
-        localStorage.setItem(this.key, JSON.stringify(stored.data));
-      } else if (stored.success && local?.revision === stored.data.revision) {
-        this.#record = stored.data;
-      } else if (local) {
-        this.#record = local;
-        const saved = await writeAuthRecord(
-          this.key,
-          local,
-          () => this.#read()?.revision === local.revision,
-        );
-        if (
-          saved &&
-          !this.#disposed &&
-          this.#read()?.revision === local.revision
-        ) {
-          this.#record = saved;
-          localStorage.setItem(this.key, JSON.stringify(saved));
-        }
-      }
-      this.#state = {
-        user: this.#record.user,
-        status: this.#record.signedOut ? "anonymous" : "checking",
-      };
-    })().catch((error) => {
-      this.#hydration = undefined;
-      throw error;
+  // Runs once per session; a failed read is retried by the next caller.
+  hydrate() {
+    return this.#client.ensureQueryData({
+      queryKey: [...this.#queryKey, "hydrate"],
+      queryFn: () => this.#hydrate().then(() => null),
+      gcTime: Number.POSITIVE_INFINITY,
     });
-    return this.#hydration;
+  }
+  async #hydrate() {
+    const stored = recordSchema.safeParse(await readAuthRecord(this.key));
+    if (this.#disposed) return;
+    const local = this.#read();
+    // Sequence is allocated under the IDB write lock, not a wall clock.
+    if (
+      stored.success &&
+      (!local || (stored.data.sequence ?? 0) > (local.sequence ?? 0))
+    ) {
+      this.#record = stored.data;
+      localStorage.setItem(this.key, JSON.stringify(stored.data));
+    } else if (stored.success && local?.revision === stored.data.revision) {
+      this.#record = stored.data;
+    } else if (local) {
+      this.#record = local;
+      const saved = await writeAuthRecord(
+        this.key,
+        local,
+        () => this.#read()?.revision === local.revision,
+      );
+      if (
+        saved &&
+        !this.#disposed &&
+        this.#read()?.revision === local.revision
+      ) {
+        this.#record = saved;
+        localStorage.setItem(this.key, JSON.stringify(saved));
+      }
+    }
+    this.#state = {
+      user: this.#record.user,
+      status: this.#record.signedOut ? "anonymous" : "checking",
+    };
   }
   get state() {
     return this.#state;
@@ -134,8 +133,8 @@ export class AuthSession {
     this.#observer?.setOptions(this.#queryOptions());
     for (const listener of this.#listeners) listener(state);
   }
+  // Aborts an in-flight check, which then publishes nothing.
   #invalidate() {
-    this.#epoch++;
     void this.#client.cancelQueries({ queryKey: this.#queryKey, exact: true });
   }
   async #publish(record: SessionRecord) {
@@ -188,28 +187,14 @@ export class AuthSession {
       // Ignore unrelated or malformed browser storage notifications.
     }
   };
-  #refresh = () => {
-    const stored = this.#read();
-    if (stored && stored.revision !== this.#record.revision)
-      this.#receive(stored);
-    if (
-      this.#client.getQueryState(this.#queryKey)?.fetchStatus === "fetching"
-    ) {
-      // Focus/online can change the cookie during a request. Check again after
-      // that request settles, while Query deduplicates concurrent refreshes.
-      void this.check().then(() => {
-        if (!this.#disposed && !this.#record.navigating) void this.check();
-      });
-    } else void this.check();
-  };
   #queryOptions() {
     return {
       queryKey: this.#queryKey,
       queryFn: ({ signal }: { signal: AbortSignal }) => this.#check(signal),
       enabled: !this.#disposed && !this.#record.signedOut,
       refetchInterval: 30_000,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
       gcTime: 0,
     };
   }
@@ -222,8 +207,6 @@ export class AuthSession {
       this.#channel.onmessage = ({ data }) => this.#receive(data);
     }
     window.addEventListener("storage", this.#storage);
-    window.addEventListener("focus", this.#refresh);
-    window.addEventListener("online", this.#refresh);
     this.#observer = new QueryObserver(this.#client, this.#queryOptions());
     this.#stopQuery = this.#observer.subscribe(() => {});
   }
@@ -235,10 +218,8 @@ export class AuthSession {
     );
   }
   async #check(signal: AbortSignal): Promise<SessionState> {
-    const epoch = this.#epoch;
     const revision = this.#record.revision;
-    const alive = () =>
-      !this.#disposed && epoch === this.#epoch && !signal.aborted;
+    const alive = () => !signal.aborted;
     try {
       const response = await fetch(backendEndpoint("/api/getMe"), {
         method: "POST",
@@ -328,11 +309,9 @@ export class AuthSession {
     this.#invalidate();
     this.#stopQuery?.();
     this.#observer?.destroy();
-    this.#client.removeQueries({ queryKey: this.#queryKey, exact: true });
+    this.#client.removeQueries({ queryKey: this.#queryKey });
     this.#channel?.close();
     this.#listeners.clear();
     window.removeEventListener("storage", this.#storage);
-    window.removeEventListener("focus", this.#refresh);
-    window.removeEventListener("online", this.#refresh);
   }
 }
