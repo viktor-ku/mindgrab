@@ -10,6 +10,8 @@ import {
   Show,
   untrack,
 } from "solid-js";
+import { makeEventListener } from "@solid-primitives/event-listener";
+import { debounce } from "@solid-primitives/scheduled";
 import { createQuery } from "@tanstack/solid-query";
 import { Node } from "./App";
 import { track } from "./analytics";
@@ -269,17 +271,15 @@ export function SharedProject(props: { token: string }) {
   const [zoom, setZoom] = createSignal(1);
   const [easing, setEasing] = createSignal(false);
   const [panning, setPanning] = createSignal(false);
-  let easeTimer: number | undefined;
-  onCleanup(() => window.clearTimeout(easeTimer));
+  const stopEasing = debounce(() => setEasing(false), 220);
   function moveView(next: { left: number; top: number; zoom?: number }) {
-    window.clearTimeout(easeTimer);
     batch(() => {
       setEasing(true);
       setLeft(next.left);
       setTop(next.top);
       if (next.zoom !== undefined) setZoom(next.zoom);
     });
-    easeTimer = window.setTimeout(() => setEasing(false), 220);
+    stopEasing();
   }
   const viewOrigin = () => ({
     x: (layout().nodes[0]?.width ?? 0) / 2,
@@ -430,8 +430,7 @@ export function SharedProject(props: { token: string }) {
           setTop(top() - (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * unit);
         });
     };
-    canvas.addEventListener("wheel", wheel, { passive: false });
-    onCleanup(() => canvas.removeEventListener("wheel", wheel));
+    makeEventListener(canvas, "wheel", wheel, { passive: false });
   });
 
   const centered = (content: () => unknown) => (
