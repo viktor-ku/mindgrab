@@ -1,4 +1,5 @@
 import { createEffect, For } from "solid-js";
+import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
 
 const APPLE =
@@ -74,7 +75,6 @@ export function ShortcutsDialog(props: {
     else if (!props.open && dialog.open) dialog.close();
   });
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: Clicking the backdrop closes the dialog; Escape is handled natively.
     <dialog
       ref={dialog}
       class="shortcuts-dialog"
@@ -82,9 +82,7 @@ export function ShortcutsDialog(props: {
       data-no-pan
       onClose={props.onClose}
       onCancel={props.onClose}
-      onClick={(e) => {
-        if (e.target === dialog) props.onClose();
-      }}
+      {...backdropDismiss(() => props.onClose())}
     >
       <header class="flex items-center justify-between gap-4 border-b border-stone-100 px-6 py-4">
         <h2 id="shortcuts-title" class="font-display text-xl font-semibold">

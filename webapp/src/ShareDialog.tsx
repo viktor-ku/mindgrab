@@ -4,6 +4,7 @@ import {
   useQueryClient,
 } from "@tanstack/solid-query";
 import { createEffect, Show } from "solid-js";
+import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
 import { LoroApi, SyncError } from "./loro-api";
 import { shareUrl } from "./shared-project";
@@ -89,6 +90,7 @@ export function ShareDialog(props: {
       data-no-pan
       onClose={props.onClose}
       onCancel={props.onClose}
+      {...backdropDismiss(() => props.onClose())}
     >
       <header class="flex items-center justify-between gap-4 border-b border-stone-100 pb-4">
         <h2 id="share-dialog-title" class="font-display text-xl font-semibold">

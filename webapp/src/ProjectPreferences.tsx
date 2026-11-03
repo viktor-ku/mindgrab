@@ -1,4 +1,5 @@
 import { createEffect, For, Show } from "solid-js";
+import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
 import type { SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
@@ -27,6 +28,7 @@ export function ProjectPreferences(props: {
       data-no-pan
       onClose={props.onClose}
       onCancel={props.onClose}
+      {...backdropDismiss(() => props.onClose())}
     >
       <header class="flex items-center justify-between gap-4 border-b border-stone-100 pb-4">
         <h2

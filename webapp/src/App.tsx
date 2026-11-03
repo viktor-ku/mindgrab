@@ -3115,6 +3115,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       )
         setMenuOpen(false);
       if (
+        colorOpen() &&
+        e.target instanceof Element &&
+        !e.target.closest(
+          '[aria-label="Selected node color controls"], button[aria-label="Color"]',
+        )
+      )
+        setColorOpen(false);
+      if (
         !(e.target instanceof Element) ||
         !e.target.closest("[data-context-menu]")
       )
