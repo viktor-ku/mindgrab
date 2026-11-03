@@ -299,7 +299,14 @@ export class ProjectSync {
       this.#registrationChecked = true;
       this.#alive();
     }
-    this.#setStatus({ status: "saving" });
+    // Pulling a remote change is not saving: only registration or an upload
+    // shows "saving", so socket notifications don't flash it.
+    if (
+      !this.#registered ||
+      this.#pending ||
+      pendingSnapshot(this.handle.doc, this.#snapshot)
+    )
+      this.#setStatus({ status: "saving" });
     if (!this.#registered) {
       this.#registrationStarted = true;
       await this.repository.markCloudAttempted(this.handle.id);
@@ -323,6 +330,7 @@ export class ProjectSync {
       if (bytes) this.#pending = { bytes, generation: this.#generation };
     }
     if (this.#pending) {
+      this.#setStatus({ status: "saving" });
       const pending = this.#pending;
       const receipt = await this.api.merge(
         this.handle.id,

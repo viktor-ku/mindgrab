@@ -4,10 +4,12 @@ import {
   createRouter,
   Outlet,
 } from "@tanstack/solid-router";
+import { Show } from "solid-js";
 import { App } from "./App.tsx";
 import { CheckHealth, CheckHealthPending } from "./CheckHealth.tsx";
 import { healthQueryOptions } from "./health";
 import { queryClient } from "./query-client";
+import { SharedProject } from "./SharedProject.tsx";
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -15,6 +17,20 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: App,
+});
+
+// A project's view-only share link. The token is the only credential.
+const sharedRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/s/$token",
+  component: () => {
+    const params = sharedRoute.useParams();
+    return (
+      <Show when={params().token} keyed>
+        {(token) => <SharedProject token={token} />}
+      </Show>
+    );
+  },
 });
 
 const checkHealthRoute = createRoute({
@@ -29,7 +45,7 @@ const checkHealthRoute = createRoute({
 });
 
 export const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, checkHealthRoute]),
+  routeTree: rootRoute.addChildren([indexRoute, sharedRoute, checkHealthRoute]),
 });
 
 declare module "@tanstack/solid-router" {

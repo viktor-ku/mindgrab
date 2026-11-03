@@ -66,6 +66,7 @@ impl Backend {
             .route("/api/auth/callback", get(projects::callback))
             .route("/api/{method}", post(projects::rpc))
             .route("/sync/loro/{id}", get(projects::socket))
+            .route("/sync/share/{token}", get(projects::shared_socket))
             .route(
                 "/ingest/{*path}",
                 get(analytics::ingest).post(analytics::ingest),

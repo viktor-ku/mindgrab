@@ -378,3 +378,153 @@ async fn recent_project_listing_orders_by_last_committed_change() {
     );
     f.close().await;
 }
+
+async fn shared(f: &Fixture, token: &str) -> reqwest::Response {
+    // Viewers carry no session cookie and may come from any origin.
+    f.client
+        .post(format!("{}/api/getSharedProject", f.url))
+        .json(&json!({ "token": token }))
+        .send()
+        .await
+        .unwrap()
+}
+async fn share(f: &Fixture, browser: &str, id: Uuid, enabled: bool) -> Value {
+    let response = f
+        .rpc(
+            "setShareLink",
+            browser,
+            json!({"projectId":id,"enabled":enabled}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    response.json().await.unwrap()
+}
+#[tokio::test]
+async fn share_links_grant_anonymous_read_only_access_until_revoked() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let bob = f.credential("bob").await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let mut project = Project::new("Shared plan").unwrap();
+    project
+        .apply(Command::CreateNode {
+            parent: None,
+            index: None,
+            text: "Idea".into(),
+            color: Color::Blue,
+        })
+        .unwrap();
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+
+    // Private by default.
+    let link: Value = f
+        .rpc("getShareLink", &alice, json!({"projectId":id}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(link["token"].is_null());
+    // Only the owner sees or changes the link, and only from the app origin.
+    for method in ["getShareLink", "setShareLink"] {
+        let args = if method == "getShareLink" {
+            json!({"projectId":id})
+        } else {
+            json!({"projectId":id,"enabled":true})
+        };
+        assert_eq!(f.rpc(method, &bob, args.clone()).await.status(), 404);
+        assert_eq!(f.rpc(method, "", args).await.status(), 401);
+    }
+    assert_eq!(
+        f.post("setShareLink", &alice)
+            .header("origin", "https://evil.example")
+            .json(&json!({"projectId":id,"enabled":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+
+    let token = share(&f, &alice, id, true).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(token.len(), 43);
+    // Enabling again keeps the one link.
+    assert_eq!(share(&f, &alice, id, true).await["token"], token.as_str());
+    let link: Value = f
+        .rpc("getShareLink", &alice, json!({"projectId":id}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(link["token"], token.as_str());
+
+    let response = shared(&f, &token).await;
+    assert_eq!(response.status(), 200);
+    let value: Value = response.json().await.unwrap();
+    assert_eq!(value["name"], "Shared plan");
+    assert_eq!(value["projectId"], id.to_string());
+    let viewed =
+        Project::from_snapshot(&STANDARD.decode(value["data"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(viewed.view().unwrap(), project.view().unwrap());
+    // The link reads; it never writes or reaches the owner's other APIs.
+    assert_eq!(
+        f.rpc("getProjectSnapshot", "", json!({"projectId":id}))
+            .await
+            .status(),
+        401
+    );
+    for bad in ["", "short", &"x".repeat(43), &format!("{token}x")] {
+        assert_eq!(shared(&f, bad).await.status(), 404, "{bad}");
+    }
+
+    // Disabling revokes the link; re-enabling issues a different one.
+    assert!(share(&f, &alice, id, false).await["token"].is_null());
+    assert_eq!(shared(&f, &token).await.status(), 404);
+    let renewed = share(&f, &alice, id, true).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(renewed, token);
+    assert_eq!(shared(&f, &renewed).await.status(), 200);
+
+    // Deleting the cloud copy revokes the link, also after re-creating it.
+    assert_eq!(
+        f.rpc("deleteProject", &alice, json!({"projectId":id}))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(shared(&f, &renewed).await.status(), 404);
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    assert_eq!(shared(&f, &renewed).await.status(), 404);
+    let link: Value = f
+        .rpc("getShareLink", &alice, json!({"projectId":id}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(link["token"].is_null());
+    f.close().await;
+}

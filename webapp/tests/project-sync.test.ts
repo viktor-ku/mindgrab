@@ -151,6 +151,24 @@ test("lost acknowledgements retry the same snapshot while later edits remain uns
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
 });
+test("pulling with nothing to upload never reports saving", async () => {
+  const { sync } = fixture();
+  await sync.syncNow();
+  expect(sync.status.status).toBe("saved");
+  // A socket notification runs a pull-only sync.
+  const seen = new Set<string>();
+  let done = false;
+  const running = sync.syncNow().finally(() => {
+    done = true;
+  });
+  while (!done) {
+    seen.add(sync.status.status);
+    await Bun.sleep(0);
+  }
+  await running;
+  expect([...seen, sync.status.status]).not.toContain("saving");
+  expect(sync.status.status).toBe("saved");
+});
 test("edits received during an in-flight merge cannot be acknowledged prematurely", async () => {
   const { doc, root, server, sync } = fixture();
   const pending = gate();

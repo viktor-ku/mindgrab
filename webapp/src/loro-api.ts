@@ -24,6 +24,7 @@ const snapshot = z.object({
   data: z.string(),
   durable: z.literal(true),
 });
+const shareLink = z.object({ projectId, token: z.string().nullable() });
 export type CloudProject = z.infer<typeof record>;
 export type CloudSnapshot = z.infer<typeof snapshot>;
 
@@ -139,6 +140,19 @@ export class LoroApi {
       (signal) => this.#readSnapshot(id, signal),
       id,
     );
+  }
+
+  // The project's view-only link token, or null while the project is private.
+  async shareLink(id: string, signal: AbortSignal) {
+    return shareLink.parse(
+      await this.#json("getShareLink", { projectId: id }, signal),
+    ).token;
+  }
+
+  async setShareLink(id: string, enabled: boolean, signal: AbortSignal) {
+    return shareLink.parse(
+      await this.#json("setShareLink", { projectId: id, enabled }, signal),
+    ).token;
   }
 
   merge(id: string, bytes: Uint8Array, signal: AbortSignal) {
