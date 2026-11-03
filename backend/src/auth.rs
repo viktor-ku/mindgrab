@@ -26,7 +26,7 @@ const LOCAL_TOKEN: &str = "local-development";
 pub fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value))
 }
-fn token() -> String {
+pub(crate) fn token() -> String {
     let mut bytes = [0; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)

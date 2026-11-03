@@ -104,12 +104,19 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/mergeProject?projectId=<uuid>` | Merge an octet-stream snapshot |
 | `/api/commandProject` | Apply `{projectId, command}` with the native shared core |
 | `/api/deleteProject` | Delete the cloud snapshot |
+| `/api/getShareLink` | The owner's `{projectId, token}`; `token` is null while private |
+| `/api/setShareLink` | Owner turns the view-only link on (keeps an existing token) or off (revokes it) |
+| `/api/getSharedProject` | Anyone with `{token}`: snapshot, revision and name; no session |
 
 GET `/api/auth/callback` completes login. GET `/sync/loro/<uuid>?ownerId=<id>`
 upgrades to a read-only notification socket. Notifications contain committed
 revisions, never uncommitted document changes. Postgres NOTIFY reaches all Rust
 processes; periodic reconciliation handles reconnects and missed notifications.
 Sockets revalidate their session and ownership before notifications.
+GET `/sync/share/<token>` is the same notification socket for a shared link,
+without a session; it closes with code 1008 once the link is revoked. Deleting a
+cloud copy also revokes its link. The webapp's read-only viewer lives at
+`/s/<token>`.
 
 Uploads lock the project row, validate and merge with the shared Rust core off
 the async executor, and commit the complete result before acknowledging

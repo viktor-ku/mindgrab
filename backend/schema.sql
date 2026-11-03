@@ -30,3 +30,5 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.projects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS projects_owner ON mindgrab_loro.projects(owner_id,id) WHERE NOT deleted;
+-- A project's "anyone with the link can view" token. NULL keeps it private.
+ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS share_token TEXT UNIQUE;

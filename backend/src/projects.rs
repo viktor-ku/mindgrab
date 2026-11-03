@@ -103,10 +103,12 @@ pub async fn rpc(
         "startLogin" => return app.auth.start(&headers).await,
         "logout" => return app.auth.logout(&headers).await,
         "getMe" => return Ok(Json(app.auth.identify(&headers).await?).into_response()),
-        "createProject" | "deleteProject" | "mergeProject" | "commandProject" => {
+        // Anyone holding a share token may read; no session is involved.
+        "getSharedProject" => return shared(&app, &headers, &body).await,
+        "createProject" | "deleteProject" | "mergeProject" | "commandProject" | "setShareLink" => {
             app.config.same_origin(&headers)?
         }
-        "listProjects" | "getProjectSnapshot" | "getProjectState" => {}
+        "listProjects" | "getProjectSnapshot" | "getProjectState" | "getShareLink" => {}
         _ => return Ok(StatusCode::NOT_FOUND.into_response()),
     }
     let user = app.auth.identify(&headers).await?;
@@ -145,7 +147,8 @@ pub async fn rpc(
         "deleteProject" => {
             let args: ProjectId = parse(&headers, &body)?;
             let mut tx = app.pool.begin().await?;
-            sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=NULL,name=NULL,deleted=true,revision=revision+1,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(args.project_id).bind(user.id).execute(&mut *tx).await?;
+            // Deleting the cloud copy also revokes its share link.
+            sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=NULL,name=NULL,share_token=NULL,deleted=true,revision=revision+1,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(args.project_id).bind(user.id).execute(&mut *tx).await?;
             notify(&mut tx, user.id, args.project_id).await?;
             tx.commit().await?;
             Ok(Json(json!({"deleted":true})).into_response())
@@ -173,6 +176,28 @@ pub async fn rpc(
                 stored(&app, &user, args.project_id).await?,
             ))
             .into_response())
+        }
+        "getShareLink" => {
+            let args: ProjectId = parse(&headers, &body)?;
+            let token: Option<String> = sqlx::query_scalar("SELECT share_token FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(args.project_id).bind(user.id).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)?;
+            Ok(Json(json!({"projectId":args.project_id,"token":token})).into_response())
+        }
+        "setShareLink" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                project_id: Uuid,
+                enabled: bool,
+            }
+            let args: Args = parse(&headers, &body)?;
+            // One link per project: enabling keeps an existing token, and
+            // disabling discards it so a later link is a new one.
+            let mut tx = app.pool.begin().await?;
+            let token: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.projects SET share_token=CASE WHEN $3 THEN COALESCE(share_token,$4) END WHERE id=$1 AND owner_id=$2 AND NOT deleted RETURNING share_token").bind(args.project_id).bind(user.id).bind(args.enabled).bind(crate::auth::token()).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
+            // Wake open viewers so a revoked link closes promptly.
+            notify(&mut tx, user.id, args.project_id).await?;
+            tx.commit().await?;
+            Ok(Json(json!({"projectId":args.project_id,"token":token})).into_response())
         }
         "getProjectState" => {
             let args: ProjectId = parse(&headers, &body)?;
@@ -313,20 +338,95 @@ pub async fn socket(
     stored(&app, &user, id).await?;
     // Subscribe before the upgrade so an edit during the handshake isn't lost.
     let receiver = app.changes.subscribe();
+    let target = format!("{}/{id}", user.id);
     Ok(ws
         .max_message_size(1024)
         .max_frame_size(1024)
-        .on_upgrade(move |socket| handle_socket(app, socket, headers, user, id, receiver)))
+        .on_upgrade(move |socket| {
+            watch(socket, target, receiver, async move || {
+                if app.auth.identify(&headers).await.is_err() {
+                    return Err("Sign in again");
+                }
+                match stored(&app, &user, id).await {
+                    Ok(project) => Ok(project.revision),
+                    Err(_) => Err("Project unavailable"),
+                }
+            })
+        }))
 }
-async fn handle_socket(
-    app: std::sync::Arc<Backend>,
-    mut socket: WebSocket,
-    headers: HeaderMap,
-    user: User,
+
+#[derive(FromRow)]
+struct Shared {
     id: Uuid,
+    owner_id: i64,
+    name: Option<String>,
+    snapshot: Option<Vec<u8>>,
+    revision: i64,
+}
+async fn shared_project(app: &Backend, token: &str) -> Result<Shared> {
+    // Tokens are 32 random bytes, URL-safe base64 without padding.
+    if token.len() != 43
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(ApiError::missing());
+    }
+    sqlx::query_as("SELECT id,owner_id,name,snapshot,revision FROM mindgrab_loro.projects WHERE share_token=$1 AND NOT deleted AND snapshot IS NOT NULL").bind(token).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)
+}
+async fn shared(app: &Backend, headers: &HeaderMap, body: &Bytes) -> Result<Response> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        token: String,
+    }
+    let args: Args = parse(headers, body)?;
+    let project = shared_project(app, &args.token).await?;
+    let mut value = baseline(
+        project.id,
+        Stored {
+            snapshot: project.snapshot,
+            revision: project.revision,
+        },
+    );
+    value["name"] = json!(project.name);
+    Ok(Json(value).into_response())
+}
+/// Read-only revision notifications for a shared project. The link itself is
+/// the credential, so the socket closes as soon as it is revoked.
+pub async fn shared_socket(
+    axum::extract::State(app): AppState,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response> {
+    app.config.same_origin(&headers)?;
+    let project = shared_project(&app, &token).await?;
+    let receiver = app.changes.subscribe();
+    let target = format!("{}/{}", project.owner_id, project.id);
+    Ok(ws
+        .max_message_size(1024)
+        .max_frame_size(1024)
+        .on_upgrade(move |socket| {
+            watch(
+                socket,
+                target,
+                receiver,
+                async move || match shared_project(&app, &token).await {
+                    Ok(project) => Ok(project.revision),
+                    Err(_) => Err("Link disabled"),
+                },
+            )
+        }))
+}
+/// Sends the committed revision whenever `target` changes (and periodically),
+/// closing with `check`'s reason once access ends.
+async fn watch(
+    mut socket: WebSocket,
+    target: String,
     mut receiver: tokio::sync::broadcast::Receiver<String>,
+    mut check: impl AsyncFnMut() -> std::result::Result<i64, &'static str>,
 ) {
-    let target = format!("{}/{id}", user.id);
     let mut timer = tokio::time::interval(Duration::from_secs(20));
     loop {
         let changed = tokio::select! {
@@ -337,22 +437,13 @@ async fn handle_socket(
         if !changed {
             continue;
         }
-        if app.auth.identify(&headers).await.is_err() {
-            let _ = socket
-                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1008,
-                    reason: "Sign in again".into(),
-                })))
-                .await;
-            break;
-        }
-        let project = match stored(&app, &user, id).await {
-            Ok(project) => project,
-            Err(_) => {
+        let revision = match check().await {
+            Ok(revision) => revision,
+            Err(reason) => {
                 let _ = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: 1008,
-                        reason: "Project unavailable".into(),
+                        reason: reason.into(),
                     })))
                     .await;
                 break;
@@ -360,9 +451,7 @@ async fn handle_socket(
         };
         if socket
             .send(Message::Text(
-                json!({"revision":project.revision.to_string()})
-                    .to_string()
-                    .into(),
+                json!({"revision":revision.to_string()}).to_string().into(),
             ))
             .await
             .is_err()

@@ -1,4 +1,5 @@
 import { ProjectPreferences } from "./ProjectPreferences";
+import { ShareDialog } from "./ShareDialog";
 import {
   createMutation,
   createQuery,
@@ -285,8 +286,10 @@ interface UndoSelection {
   text?: TextSelection;
 }
 
-function Node(props: {
+export function Node(props: {
   doc: ProjectDocument;
+  // Shared views only select and read ideas.
+  readOnly?: boolean;
   id: string;
   text: string;
   color?: NodeColor;
@@ -343,7 +346,11 @@ function Node(props: {
       style={{
         transform: `translate(${props.x}px, ${props.y}px)`,
       }}
-      title={`Click to select · Double-click to write · Drag to move${props.descendants ? ` · ${ALT_LABEL}G to collapse or expand children` : ""}`}
+      title={
+        props.readOnly
+          ? undefined
+          : `Click to select · Double-click to write · Drag to move${props.descendants ? ` · ${ALT_LABEL}G to collapse or expand children` : ""}`
+      }
     >
       <Show when={props.collapsed}>
         <span
@@ -1060,6 +1067,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
+  const [showShare, setShowShare] = createSignal(false);
   const [preferencesBusy, setPreferencesBusy] = createSignal(false);
   const [preferencesError, setPreferencesError] = createSignal("");
   async function changeSaving(
@@ -1683,6 +1691,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         notesOpen(),
         menuOpen(),
         showPreferences(),
+        showShare(),
         showHelp(),
       ],
       () => {
@@ -2801,7 +2810,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
-      if (showPreferences() || showHelp() || searchOpen()) return;
+      if (showPreferences() || showShare() || showHelp() || searchOpen())
+        return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -3067,7 +3077,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
-      if (showPreferences() || showHelp()) return;
+      if (showPreferences() || showShare() || showHelp()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
       // text fields, without tabbing through the map (Tab adds ideas there).
       if (
@@ -3118,6 +3128,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       storageReady() &&
       !writing() &&
       !showPreferences() &&
+      !showShare() &&
       !showHelp() &&
       !searchOpen() &&
       !(
@@ -3280,6 +3291,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cloudStatus={cloudStatus()}
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
+      />
+      <ShareDialog
+        open={showShare()}
+        onClose={() => setShowShare(false)}
+        projectId={doc().id}
+        ownerId={
+          account().status === "authenticated" ? account().user?.id : undefined
+        }
+        cloud={view().saving().cloud}
+        onOpenPreferences={() => {
+          setShowShare(false);
+          setShowPreferences(true);
+        }}
+        onShared={(enabled) => track("share_link_changed", { enabled })}
       />
       <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-14.75rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
         <section
@@ -3562,6 +3587,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 Export outline (.md)
               </button>
               <div class="menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                disabled={!storageReady()}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setMenuOpen(false);
+                  finishWriting();
+                  finishProjectName();
+                  setShowShare(true);
+                }}
+              >
+                Share link…
+              </button>
               <button
                 type="button"
                 role="menuitem"
