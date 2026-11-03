@@ -3,10 +3,11 @@ import {
   createQuery,
   useQueryClient,
 } from "@tanstack/solid-query";
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, Show } from "solid-js";
 import { CloseIcon } from "./icons";
 import { LoroApi, SyncError } from "./loro-api";
 import { shareUrl } from "./shared-project";
+import { MOD_LABEL } from "./ShortcutsDialog";
 
 // One view-only link per project. The link only exists in Mindgrab Cloud, so
 // sharing needs an account and cloud saving.
@@ -23,10 +24,19 @@ export function ShareDialog(props: {
   let dialog!: HTMLDialogElement;
   let linkField: HTMLInputElement | undefined;
   const queryClient = useQueryClient();
-  const [copied, setCopied] = createSignal(false);
+  // The link is selected before the clipboard write, so it can always be
+  // copied by hand, even when the browser denies or holds the write.
+  const copy = createMutation(() => ({
+    mutationKey: ["share-link", "copy"],
+    mutationFn: async (value: string) => {
+      linkField?.focus();
+      linkField?.select();
+      await navigator.clipboard.writeText(value);
+    },
+  }));
   createEffect(() => {
     if (props.open && !dialog.open) {
-      setCopied(false);
+      copy.reset();
       dialog.showModal();
     } else if (!props.open && dialog.open) dialog.close();
   });
@@ -51,7 +61,7 @@ export function ShareDialog(props: {
       ),
     onSuccess: (token, enabled) => {
       queryClient.setQueryData(key(), token);
-      setCopied(false);
+      copy.reset();
       props.onShared?.(enabled);
     },
   }));
@@ -70,19 +80,6 @@ export function ShareDialog(props: {
       return "This project hasn’t reached Mindgrab Cloud yet. Wait for “Saved to cloud”, then retry.";
     return "Could not reach Mindgrab Cloud. Retry in a moment.";
   };
-
-  async function copy() {
-    const value = url();
-    if (!value) return;
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-    } catch {
-      // Clipboard access can be denied; leave the link selected to copy by hand.
-      linkField?.focus();
-      linkField?.select();
-    }
-  }
 
   return (
     <dialog
@@ -175,11 +172,17 @@ export function ShareDialog(props: {
             <button
               type="button"
               class="map-control bg-accent-soft text-accent-deep"
-              onClick={() => void copy()}
+              onClick={() => copy.mutate(url())}
             >
-              {copied() ? "Copied" : "Copy link"}
+              {copy.isSuccess ? "Copied" : "Copy link"}
             </button>
           </div>
+          <Show when={copy.isError}>
+            <p role="status" class="mt-2 text-sm text-stone-600">
+              Couldn’t copy automatically. The link is selected; press{" "}
+              {MOD_LABEL}C to copy it.
+            </p>
+          </Show>
           <p class="mt-4 text-sm leading-6 text-stone-500">
             Turning the link off stops it working. Turning it on again creates a
             new link.
