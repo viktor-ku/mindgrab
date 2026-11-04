@@ -188,7 +188,8 @@ describe("deleting", () => {
     const grandchild = await addChild(a, "A1");
     await addChild(grandchild, "A2");
     await node(a).click();
-    await page.getByRole("button", { name: "Delete idea" }).click();
+    await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: /^Delete/ }).click();
     await notice("Deleted “A” and 2 more").waitFor();
     expect(await selected()).toBe(root);
     await notice("Deleted “A” and 2 more")
@@ -462,7 +463,8 @@ describe("view controls", () => {
     // Zooming keeps the selected idea still.
     expect(await zoomLabel()).toBe("100%");
     expect(await insideViewport(near)).toBe(true);
-    await page.getByRole("button", { name: "Fit selection" }).click();
+    await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: /^Fit selection/ }).click();
     expect(await zoomLabel()).toBe("150%");
     expect(await insideViewport(near)).toBe(true);
     expect(await insideViewport(far)).toBe(false);

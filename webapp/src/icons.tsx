@@ -73,14 +73,6 @@ export const FitMapIcon = (props: IconProps) => (
   </Icon>
 );
 
-export const FitSelectionIcon = (props: IconProps) => (
-  <Icon class={props.class}>
-    <circle cx="10" cy="10" r="2.25" />
-    <path d="M10 2.75v2.5M10 14.75v2.5M2.75 10h2.5M14.75 10h2.5" />
-    <circle cx="10" cy="10" r="5.75" />
-  </Icon>
-);
-
 export const HelpIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <circle cx="10" cy="10" r="7" />
@@ -121,12 +113,6 @@ export const FocusIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <path d="M3.5 7V4.5a1 1 0 0 1 1-1H7M13 3.5h2.5a1 1 0 0 1 1 1V7M16.5 13v2.5a1 1 0 0 1-1 1H13M7 16.5H4.5a1 1 0 0 1-1-1V13" />
     <circle cx="10" cy="10" r="2.5" />
-  </Icon>
-);
-
-export const TrashIcon = (props: IconProps) => (
-  <Icon class={props.class}>
-    <path d="M4 6h12M8 6V4.5h4V6M5.5 6l.75 10h7.5l.75-10" />
   </Icon>
 );
 

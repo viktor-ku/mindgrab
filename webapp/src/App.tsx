@@ -96,7 +96,6 @@ import {
   ChildIcon,
   CloseIcon,
   FitMapIcon,
-  FitSelectionIcon,
   FocusIcon,
   FoldIcon,
   HelpIcon,
@@ -108,7 +107,6 @@ import {
   RedoIcon,
   SearchIcon,
   SiblingIcon,
-  TrashIcon,
   UndoIcon,
   UnfoldIcon,
 } from "./icons";
@@ -4205,16 +4203,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               <MoreIcon />
             </button>
-            <span class="toolbar-divider" />
-            <button
-              type="button"
-              class="icon-button hover:text-rose-700!"
-              aria-label="Delete idea"
-              title={`Delete with its children (Delete)`}
-              onClick={removeSelected}
-            >
-              <TrashIcon />
-            </button>
           </section>
         </Show>
       </div>
@@ -4508,11 +4496,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         <kbd class="ml-auto">{ALT_LABEL}F</kbd>
                       </button>
                     </Show>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      onClick={run(() => fitSelection(nodeId()))}
+                    >
+                      Fit selection
+                      <kbd class="ml-auto">{ALT_LABEL}2</kbd>
+                    </button>
                     <div class="menu-divider" />
                     <button
                       type="button"
                       role="menuitem"
-                      class="menu-item text-rose-700"
+                      class="menu-item text-rose-700!"
                       onClick={run(removeSelected)}
                     >
                       Delete
@@ -4570,16 +4567,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             onClick={fitMap}
           >
             <FitMapIcon />
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Fit selection"
-            title={`Fit selection (${ALT_LABEL}2)`}
-            disabled={!selectedId()}
-            onClick={() => fitSelection()}
-          >
-            <FitSelectionIcon />
           </button>
         </fieldset>
         <span class="toolbar-divider" />
