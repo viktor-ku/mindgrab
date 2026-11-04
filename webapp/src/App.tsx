@@ -3606,6 +3606,31 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Editing"
             class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
           >
+            {/* Undo and redo appear with the first edit. They sit at the far end
+                so the buttons already on screen stay where they are. */}
+            <Show when={canUndo() || canRedo()}>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Undo"
+                title={`Undo (${MOD_LABEL}Z)`}
+                disabled={!storageReady() || !canUndo()}
+                onClick={undo}
+              >
+                <UndoIcon />
+              </button>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Redo"
+                title={`Redo (${MOD_LABEL}⇧Z)`}
+                disabled={!storageReady() || !canRedo()}
+                onClick={redo}
+              >
+                <RedoIcon />
+              </button>
+              <span class="toolbar-divider" />
+            </Show>
             <button
               type="button"
               class="icon-button"
@@ -3627,27 +3652,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               onClick={() => setOutlineOpen((open) => !open)}
             >
               <OutlineIcon />
-            </button>
-            <span class="toolbar-divider" />
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Undo"
-              title={`Undo (${MOD_LABEL}Z)`}
-              disabled={!storageReady() || !canUndo()}
-              onClick={undo}
-            >
-              <UndoIcon />
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Redo"
-              title={`Redo (${MOD_LABEL}⇧Z)`}
-              disabled={!storageReady() || !canRedo()}
-              onClick={redo}
-            >
-              <RedoIcon />
             </button>
           </nav>
           <AccountControls

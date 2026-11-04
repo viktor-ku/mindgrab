@@ -667,15 +667,11 @@ describe("portable file actions", () => {
     expect(firstId).not.toBe(originalId);
     expect(firstNodes.every((id) => !originalNodes.includes(id))).toBe(true);
     expect(
-      await page
-        .getByRole("button", { name: "Undo", exact: true })
-        .isDisabled(),
-    ).toBe(true);
+      await page.getByRole("button", { name: "Undo", exact: true }).count(),
+    ).toBe(0);
     expect(
-      await page
-        .getByRole("button", { name: "Redo", exact: true })
-        .isDisabled(),
-    ).toBe(true);
+      await page.getByRole("button", { name: "Redo", exact: true }).count(),
+    ).toBe(0);
 
     await uploadProject(saved.json);
     const secondId = await call("projectId");
@@ -704,10 +700,8 @@ describe("portable file actions", () => {
       "Offline\nHäid mõtteid 😀 日本語",
     );
     expect(
-      await page
-        .getByRole("button", { name: "Undo", exact: true })
-        .isDisabled(),
-    ).toBe(true);
+      await page.getByRole("button", { name: "Undo", exact: true }).count(),
+    ).toBe(0);
   });
 
   test("Export stays usable when browser persistence cannot open", async () => {

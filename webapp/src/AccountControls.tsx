@@ -1,3 +1,4 @@
+import { makeEventListener } from "@solid-primitives/event-listener";
 import { createMutation } from "@tanstack/solid-query";
 import { createSignal, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
@@ -11,6 +12,8 @@ export function AccountControls(props: {
   claimMessage: string;
 }) {
   const [authError, setAuthError] = createSignal("");
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  let menuButton: HTMLButtonElement | undefined;
   const navigation = createMutation(() => ({
     mutationKey: ["account", "navigation"],
     mutationFn: performNavigation,
@@ -25,6 +28,15 @@ export function AccountControls(props: {
     if (!navigating()) navigation.mutate(action);
   };
   onMount(() => {
+    // Menus close on any press outside them, like native menus.
+    makeEventListener(window, "pointerdown", (e) => {
+      if (
+        menuOpen() &&
+        e.target instanceof Element &&
+        !e.target.closest('[aria-label="Account"]')
+      )
+        setMenuOpen(false);
+    });
     const url = new URL(window.location.href);
     if (!url.searchParams.has("auth_error")) return;
     setAuthError(
@@ -62,41 +74,104 @@ export function AccountControls(props: {
     <section
       data-no-pan
       data-toolbar
-      class="pointer-events-auto flex max-w-72 flex-col gap-1 text-sm cursor-default"
+      class="pointer-events-auto relative flex max-w-72 flex-col gap-1 text-sm cursor-default"
       classList={{ "map-toolbar": !bare() }}
       aria-label="Account"
     >
       <div class="flex min-h-9 items-center gap-1">
         <Show when={props.state.user}>
-          {(user) => (
-            <>
+          {(user) => {
+            const name = () => user().name || user().email || "Cached account";
+            const avatar = (
               <span
                 aria-hidden="true"
-                class="ml-1 grid size-7 shrink-0 place-items-center rounded-full bg-stone-800 text-xs font-semibold text-white"
+                class="grid size-7 shrink-0 place-items-center rounded-full bg-stone-800 text-xs font-semibold text-white"
               >
                 {(user().name || user().email || "?")
                   .trim()
                   .charAt(0)
                   .toUpperCase()}
               </span>
-              <span
-                class="min-w-0 max-w-36 truncate px-1 text-stone-700"
-                title={user().email}
+            );
+            return (
+              <Show
+                when={props.state.status === "authenticated"}
+                fallback={
+                  <>
+                    <span class="ml-1 flex">{avatar}</span>
+                    <span
+                      class="min-w-0 max-w-36 truncate px-1 text-stone-700"
+                      title={user().email}
+                    >
+                      {name()}
+                    </span>
+                  </>
+                }
               >
-                {user().name || user().email || "Cached account"}
-              </span>
-              <Show when={props.state.status === "authenticated"}>
                 <button
+                  ref={menuButton}
                   type="button"
-                  class="map-control text-xs! text-stone-500"
-                  disabled={navigating() || props.claiming}
-                  onClick={() => void navigate("logout")}
+                  class="icon-button"
+                  title={name()}
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen()}
+                  onClick={() => setMenuOpen((open) => !open)}
                 >
-                  Sign out
+                  {avatar}
+                  <span class="sr-only">{name()}</span>
                 </button>
+                <Show when={menuOpen()}>
+                  <div
+                    role="menu"
+                    aria-label="Account menu"
+                    class="map-toolbar menu-panel absolute top-full right-0 mt-2 w-60 cursor-default"
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setMenuOpen(false);
+                        menuButton?.focus();
+                      }
+                    }}
+                    onFocusOut={(e) => {
+                      // Tabbing out of the menu closes it, like a native menu.
+                      const next = e.relatedTarget;
+                      if (
+                        next instanceof Element &&
+                        !next.closest('[aria-label="Account"]')
+                      )
+                        setMenuOpen(false);
+                    }}
+                  >
+                    <div class="px-2.5 py-1.5">
+                      <p class="truncate text-sm font-medium text-stone-800">
+                        {name()}
+                      </p>
+                      <Show when={user().email && user().email !== name()}>
+                        <p class="truncate text-xs text-stone-500">
+                          {user().email}
+                        </p>
+                      </Show>
+                    </div>
+                    <div class="menu-divider" />
+                    <button
+                      ref={(item) => queueMicrotask(() => item.focus())}
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={navigating() || props.claiming}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        navigate("logout");
+                      }}
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                </Show>
               </Show>
-            </>
-          )}
+            );
+          }}
         </Show>
         <Show when={props.state.status === "checking"}>
           <p role="status" class="px-2 py-2 text-xs text-stone-500">
