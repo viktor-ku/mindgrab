@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Wait for the Railway production deployment of one commit to reach a final status.
-# Usage: wait-for-deploy.sh <commit-sha> [timeout-seconds]
+# Usage: [SERVICE=web] wait-for-deploy.sh <commit-sha> [timeout-seconds]
 # Prints each status change; exits 0 on SUCCESS, 1 on any other final status, 2 on timeout.
 set -euo pipefail
 
 project=8b285039-3bb1-4136-a31d-5fede17bc0e8
 environment=production
-service=mindgrab
+service="${SERVICE:-mindgrab}"
 sha="${1:?usage: wait-for-deploy.sh <commit-sha> [timeout-seconds]}"
 timeout="${2:-1800}"
 export PATH="$HOME/.railway/bin:$PATH"

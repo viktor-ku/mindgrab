@@ -6,8 +6,10 @@ description: Deploy Mindgrab to production on Railway by moving the `live` branc
 # Deploy Mindgrab to production
 
 Railway project `8b285039-3bb1-4136-a31d-5fede17bc0e8`, environment `production`,
-service `mindgrab` (plus `Postgres`). Railway builds the root `Dockerfile` from the
-`live` branch. Production is `https://mindgrab.app` and its healthcheck is `/checkhealth`.
+services `mindgrab` (API, root `Dockerfile`) and `web` (static webapp,
+`webapp/Dockerfile`), plus `Postgres`. Railway builds both from the `live` branch.
+Production is `https://mindgrab.app`, the API is `https://api.mindgrab.app` and its
+healthcheck is `/checkhealth`. See `backend/README.md`.
 
 The rule behind every step: **`live` is only ever a copy of `main`.** Commit every
 change, including hotfixes, to `main`, push `main`, then run `mise run golive`.
@@ -50,9 +52,11 @@ environment variable for the command. Never print it.
      `import.meta.env` or `ARG` in the diff. Check them with `railway variables $R`.
      Set missing ones with `railway variable set KEY=value "${R[@]}" --skip-deploys`, so the
      golive deploy picks them up. `VITE_*` values are baked in at build time: each
-     needs an `ARG` in the `Dockerfile` and a Railway service variable.
+     needs an `ARG` in `webapp/Dockerfile` and a variable on the `web` service.
    - **Dockerfile and build.** Railway requires cache mount IDs that start with
-     `s/<service-id>-`. Keep the existing IDs.
+     `s/<service-id>-`. Each Dockerfile uses its own service's ID. Keep them.
+   - **Shared core.** `crates/` ships in both services, and they deploy
+     independently. Keep the API compatible with the webapp build still being served.
    - **Auth.** If `APP_URL` or the WorkOS redirect changes, the WorkOS dashboard must
      be updated too. Ask the user.
 5. Run checks. Commit hooks already run lint, format and Clippy. For any change to
@@ -81,6 +85,7 @@ Run the wait script **in the background** and wait for it to exit. Do not poll w
 .agents/skills/deploy/scripts/wait-for-deploy.sh "$(git rev-parse main)" 1800
 ```
 
+Run it for each service the commit affects, with `SERVICE=web` for the webapp.
 It prints each status change and exits `0` on `SUCCESS`, `1` on
 `FAILED`/`CRASHED`/`REMOVED`/`SKIPPED`/`NEEDS_APPROVAL`, and `2` on timeout. If it
 stays `NOT_FOUND` for more than about 3 minutes, Railway did not pick up the push.
@@ -90,8 +95,9 @@ patterns (`railway status -p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production`
 When it exits with `SUCCESS`, verify production:
 
 ```sh
-curl -fsS -o /dev/null -w '%{http_code}\n' https://mindgrab.app/checkhealth   # 200 (503 = database unreachable)
+curl -fsS -o /dev/null -w '%{http_code}\n' https://api.mindgrab.app/checkhealth   # 200 (503 = database unreachable)
 curl -fsS https://mindgrab.app/ | grep -q '<div id="root"\|<script' && echo webapp ok
+curl -fsS -o /dev/null -w '%{http_code}\n' https://mindgrab.app/s/deploy-check       # 200 from web
 railway logs "${R[@]}" --since 10m --filter '@level:error'
 railway logs "${R[@]}" --http --since 10m --filter '@httpStatus:>=500'
 ```
@@ -128,6 +134,8 @@ railway redeploy "${R[@]}" --commit <last-good-sha> -y
 .agents/skills/deploy/scripts/wait-for-deploy.sh <last-good-sha>   # the rollback deploy
 ```
 
+Do the same with `-s web` and `SERVICE=web` for a webapp failure.
+
 This deploys the old commit once without moving `live`, and the next golive
 replaces it. It cannot undo a schema change. If the new schema broke the old code,
 fix forward instead and tell the user.
@@ -145,7 +153,7 @@ fix forward instead and tell the user.
 
 For a **config** problem, fix it in Railway: `railway variable set …` without
 `--skip-deploys` triggers a redeploy. A changed `VITE_*` build variable needs a
-rebuild (`railway redeploy "${R[@]}" --from-source -y`). Record any lasting settings change
+`web` rebuild (`railway redeploy -p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production -s web --from-source -y`). Record any lasting settings change
 in `backend/README.md` on `main`. Agents learn these settings from there.
 
 Stop after **two** failed hotfix attempts. Make sure production is serving a good

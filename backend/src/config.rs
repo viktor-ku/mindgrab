@@ -128,11 +128,11 @@ impl Config {
                 return Err("Authentication URLs require HTTPS or loopback HTTP");
             }
         }
-        if app.origin() != redirect.origin()
+        if !same_site(&app, &redirect)
             || app.path() != "/"
             || redirect.path() != "/api/auth/callback"
         {
-            return Err("APP_URL and callback must use the same origin");
+            return Err("The callback must be on the APP_URL host or a subdomain of it");
         }
         let issuer = get("WORKOS_ISSUER")
             .unwrap_or_else(|| format!("https://api.workos.com/user_management/{client_id}"));
@@ -181,6 +181,15 @@ impl Config {
         Ok(())
     }
 }
+/// SameSite=Lax session cookies only reach the API from the app when both share
+/// a site, so a separate domain such as *.up.railway.app can never hold a login.
+fn same_site(app: &Url, callback: &Url) -> bool {
+    let (Some(app_host), Some(callback_host)) = (app.host_str(), callback.host_str()) else {
+        return false;
+    };
+    app.scheme() == callback.scheme()
+        && (callback_host == app_host || callback_host.ends_with(&format!(".{app_host}")))
+}
 pub fn is_loopback(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
@@ -225,6 +234,32 @@ mod tests {
         );
         assert!(config(&[("MINDGRAB_AUTH_MODE", "typo")], true).is_err());
         assert!(config(&[], true).is_err()); // The default still requires WorkOS credentials.
+    }
+
+    #[test]
+    fn workos_callback_may_use_a_subdomain_of_the_app_but_no_other_site() {
+        let workos = |redirect: &'static str| {
+            config(
+                &[
+                    ("WORKOS_CLIENT_ID", "client"),
+                    ("WORKOS_API_KEY", "key"),
+                    ("APP_URL", "https://mindgrab.app/"),
+                    ("WORKOS_REDIRECT_URI", redirect),
+                ],
+                false,
+            )
+        };
+        assert!(workos("https://mindgrab.app/api/auth/callback").is_ok());
+        let split = workos("https://api.mindgrab.app/api/auth/callback").unwrap();
+        assert_eq!(split.origin(), "https://mindgrab.app");
+        for other_site in [
+            "https://mindgrab-production.up.railway.app/api/auth/callback",
+            "https://notmindgrab.app/api/auth/callback",
+            "http://api.mindgrab.app/api/auth/callback",
+            "https://api.mindgrab.app/elsewhere",
+        ] {
+            assert!(workos(other_site).is_err(), "{other_site}");
+        }
     }
 
     #[test]

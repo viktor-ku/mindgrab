@@ -6,20 +6,28 @@ server runtime or separate implementation of document rules.
 
 ## Railway deployment
 
-Railway runs one service for the API and the web app. Build it from repository
-root `/` using the root `Dockerfile`. Clear custom build/start commands and set
-the healthcheck path to `/checkhealth`. Apply these settings through Railway's
-dashboard or API. The image builds the WASM bindings and the Vite assets, and
-the backend serves them from `WEBAPP_DIST`. Any path the API does not handle
-falls back to `index.html`.
+Railway runs two services from the `live` branch, both rooted at `/`:
 
-Set `HOST=::` and `PORT=3000` so the API is reachable on Railway's public and
+- `mindgrab` builds the root `Dockerfile` and serves the API at `api.mindgrab.app`.
+  Its healthcheck path is `/checkhealth`.
+- `web` builds `webapp/Dockerfile` and serves the static webapp at `mindgrab.app`.
+  Its healthcheck path is `/`. `VITE_BACKEND_URL=https://api.mindgrab.app` is a
+  build variable on this service.
+
+Both domains are proxied through Cloudflare. They scale and deploy independently.
+The API must stay on a subdomain of `APP_URL`: sessions use `SameSite=Lax` cookies,
+which browsers only send within one site, and `*.up.railway.app` is a public suffix,
+so it is never the same site. Startup rejects a callback on any other site. Set
+`APP_URL=https://mindgrab.app/` and
+`WORKOS_REDIRECT_URI=https://api.mindgrab.app/api/auth/callback`; Origin checks and
+CORS allow the app's origin.
+
+Set `HOST=::` and `PORT=8080` so the API is reachable on Railway's public and
 private networks. Keep `DATABASE_URL` pointing at the project's Postgres
 service. Configure the WorkOS credentials, `APP_URL` and `WORKOS_REDIRECT_URI`
 as described below. Release builds use WorkOS authentication.
 
-The image contains the compiled native API, the built web app and trusted HTTPS
-certificates.
+The backend image contains the compiled native API and trusted HTTPS certificates.
 Postgres schema creation runs on startup. GET `/checkhealth` returns 200 when
 the database is reachable and 503 otherwise; no login is required.
 
@@ -28,8 +36,7 @@ the database is reachable and 503 otherwise; no login is required.
 Run `mise run worktree:bootstrap`, `mise run db`, `mise run backend:dev` and
 `mise run webapp:dev`. Open the `APP_URL` from this worktree's `mise.local.toml`.
 Vite proxies API and WebSocket requests on the web app's
-origin, keeping login callbacks and HttpOnly cookies on that origin. The backend
-also serves the production build in `webapp/dist`.
+origin, keeping login callbacks and HttpOnly cookies on that origin.
 
 Before removing a worktree, run `mise run worktree:settle`. It stops the dev
 servers listening on this worktree's ports, removes its Compose project with the

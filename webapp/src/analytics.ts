@@ -1,6 +1,6 @@
 import type { PostHog } from "posthog-js";
 import { createSignal } from "solid-js";
-import { backendEndpoint } from "./backend";
+import { backendCookieDomain, backendEndpoint } from "./backend";
 
 // Product analytics. Disabled unless VITE_POSTHOG_KEY is set at build time, so
 // local worktrees and browser tests never send events.
@@ -81,7 +81,9 @@ const queue: ((posthog: PostHog) => void)[] = [];
 
 function writeConsentCookie(value: Consent) {
   const secure = location.protocol === "https:" ? "; Secure" : "";
-  document.cookie = `${CONSENT_COOKIE}=${value}; Path=/; Max-Age=31536000; SameSite=Lax${secure}`;
+  const domain = backendCookieDomain();
+  const scope = domain ? `; Domain=${domain}` : "";
+  document.cookie = `${CONSENT_COOKIE}=${value}; Path=/; Max-Age=31536000; SameSite=Lax${scope}${secure}`;
 }
 
 function applyConsent(posthog: PostHog) {
