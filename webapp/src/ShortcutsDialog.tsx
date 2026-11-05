@@ -1,6 +1,5 @@
-import { createEffect, For } from "solid-js";
-import { backdropDismiss } from "./dialog-backdrop";
-import { CloseIcon } from "./icons";
+import { For } from "solid-js";
+import { Dialog } from "./Dialog";
 
 const APPLE =
   typeof navigator !== "undefined" &&
@@ -69,34 +68,14 @@ export function ShortcutsDialog(props: {
   wheelMode: "pan" | "zoom";
   onWheelMode: (mode: "pan" | "zoom") => void;
 }) {
-  let dialog!: HTMLDialogElement;
-  createEffect(() => {
-    if (props.open && !dialog.open) dialog.showModal();
-    else if (!props.open && dialog.open) dialog.close();
-  });
   return (
-    <dialog
-      ref={dialog}
-      class="shortcuts-dialog"
-      aria-labelledby="shortcuts-title"
-      data-no-pan
+    <Dialog
+      open={props.open}
       onClose={props.onClose}
-      onCancel={props.onClose}
-      {...backdropDismiss(() => props.onClose())}
+      title="Shortcuts and navigation"
+      closeLabel="Close shortcuts"
+      variant="center"
     >
-      <header class="flex items-center justify-between gap-4 border-b border-stone-100 px-6 py-4">
-        <h2 id="shortcuts-title" class="font-display text-xl font-semibold">
-          Shortcuts and navigation
-        </h2>
-        <button
-          type="button"
-          class="icon-button"
-          aria-label="Close shortcuts"
-          onClick={props.onClose}
-        >
-          <CloseIcon />
-        </button>
-      </header>
       <div class="scroll-fade grid min-h-0 gap-x-8 gap-y-6 overflow-y-auto px-6 pt-5 pb-8 sm:grid-cols-2">
         <For each={GROUPS}>
           {(group) => (
@@ -161,6 +140,6 @@ export function ShortcutsDialog(props: {
           </fieldset>
         </section>
       </div>
-    </dialog>
+    </Dialog>
   );
 }

@@ -75,6 +75,7 @@ import {
   writeMarkdownFile,
   writeProjectFile,
 } from "./project-import-export";
+import { closeOnEscape } from "./escape-key";
 import { ALT_LABEL, MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
 import { Outline } from "./Outline";
 import { NotesPanel } from "./NotesPanel";
@@ -3409,19 +3410,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </section>
         <Show when={menuOpen()}>
           <div
-            ref={projectMenu}
+            ref={(el) => {
+              projectMenu = el;
+              closeOnEscape(el, closeProjectMenu);
+            }}
             data-no-pan
             data-toolbar
             role="menu"
             aria-label="Project menu"
             class="map-toolbar menu-panel pointer-events-auto w-72 cursor-default"
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                e.stopPropagation();
-                closeProjectMenu();
-              } else menuArrowKeys(e);
-            }}
+            onKeyDown={menuArrowKeys}
             onFocusOut={(e) => {
               // Tabbing out of the menu closes it, like a native menu.
               const next = e.relatedTarget;
@@ -3471,17 +3469,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     value={mapFilter()}
                     onInput={(e) => setMapFilter(e.currentTarget.value)}
-                    onKeyDown={(e) => {
-                      // Arrow keys stay in the field; Escape clears, then closes.
-                      if (e.key !== "Escape") {
-                        e.stopPropagation();
-                        return;
-                      }
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (mapFilter()) setMapFilter("");
-                      else closeProjectMenu();
-                    }}
+                    // Escape clears, then closes; arrow keys stay in the field.
+                    ref={(el) =>
+                      closeOnEscape(el, () => {
+                        if (mapFilter()) setMapFilter("");
+                        else closeProjectMenu();
+                      })
+                    }
+                    onKeyDown={(e) => e.stopPropagation()}
                   />
                 </Show>
                 <ul
@@ -4091,18 +4086,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <section
                 aria-label="Selected node color controls"
                 class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2"
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    e.stopPropagation();
+                ref={(el) =>
+                  closeOnEscape(el, () => {
                     setColorOpen(false);
                     document
                       .querySelector<HTMLButtonElement>(
                         'button[aria-label="Color"]',
                       )
                       ?.focus();
-                  }
-                }}
+                  })
+                }
               >
                 <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
                   <legend class="sr-only">Apply color to</legend>
@@ -4495,7 +4488,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       <Show when={contextMenu()}>
         {(menu) => (
           <div
-            ref={contextMenuElement}
+            ref={(el) => {
+              contextMenuElement = el;
+              closeOnEscape(el, () => {
+                setContextMenu(undefined);
+                canvas.focus({ preventScroll: true });
+              });
+            }}
             data-no-pan
             data-toolbar
             data-context-menu
@@ -4509,16 +4508,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                e.preventDefault();
-                e.stopPropagation();
-                setContextMenu(undefined);
-                canvas.focus({ preventScroll: true });
-                return;
-              }
-              menuArrowKeys(e);
-            }}
+            onKeyDown={menuArrowKeys}
           >
             <Show
               when={menu().nodeId}

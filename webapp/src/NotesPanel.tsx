@@ -1,4 +1,5 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
+import { closeOnEscape } from "./escape-key";
 import { CloseIcon } from "./icons";
 import { ALT_LABEL } from "./ShortcutsDialog";
 import type { ProjectDocument } from "./project-document";
@@ -36,13 +37,7 @@ export function NotesPanel(props: {
       data-toolbar
       aria-label="Notes"
       class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          e.stopPropagation();
-          props.onClose();
-        }
-      }}
+      ref={(el) => closeOnEscape(el, () => props.onClose())}
     >
       <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
         <div class="min-w-0">
