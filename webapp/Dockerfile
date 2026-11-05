@@ -31,7 +31,7 @@ ARG VITE_BACKEND_URL
 ARG VITE_POSTHOG_KEY
 RUN bun --bun run --cwd webapp build
 
-FROM caddy:2.11.4-alpine
+FROM caddy:2.11.8-alpine
 COPY webapp/Caddyfile /etc/caddy/Caddyfile
 COPY --from=webapp /app/webapp/dist /srv
 ENV PORT=8080
