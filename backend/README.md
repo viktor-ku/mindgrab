@@ -14,7 +14,10 @@ Railway runs two services from the `live` branch, both rooted at `/`:
   Its healthcheck path is `/`. `VITE_BACKEND_URL=https://api.mindgrab.app` is a
   build variable on this service.
 
-Both domains are proxied through Cloudflare. They scale and deploy independently.
+Both domains are proxied through Cloudflare. They scale and deploy independently:
+watch patterns limit each service to its own files, plus `crates/`, `tooling/` and
+`Cargo.*`, which both builds use. A new Railway custom domain only verifies while its
+Cloudflare record is DNS-only; turn the proxy on once the certificate is valid.
 The API must stay on a subdomain of `APP_URL`: sessions use `SameSite=Lax` cookies,
 which browsers only send within one site, and `*.up.railway.app` is a public suffix,
 so it is never the same site. Startup rejects a callback on any other site. Set

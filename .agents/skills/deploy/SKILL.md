@@ -89,8 +89,11 @@ Run it for each service the commit affects, with `SERVICE=web` for the webapp.
 It prints each status change and exits `0` on `SUCCESS`, `1` on
 `FAILED`/`CRASHED`/`REMOVED`/`SKIPPED`/`NEEDS_APPROVAL`, and `2` on timeout. If it
 stays `NOT_FOUND` for more than about 3 minutes, Railway did not pick up the push.
-Check that the service source branch is still `live` and that it has no watch
-patterns (`railway status -p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production`, or the Railway MCP `get-service-config`).
+Check that the service source branch is still `live` and that the commit matches
+its watch patterns (`mindgrab`: `backend/`, `crates/`, `tooling/`, `Cargo.*`,
+`Dockerfile`; `web`: `webapp/`, `crates/`, `tooling/`, `Cargo.*`, `package.json`,
+`bun.lock`, `e2e/package.json`). A service whose files did not change does not
+deploy, so only wait for the services the commit affects (`railway status -p 8b285039-3bb1-4136-a31d-5fede17bc0e8 -e production`, or the Railway MCP `get-service-config`).
 
 When it exits with `SUCCESS`, verify production:
 
