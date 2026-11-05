@@ -60,7 +60,9 @@ impl Backend {
                 header::CONTENT_TYPE,
                 header::HeaderName::from_static("x-mindgrab-account"),
             ])
-            .expose_headers([header::HeaderName::from_static("server-timing")]);
+            .expose_headers([header::HeaderName::from_static("server-timing")])
+            // Every API POST is preflighted because the webapp is on another origin.
+            .max_age(Duration::from_secs(3600));
         Router::new()
             .route("/checkhealth", get(projects::health))
             .route("/api/auth/callback", get(projects::callback))

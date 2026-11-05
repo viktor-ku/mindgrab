@@ -2,8 +2,7 @@ use mindgrab_backend::{
     Backend,
     config::{AuthMode, Config},
 };
-use std::{path::PathBuf, time::Duration};
-use tower_http::services::{ServeDir, ServeFile};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
@@ -22,12 +21,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app = Backend::connect(config).await?;
     let changes = tokio::spawn(app.clone().listen_changes());
     let cleanup = tokio::spawn(app.clone().cleanup());
-    let root = std::env::var("WEBAPP_DIST")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../webapp/dist"));
-    let router = app.router().fallback_service(
-        ServeDir::new(&root).not_found_service(ServeFile::new(root.join("index.html"))),
-    );
+    let router = app.router();
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".into())
         .parse()?;
