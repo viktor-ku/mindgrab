@@ -3,9 +3,8 @@ import {
   createQuery,
   useQueryClient,
 } from "@tanstack/solid-query";
-import { createEffect, Show } from "solid-js";
-import { backdropDismiss } from "./dialog-backdrop";
-import { CloseIcon } from "./icons";
+import { createEffect, on, Show } from "solid-js";
+import { Dialog } from "./Dialog";
 import { LoroApi, SyncError } from "./loro-api";
 import { shareUrl } from "./shared-project";
 import { MOD_LABEL } from "./ShortcutsDialog";
@@ -22,7 +21,6 @@ export function ShareDialog(props: {
   onOpenPreferences: () => void;
   onShared?: (enabled: boolean) => void;
 }) {
-  let dialog!: HTMLDialogElement;
   let linkField: HTMLInputElement | undefined;
   const queryClient = useQueryClient();
   // The link is selected before the clipboard write, so it can always be
@@ -35,12 +33,14 @@ export function ShareDialog(props: {
       await navigator.clipboard.writeText(value);
     },
   }));
-  createEffect(() => {
-    if (props.open && !dialog.open) {
-      copy.reset();
-      dialog.showModal();
-    } else if (!props.open && dialog.open) dialog.close();
-  });
+  createEffect(
+    on(
+      () => props.open,
+      (open) => {
+        if (open) copy.reset();
+      },
+    ),
+  );
   const api = () =>
     new LoroApi(undefined, undefined, props.ownerId, queryClient);
   const key = () => ["share-link", props.ownerId ?? null, props.projectId];
@@ -83,28 +83,13 @@ export function ShareDialog(props: {
   };
 
   return (
-    <dialog
-      ref={dialog}
-      class="project-preferences"
-      aria-labelledby="share-dialog-title"
-      data-no-pan
+    <Dialog
+      open={props.open}
       onClose={props.onClose}
-      onCancel={props.onClose}
-      {...backdropDismiss(() => props.onClose())}
+      title="Share"
+      closeLabel="Close sharing"
+      variant="side"
     >
-      <header class="flex items-center justify-between gap-4 border-b border-stone-100 pb-4">
-        <h2 id="share-dialog-title" class="font-display text-xl font-semibold">
-          Share
-        </h2>
-        <button
-          type="button"
-          class="icon-button"
-          aria-label="Close sharing"
-          onClick={props.onClose}
-        >
-          <CloseIcon />
-        </button>
-      </header>
       <Show
         when={available()}
         fallback={
@@ -214,6 +199,6 @@ export function ShareDialog(props: {
           </button>
         </Show>
       </Show>
-    </dialog>
+    </Dialog>
   );
 }

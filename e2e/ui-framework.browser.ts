@@ -638,6 +638,56 @@ function clipboard(type: "copy" | "cut" | "paste", text = "") {
   );
 }
 
+describe("Escape layers", () => {
+  test("Escape closes only the innermost layer and keeps the selection", async () => {
+    const root = await rootId();
+    expect(await selected()).toBe(root);
+
+    // The filter only appears once there are enough maps to need it.
+    for (let count = 0; count < 7; count++) {
+      const previous = await call("projectId");
+      await page.getByRole("button", { name: "Project menu" }).click();
+      await page.getByRole("menuitem", { name: "New map" }).click();
+      await page.waitForFunction(
+        (id) => window.harness.projectId() !== id,
+        previous,
+      );
+    }
+    const current = await rootId();
+    expect(await selected()).toBe(current);
+    await page.getByRole("button", { name: "Project menu" }).click();
+    const menu = page.getByRole("menu", { name: "Project menu" });
+    await page.getByRole("menuitem", { name: "Open map…" }).click();
+    const filter = page.getByRole("searchbox", { name: "Filter maps" });
+    await filter.fill("nothing matches this");
+    await filter.press("Escape");
+    expect(await filter.inputValue()).toBe("");
+    expect(await menu.isVisible()).toBe(true);
+    await filter.press("Escape");
+    await menu.waitFor({ state: "hidden" });
+    expect(await selected()).toBe(current);
+
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("complementary", { name: "Notes" });
+    await notes.getByRole("textbox").waitFor();
+    await notes.getByRole("textbox").press("Escape");
+    await notes.waitFor({ state: "hidden" });
+    expect(await selected()).toBe(current);
+
+    await page.getByRole("button", { name: "Color", exact: true }).click();
+    const colors = page.getByRole("region", {
+      name: "Selected node color controls",
+    });
+    await colors.getByRole("button").first().focus();
+    await page.keyboard.press("Escape");
+    await colors.waitFor({ state: "hidden" });
+    expect(await selected()).toBe(current);
+    expect(await page.evaluate(() => document.activeElement?.ariaLabel)).toBe(
+      "Color",
+    );
+  });
+});
+
 describe("capture flow", () => {
   test("typing replaces the selected idea, Tab and Shift+Tab keep capturing, and Enter on a central idea adds a child", async () => {
     const root = await rootId();

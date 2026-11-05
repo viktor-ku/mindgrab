@@ -1,6 +1,5 @@
-import { createEffect, For, Show } from "solid-js";
-import { backdropDismiss } from "./dialog-backdrop";
-import { CloseIcon } from "./icons";
+import { For, Show } from "solid-js";
+import { Dialog } from "./Dialog";
 import type { SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
 
@@ -15,37 +14,14 @@ export function ProjectPreferences(props: {
   signedIn: boolean;
   onExport: () => void;
 }) {
-  let dialog!: HTMLDialogElement;
-  createEffect(() => {
-    if (props.open && !dialog.open) dialog.showModal();
-    else if (!props.open && dialog.open) dialog.close();
-  });
   return (
-    <dialog
-      ref={dialog}
-      class="project-preferences"
-      aria-labelledby="project-preferences-title"
-      data-no-pan
+    <Dialog
+      open={props.open}
       onClose={props.onClose}
-      onCancel={props.onClose}
-      {...backdropDismiss(() => props.onClose())}
+      title="Project preferences"
+      closeLabel="Close project preferences"
+      variant="side"
     >
-      <header class="flex items-center justify-between gap-4 border-b border-stone-100 pb-4">
-        <h2
-          id="project-preferences-title"
-          class="font-display text-xl font-semibold"
-        >
-          Project preferences
-        </h2>
-        <button
-          type="button"
-          class="icon-button"
-          aria-label="Close project preferences"
-          onClick={props.onClose}
-        >
-          <CloseIcon />
-        </button>
-      </header>
       <p class="my-6 text-sm leading-6 text-stone-600">
         Choose where this project is saved. Turning a switch off deletes its
         existing copy from that location. Your open project stays available in
@@ -165,6 +141,6 @@ export function ProjectPreferences(props: {
           Retry storage change
         </button>
       </Show>
-    </dialog>
+    </Dialog>
   );
 }
