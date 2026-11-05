@@ -78,7 +78,7 @@ export function ShareDialog(props: {
     if (failure instanceof SyncError && failure.kind === "auth")
       return "Sign in again to manage this link.";
     if (failure instanceof SyncError && failure.code === "project_not_found")
-      return "This project hasn’t reached Mindgrab Cloud yet. Wait for “Saved to cloud”, then retry.";
+      return "This project hasn’t reached Mindgrab Cloud yet. Wait for the green save dot, then retry.";
     return "Could not reach Mindgrab Cloud. Retry in a moment.";
   };
 

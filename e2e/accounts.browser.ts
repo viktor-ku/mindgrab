@@ -614,6 +614,36 @@ test("the red save dot opens the failure and clears itself once saving recovers"
   );
 });
 
+test("on a phone the menu button shows a save failure and leads to its details", async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const menu = page.locator(".phone-menu-button");
+  await menu.waitFor();
+  expect(await menu.getAttribute("data-problem")).toBeNull();
+  await call("failWrites", true);
+  await edit("A failed local edit");
+  await page.locator(".phone-menu-button[data-problem]").waitFor();
+
+  await menu.click();
+  await page
+    .getByRole("dialog", { name: "Project menu" })
+    .getByRole("button", { name: /Save failed/ })
+    .click();
+  const details = page.getByRole("dialog", { name: "Couldn’t save" });
+  await details.waitFor();
+  await call("failWrites", false);
+  await details.waitFor({ state: "hidden" });
+  await page.locator(".phone-menu-button:not([data-problem])").waitFor();
+});
+
+test("a failed sign-in on a phone opens the menu to say so", async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${appUrl}?auth_error=unavailable`);
+  await page
+    .getByRole("dialog", { name: "Project menu" })
+    .getByText("Sign-in is temporarily unavailable. Please try again.")
+    .waitFor();
+});
+
 test("an aborted durable account hint prevents logout acknowledgement and can be retried", async () => {
   await login();
   await cloudSaved();

@@ -10,6 +10,11 @@ export function AccountControls(props: {
   onRetry: () => void;
   claiming: boolean;
   claimMessage: string;
+  // In the phone panel: a flat footer instead of a floating island.
+  inline?: boolean;
+  // A message already on screen elsewhere, which this section need not repeat.
+  shownElsewhere?: string;
+  onAuthError?: () => void;
 }) {
   const [authError, setAuthError] = createSignal("");
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -23,6 +28,10 @@ export function AccountControls(props: {
     navigation.isError
       ? "Could not save the account change in this browser. Free up browser storage and retry."
       : authError();
+  const accountMessage = () => {
+    const text = message() || props.state.message;
+    return text === props.shownElsewhere ? "" : text;
+  };
   const navigating = () => navigation.isPending;
   const navigate = (action: "login" | "logout") => {
     if (!navigating()) navigation.mutate(action);
@@ -44,6 +53,7 @@ export function AccountControls(props: {
         ? "Sign-in is temporarily unavailable. Please try again."
         : "Sign-in did not complete. Please try again.",
     );
+    props.onAuthError?.();
     url.searchParams.delete("auth_error");
     window.history.replaceState(window.history.state, "", url);
   });
@@ -74,8 +84,12 @@ export function AccountControls(props: {
     <section
       data-no-pan
       data-toolbar
-      class="pointer-events-auto relative flex max-w-72 flex-col gap-1 text-sm cursor-default"
-      classList={{ "map-toolbar": !bare() }}
+      class={
+        props.inline
+          ? "panel-account flex flex-col gap-1 text-sm"
+          : "pointer-events-auto relative flex max-w-72 flex-col gap-1 text-sm cursor-default"
+      }
+      classList={{ "map-toolbar": !bare() && !props.inline }}
       aria-label="Account"
     >
       <div class="flex min-h-9 items-center gap-1">
@@ -93,6 +107,33 @@ export function AccountControls(props: {
                   .toUpperCase()}
               </span>
             );
+            const identity = () => (
+              <>
+                <p class="truncate text-sm font-medium text-stone-800">
+                  {name()}
+                </p>
+                <Show when={user().email && user().email !== name()}>
+                  <p class="truncate text-xs text-stone-500">{user().email}</p>
+                </Show>
+              </>
+            );
+            if (props.inline)
+              return (
+                <>
+                  <span class="flex">{avatar}</span>
+                  <div class="min-w-0 flex-1 px-1">{identity()}</div>
+                  <Show when={props.state.status === "authenticated"}>
+                    <button
+                      type="button"
+                      class="map-control text-xs"
+                      disabled={navigating() || props.claiming}
+                      onClick={() => navigate("logout")}
+                    >
+                      Sign out
+                    </button>
+                  </Show>
+                </>
+              );
             return (
               <Show
                 when={props.state.status === "authenticated"}
@@ -143,16 +184,7 @@ export function AccountControls(props: {
                         setMenuOpen(false);
                     }}
                   >
-                    <div class="px-2.5 py-1.5">
-                      <p class="truncate text-sm font-medium text-stone-800">
-                        {name()}
-                      </p>
-                      <Show when={user().email && user().email !== name()}>
-                        <p class="truncate text-xs text-stone-500">
-                          {user().email}
-                        </p>
-                      </Show>
-                    </div>
+                    <div class="px-2.5 py-1.5">{identity()}</div>
                     <div class="menu-divider" />
                     <button
                       ref={(item) => queueMicrotask(() => item.focus())}
@@ -187,9 +219,11 @@ export function AccountControls(props: {
           <button
             type="button"
             class={
-              bare()
-                ? "primary-button account-signin"
-                : "primary-button px-3! py-1.5! text-xs!"
+              props.inline
+                ? `primary-button ${props.state.user ? "shrink-0 px-3! py-1.5! text-xs!" : "w-full"}`
+                : bare()
+                  ? "primary-button account-signin"
+                  : "primary-button px-3! py-1.5! text-xs!"
             }
             disabled={navigating() || props.claiming}
             onClick={() => void navigate("login")}
@@ -199,7 +233,7 @@ export function AccountControls(props: {
         </Show>
       </div>
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
-        {message() || props.state.message}
+        {accountMessage()}
       </p>
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
         {props.claimMessage}

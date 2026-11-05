@@ -35,6 +35,12 @@ export const RedoIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const MenuIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13" />
+  </Icon>
+);
+
 export const SearchIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <circle cx="8.75" cy="8.75" r="5.25" />

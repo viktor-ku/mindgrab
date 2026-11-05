@@ -822,3 +822,65 @@ describe("clipboard", () => {
     expect(await idWithText("Short lived")).toBe(child);
   });
 });
+
+describe("phone layout", () => {
+  test("one button opens a panel holding the map controls", async () => {
+    // Short enough that the opened sections overflow the panel.
+    await page.setViewportSize({ width: 390, height: 460 });
+    const menu = page.locator(".phone-menu-button");
+    await menu.waitFor();
+    for (const name of ["Zoom in", "Fit map", "Search", "Outline", "Sign in"])
+      expect(
+        await page.getByRole("button", { name, exact: true }).count(),
+      ).toBe(0);
+    expect(await page.getByLabel("Project name").isVisible()).toBe(false);
+
+    await menu.click();
+    const panel = page.getByRole("dialog", { name: "Project menu" });
+    await panel.waitFor();
+    // Focusing the name field would raise the phone keyboard.
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("aria-label"),
+      ),
+    ).toBe("Close project menu");
+    await panel.getByRole("button", { name: "Backup and export" }).click();
+    await panel.getByRole("button", { name: "Export outline (.md)" }).waitFor();
+    await panel.getByRole("button", { name: "Open map…" }).click();
+    // The panel scrolls as a whole, so a long menu must not squash this list.
+    const saved = await panel.getByLabel("Available projects").boundingBox();
+    expect(saved?.height).toBeGreaterThan(24);
+    await panel.getByRole("button", { name: "Fit map" }).click();
+    await panel.waitFor({ state: "hidden" });
+
+    await menu.click();
+    await panel.waitFor();
+    await page.keyboard.press("Escape");
+    await panel.waitFor({ state: "hidden" });
+
+    await menu.click();
+    await panel.waitFor();
+    await page.mouse.click(370, 400);
+    await panel.waitFor({ state: "hidden" });
+
+    await menu.click();
+    await panel.getByRole("button", { name: "Search", exact: true }).click();
+    await panel.waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "Close search" }).waitFor();
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("aria-label"),
+      ),
+    ).toBe("Search ideas");
+  });
+
+  test("the desktop controls return on a wider screen", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator(".phone-menu-button").click();
+    await page.getByRole("dialog", { name: "Project menu" }).waitFor();
+    await page.setViewportSize(VIEWPORT);
+    await page.getByRole("button", { name: "Zoom in" }).waitFor();
+    await page.getByLabel("Project name").waitFor();
+    expect(await page.getByRole("dialog").count()).toBe(0);
+  });
+});

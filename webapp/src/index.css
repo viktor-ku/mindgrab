@@ -233,6 +233,29 @@
   background: var(--line);
 }
 
+/* The one control a phone shows over the map. */
+.phone-menu-button {
+  position: relative;
+  display: grid;
+  width: 3rem;
+  height: 3rem;
+  padding: 0;
+  place-items: center;
+  color: var(--ink);
+  cursor: pointer;
+}
+.phone-menu-button[data-problem]::after {
+  content: "";
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: #d92d20;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
 /* Map name and save status. */
 .project-name {
   min-width: 0;
@@ -533,7 +556,8 @@ kbd {
   animation: dialog-enter 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .dialog-center::backdrop,
-.dialog-side::backdrop {
+.dialog-side::backdrop,
+.dialog-panel::backdrop {
   background: rgb(27 31 38 / 0.32);
   backdrop-filter: blur(2px);
 }
@@ -563,7 +587,8 @@ kbd {
 .choice-card input {
   margin-top: 0.2rem;
 }
-.dialog-side {
+.dialog-side,
+.dialog-panel {
   position: fixed;
   inset: 0 0 0 auto;
   width: min(100%, 27rem);
@@ -582,6 +607,74 @@ kbd {
 }
 .dialog-side[open] {
   animation: preferences-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dialog-panel {
+  inset: 0 auto 0 0;
+  width: min(20rem, calc(100vw - 3.5rem));
+  padding: 0.75rem;
+}
+.dialog-panel[open] {
+  display: flex;
+  flex-direction: column;
+  animation: panel-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dialog-panel .project-name {
+  flex: 1;
+  max-width: none;
+  padding: 0.35rem 0.5rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+/* The panel scrolls as a whole, so nothing in it may shrink to fit. */
+.dialog-panel ul {
+  flex-shrink: 0;
+}
+.dialog-panel .menu-item {
+  flex-shrink: 0;
+  gap: 0.75rem;
+  font-size: 0.9375rem;
+}
+.dialog-panel .save-state::after {
+  display: none;
+}
+.panel-status {
+  display: flex;
+  flex-shrink: 0;
+  width: 100%;
+  align-items: center;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0.5rem 0.65rem 0.75rem;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  text-align: left;
+}
+.panel-pair {
+  display: flex;
+  height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.625rem;
+  background: var(--color-stone-50);
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.panel-pair:disabled {
+  color: var(--ink-4);
+  cursor: default;
+}
+.panel-account {
+  flex-shrink: 0;
+  margin-top: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 0.65rem;
+}
+@keyframes panel-enter {
+  from {
+    transform: translateX(-100%);
+  }
 }
 @keyframes drawer-enter {
   from {
@@ -786,6 +879,7 @@ kbd {
   .menu-panel,
   .dialog-center[open],
   .dialog-side[open],
+  .dialog-panel[open],
   .save-state[data-tone="saving"]::before {
     animation: none;
   }

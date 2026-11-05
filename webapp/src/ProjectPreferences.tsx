@@ -13,6 +13,7 @@ export function ProjectPreferences(props: {
   cloudStatus?: CloudStatus;
   signedIn: boolean;
   onExport: () => void;
+  onReviewAnalytics?: () => void;
 }) {
   return (
     <Dialog
@@ -103,7 +104,7 @@ export function ProjectPreferences(props: {
       </Show>
       <Show when={!props.saving.local && props.saving.cloud && props.signedIn}>
         <p class="mt-8 text-sm leading-6 text-stone-600">
-          Wait for “Saved to cloud” before leaving, or export a copy. This
+          Wait for the green save dot before leaving, or export a copy. This
           browser will not keep an offline copy.
         </p>
       </Show>
@@ -139,6 +140,15 @@ export function ProjectPreferences(props: {
           onClick={() => props.onChange(props.saving)}
         >
           Retry storage change
+        </button>
+      </Show>
+      <Show when={props.onReviewAnalytics}>
+        <button
+          type="button"
+          class="map-control mt-6"
+          onClick={() => props.onReviewAnalytics?.()}
+        >
+          Analytics choice…
         </button>
       </Show>
     </Dialog>
