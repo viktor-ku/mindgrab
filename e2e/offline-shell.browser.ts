@@ -188,6 +188,12 @@ async function installed() {
   await page.waitForSelector('[data-storage-ready="true"]');
 }
 async function edit(text: string) {
+  // The fixture signs in, which swaps the anonymous map for the account's.
+  await page.waitForFunction(
+    () =>
+      !document.body.textContent?.includes("Checking account") &&
+      document.querySelector('[data-storage-ready="true"]'),
+  );
   await page.locator("[data-node-id]").first().dblclick();
   await page.getByLabel("Node text").fill(text);
   await page.getByLabel("Node text").press("Enter");

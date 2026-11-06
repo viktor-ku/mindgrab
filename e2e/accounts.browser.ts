@@ -50,6 +50,8 @@ class Backend {
   meGate?: ReturnType<typeof deferred>;
   catalogGate?: ReturnType<typeof deferred>;
   catalogStarted = false;
+  // Holds a new browser's first open, which asks for the recent projects.
+  recentGate?: ReturnType<typeof deferred>;
   // Fails this many "recent projects" requests with a transient 503.
   recentFailures = 0;
   meStarted = false;
@@ -170,8 +172,9 @@ class Backend {
           name: null,
           ...(entry.updatedAt && { updatedAt: entry.updatedAt }),
         }));
-      // The gate holds background discovery, not a new browser's first open.
-      if (!recent) {
+      // This gate holds background discovery, not a new browser's first open.
+      if (recent) await this.recentGate?.promise;
+      else {
         this.catalogStarted = true;
         await this.catalogGate?.promise;
       }
@@ -262,6 +265,7 @@ beforeEach(async () => {
 afterEach(async () => {
   backend.meGate?.resolve();
   backend.catalogGate?.resolve();
+  backend.recentGate?.resolve();
   await context.close();
   for (const record of backend.projects.values()) record.doc.destroy();
   expect(errors).toEqual([]);
@@ -372,6 +376,45 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
   const pending = await call("historyClaim", A.id);
   expect(pending.equal).toBe(true);
   expect(pending.after).toEqual(pending.before);
+});
+
+test("the placeholder map takes no edits while the account's maps open", async () => {
+  await page.keyboard.press("Alt+o");
+  backend.recentGate = deferred();
+  backend.nextUser = A;
+  await page.getByRole("button", { name: /Sign in/ }).click();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await page.waitForSelector('[data-storage-ready="false"]');
+
+  // Each of these used to reach a document that opening the map then replaced.
+  const idea = page.locator("[data-node-id]").first();
+  await idea.dblclick();
+  expect(await page.getByLabel("Node text").count()).toBe(0);
+  await idea.click();
+  await idea.click({ button: "right" });
+  expect(await page.getByRole("menu").count()).toBe(0);
+  const row = page.getByRole("treeitem").first();
+  await row.locator(".outline-row").click();
+  await row.locator(".outline-row").dblclick();
+  expect(await page.getByLabel("Node text").count()).toBe(0);
+  expect(
+    await page.getByRole("region", { name: "Selected idea" }).count(),
+  ).toBe(0);
+  const name = page.getByRole("textbox", { name: "Project name" });
+  const before = await name.inputValue();
+  await name.click();
+  await page.keyboard.type("Typed too early");
+  await page.keyboard.press("Enter");
+  expect(await name.inputValue()).toBe(before);
+
+  backend.recentGate.resolve();
+  backend.recentGate = undefined;
+  await ready();
+  await edit("Written once it opened");
+  await cloudSaved();
+  await page.reload();
+  await ready();
+  expect(await idea.innerText()).toBe("Written once it opened");
 });
 
 test("signing in from fresh browsers opens the latest cloud map instead of adding an empty one", async () => {

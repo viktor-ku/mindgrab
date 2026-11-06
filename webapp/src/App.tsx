@@ -973,6 +973,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Read synchronously, even inside a batch, to tie notices to history.
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
+  // Until a map opens, the canvas shows a placeholder document that is replaced
+  // without being saved, so nothing may select or edit its ideas.
   const [storageReady, setStorageReady] = createSignal(false);
   const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
   const localSave = createLocalSave(savingHandle);
@@ -1604,6 +1606,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Reveals the result inside the folds the search started from, so moving
   // between results never accumulates unfolded branches.
   function previewResult(id: string) {
+    if (!storageReady()) return;
     const next = new Set(searchReturn?.collapsed ?? collapsedIds());
     for (
       let parent = details().get(id)?.parent;
@@ -2434,7 +2437,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function select(id: string) {
-    if (suppressClick) return;
+    if (suppressClick || !storageReady()) return;
     if (selectedId() !== id) {
       finishWriting();
       setColorScope("node");
@@ -2477,7 +2480,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function write(id: string) {
-    if (writing() && selectedId() === id) return;
+    if (!storageReady() || (writing() && selectedId() === id)) return;
     finishWriting();
     revealNode(id);
     if (selectedId() !== id) setColorScope("node");
@@ -2495,6 +2498,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const nodeElement = target?.closest<HTMLElement>("[data-node-id]");
     if (toolbar) {
       setContextMenu(undefined);
+      return;
+    }
+    if (!storageReady()) {
+      e.preventDefault();
       return;
     }
     // Working on the map ends an open search, as a left press does.
@@ -3386,6 +3393,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       required
       aria-label="Project name"
       class="project-name"
+      readOnly={!storageReady()}
       style={
         isPhone()
           ? undefined
@@ -4041,6 +4049,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             selectedId={selectedId()}
             collapsed={collapsedIds()}
             onSelect={(id, via) => {
+              if (!storageReady()) return;
               finishWriting();
               setColorScope("node");
               setSelectedId(id);
