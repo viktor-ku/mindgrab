@@ -49,8 +49,7 @@ export function AccountControls(props: {
     form.submit();
   }
 
-  // With only the sign-in button to show, the button is the island itself
-  // instead of a dark pill boxed inside a white one.
+  // With only the sign-in button to show, the button is the island itself.
   const bare = () =>
     props.state.status !== "authenticated" &&
     props.state.status !== "checking" &&

@@ -195,16 +195,22 @@
   opacity: 0.6;
   cursor: default;
 }
-/* The standalone sign-in button matches the islands beside it. */
+/* The standalone sign-in button is one more island, not a call to action:
+   the map stays the loudest thing on the page. */
 .account-signin {
   height: 2.75rem;
   padding: 0 1.1rem;
   border-radius: var(--radius-island);
+  background: var(--surface-glass);
+  color: var(--ink);
   font-size: 0.8125rem;
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.12),
-    0 1px 2px rgb(27 31 38 / 0.2),
-    0 8px 24px -8px rgb(27 31 38 / 0.45);
+  font-weight: 500;
+  box-shadow: var(--shadow-island);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
+}
+.account-signin:hover:not(:disabled) {
+  background: var(--surface);
 }
 .icon-button:focus-visible,
 .tool-button:focus-visible,
@@ -214,6 +220,7 @@
 .map-control:focus-visible,
 .color-choice:focus-visible,
 .color-scope:focus-within,
+.save-state:focus-visible,
 .saving-switch:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -241,6 +248,13 @@
   outline: none;
   user-select: text;
 }
+/* Hug the text so the menu chevron sits right after the name. */
+@supports (field-sizing: content) {
+  .project-name {
+    field-sizing: content;
+    width: auto !important;
+  }
+}
 .project-name:hover {
   background: var(--hover);
 }
@@ -248,40 +262,60 @@
   background: var(--surface);
   box-shadow: 0 0 0 2px var(--accent);
 }
+/* One dot says where the project is kept, with its words in the tooltip. The
+   padding widens the hover target and the margin keeps the layout unchanged.
+   Only the red dot is a button: it opens the save error details. */
 .save-state {
+  --save-tone: var(--ink-4);
+  position: relative;
   display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  white-space: nowrap;
-  color: var(--ink-3);
+  margin: -0.25rem;
+  padding: 0.5rem;
+}
+.save-state[data-tone="error"] {
+  --save-tone: #d92d20;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.save-state[data-tone="error"]:hover {
+  background: var(--hover);
+}
+.save-state[data-tone="saving"] {
+  --save-tone: #e3a008;
+}
+.save-state[data-tone="local"] {
+  --save-tone: #2563eb;
+}
+.save-state[data-tone="cloud"] {
+  --save-tone: #22a06b;
 }
 .save-state::before {
   content: "";
   width: 0.375rem;
   height: 0.375rem;
   border-radius: 999px;
-  background: #22a06b;
-  box-shadow: 0 0 0 3px rgb(34 160 107 / 0.16);
+  background: var(--save-tone);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--save-tone) 18%, transparent);
 }
-.save-state[data-tone="busy"]::before {
-  background: #e3a008;
-  box-shadow: 0 0 0 3px rgb(227 160 8 / 0.18);
+.save-state[data-tone="saving"]::before {
   animation: save-pulse 1s ease-in-out infinite alternate;
 }
-.save-state[data-tone="warn"]::before {
-  background: #e3a008;
-  box-shadow: 0 0 0 3px rgb(227 160 8 / 0.18);
-}
-.save-state[data-tone="error"] {
-  color: #b42318;
-}
-.save-state[data-tone="error"]::before {
-  background: #d92d20;
-  box-shadow: 0 0 0 3px rgb(217 45 32 / 0.18);
-}
-.save-state[data-tone="muted"]::before {
-  background: var(--ink-4);
-  box-shadow: none;
+.save-state:not([aria-expanded="true"]):hover::after {
+  content: attr(data-label);
+  position: absolute;
+  top: calc(100% + 0.75rem);
+  left: 0;
+  z-index: 40;
+  width: max-content;
+  max-width: 18rem;
+  border-radius: var(--radius-control);
+  padding: 0.25rem 0.5rem;
+  background: var(--ink);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 500;
+  pointer-events: none;
+  box-shadow: var(--shadow-island);
 }
 @keyframes save-pulse {
   to {
@@ -490,6 +524,9 @@ kbd {
   cursor: default;
   box-shadow: var(--shadow-dialog);
 }
+.dialog-center[data-size="small"] {
+  width: min(26rem, calc(100vw - 2rem));
+}
 .dialog-center[open] {
   display: flex;
   flex-direction: column;
@@ -546,7 +583,7 @@ kbd {
 .dialog-side[open] {
   animation: preferences-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-@keyframes preferences-enter {
+@keyframes drawer-enter {
   from {
     transform: translateX(100%);
   }
@@ -749,7 +786,7 @@ kbd {
   .menu-panel,
   .dialog-center[open],
   .dialog-side[open],
-  .save-state[data-tone="busy"]::before {
+  .save-state[data-tone="saving"]::before {
     animation: none;
   }
   .saving-switch::before {
@@ -759,11 +796,6 @@ kbd {
 
 /* Narrow screens. */
 @media (max-width: 639px) {
-  /* Status keeps its colored dot; the words stay available to assistive tech. */
-  .save-state {
-    gap: 0;
-    font-size: 0;
-  }
   .save-state::before {
     width: 0.5rem;
     height: 0.5rem;

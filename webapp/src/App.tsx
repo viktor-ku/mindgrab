@@ -136,6 +136,9 @@ import type {
 import { backendDeployment } from "./backend";
 import { CloudWorkspace, openLatestCloudProject } from "./project-sync";
 import type { CloudStatus } from "./project-sync";
+import { createLocalSave } from "./local-save";
+import { SaveErrorDialog } from "./SaveErrorDialog";
+import { saveIndicator } from "./save-indicator";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -179,7 +182,6 @@ function storeWheelMode(mode: WheelMode) {
   }
 }
 
-const HINT_KEY = "mindgrab:hint-dismissed";
 function storedFlag(key: string) {
   try {
     return localStorage.getItem(key) === "1";
@@ -187,7 +189,7 @@ function storedFlag(key: string) {
     return false;
   }
 }
-function storeFlag(key: string, value = true) {
+function storeFlag(key: string, value: boolean) {
   try {
     if (value) localStorage.setItem(key, "1");
     else localStorage.removeItem(key);
@@ -512,7 +514,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   createEffect(on(accountId, () => setClaimDismissed(false)));
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
-  let stopDurability: (() => void) | undefined;
   let stopCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
   let authNavigationPending = false;
@@ -576,6 +577,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     mutationFn: performRetryLocalSaving,
   }));
   const retryLocalSaving = () => recoveryMutation.mutateAsync();
+  const retryLocal = () =>
+    void retryLocalSaving().catch(() =>
+      setStorageMessage(
+        "Browser storage is still unavailable. Free up space and retry.",
+      ),
+    );
+  const retryCloud = () => {
+    if (account().status === "expired") void auth.check();
+    else cloud?.retry();
+  };
   const loadMutation = createMutation(() => ({
     mutationKey: ["project", "load-menu"],
     mutationFn: performOpenLoad,
@@ -669,37 +680,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await handle.close();
       return;
     }
-    stopDurability?.();
     handleRepository = owner;
     activeHandle = handle;
     resetProjectUi();
     setDoc(handle.doc);
     setStorageReady(true);
     cloud?.activate(handle);
-    setSaveStatus(
-      ["saved", "disabled"].includes(handle.durability().status)
-        ? "done"
-        : "saving",
-    );
-    stopDurability = handle.onDurability((durability) => {
-      if (activeHandle !== handle || repository !== owner || disposed) return;
-      setSaveStatus(
-        durability.status === "saved" || durability.status === "disabled"
-          ? "done"
-          : durability.status === "saving"
-            ? "saving"
-            : "error",
-      );
-      if (durability.status === "unsaved")
-        setStorageMessage(
-          `${durability.error.message} Export a copy to keep your changes.`,
-        );
-      else if (
-        durability.status === "saved" ||
-        durability.status === "disabled"
-      )
-        setStorageMessage("");
-    });
+    setSavingHandle(handle);
     if (previous && previous !== handle) await previous.close();
     try {
       const preference = await queryClient.fetchQuery({
@@ -872,7 +859,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
     saveView.clear();
     stopCatalog?.();
-    stopDurability?.();
     finishWriting();
     finishProjectName();
     const previousRepository = repository;
@@ -894,6 +880,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setWorkspace(nextRepository);
     handleRepository = nextRepository;
     activeHandle = undefined;
+    setSavingHandle(undefined);
     resetProjectUi();
     setDoc(ephemeralDocument());
     setStorageReady(false);
@@ -965,10 +952,43 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
   const [storageReady, setStorageReady] = createSignal(false);
-  const [saveStatus, setSaveStatus] = createSignal<
-    "" | "saving" | "done" | "error"
-  >("");
+  const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
+  const localSave = createLocalSave(savingHandle);
   const [storageMessage, setStorageMessage] = createSignal("");
+  const saveDot = () =>
+    saveIndicator({
+      local: view().saving().local && storageReady(),
+      localStatus: localSave.status(),
+      cloud: cloudStatus(),
+      recovering: recoveryPending(),
+    });
+  const cloudProblem = () => {
+    const status = cloudStatus();
+    return status && "message" in status ? status.message : "";
+  };
+  const [saveErrorOpen, setSaveErrorOpen] = createSignal(false);
+  // A retry that turns the dot yellow leaves the details open; a save closes them.
+  createEffect(() => {
+    if (saveDot().tone !== "error" && saveDot().tone !== "saving")
+      setSaveErrorOpen(false);
+  });
+  const saveProblems = () =>
+    [
+      localSave.message() &&
+        `${localSave.message()} Export a copy to keep your changes.`,
+      cloudProblem(),
+      recoveryPending() &&
+        "Edits from the previous account could not be saved. They remain in memory; retry before leaving.",
+    ].filter((problem) => !!problem) as string[];
+  createEffect(
+    on(
+      localSave.status,
+      (status) => {
+        if (status === "done" && view().saving().local) setStorageMessage("");
+      },
+      { defer: true },
+    ),
+  );
   const session = createMemo(() => {
     const current = doc();
     const handle = activeHandle?.doc === current ? activeHandle : undefined;
@@ -1069,6 +1089,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [showLoad, setShowLoad] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
   const [showShare, setShowShare] = createSignal(false);
+  // An open overlay owns the keyboard; the canvas stays out of its way.
+  const overlayOpen = () =>
+    showPreferences() || showShare() || showHelp() || saveErrorOpen();
   const savingMutation = createMutation(() => ({
     mutationKey: ["project", "saving"],
     mutationFn: performChangeSaving,
@@ -1099,11 +1122,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
-  function clearSaveStatus() {
-    setSaveStatus("");
-  }
-
-  onCleanup(clearSaveStatus);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
   const details = createMemo(() => nodeDetails(forest()));
@@ -1684,14 +1702,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // keyboard users never land on the page body.
   createEffect(
     on(
-      () => [
-        outlineOpen(),
-        notesOpen(),
-        menuOpen(),
-        showPreferences(),
-        showShare(),
-        showHelp(),
-      ],
+      () => [outlineOpen(), notesOpen(), menuOpen(), overlayOpen()],
       () => {
         if (!document.activeElement || document.activeElement === document.body)
           canvas?.focus({ preventScroll: true });
@@ -1882,11 +1893,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     [() => Boolean(focusId()), "branch_focused"],
   ] as const)
     createEffect(on(opened, (open) => open && track(event), { defer: true }));
-  const [hintDismissed, setHintDismissed] = createSignal(storedFlag(HINT_KEY));
-  function dismissHint() {
-    setHintDismissed(true);
-    storeFlag(HINT_KEY);
-  }
 
   const saveView = debounce(
     (
@@ -1956,7 +1962,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function resetProjectUi() {
-    clearSaveStatus();
     finishWriting();
     editorSelection = undefined;
     cancelPointer();
@@ -2059,11 +2064,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const owner = repository;
     const handle = activeHandle;
     setShowLoad(false);
-    setSaveStatus("saving");
     try {
-      await handle.flush();
+      await localSave.save();
       if (repository !== owner || activeHandle !== handle || disposed) return;
-      setSaveStatus("done");
       track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
@@ -2074,10 +2077,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
-      setSaveStatus("error");
-      setStorageMessage(
-        error instanceof Error ? error.message : "Could not save this project.",
-      );
       throw error;
     }
   }
@@ -2091,7 +2090,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       parked.delete(recovery);
     }
     setRecoveryPending(parked.size > 0);
-    if (activeHandle) await activeHandle.flush();
+    if (activeHandle) await localSave.save();
     else {
       const owner = repository;
       const current = doc();
@@ -2106,7 +2105,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function saveBeforeAuth(action: "login" | "logout") {
     finishWriting();
     finishProjectName();
-    clearSaveStatus();
     const owner = repository;
     const handle = activeHandle;
     if (!handle || claiming()) {
@@ -2156,7 +2154,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   async function performOpenLoad() {
-    clearSaveStatus();
     finishWriting();
     const owner = repository;
     try {
@@ -2793,7 +2790,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queryKey: ["anonymous-claims", deployment],
       });
       queryClient.removeQueries({ queryKey: ["anonymous-claims", deployment] });
-      stopDurability?.();
       void repository.close();
       for (const recovery of parked) void recovery.repository.close();
     });
@@ -2812,8 +2808,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
-      if (showPreferences() || showShare() || showHelp() || searchOpen())
-        return;
+      if (overlayOpen() || searchOpen()) return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -3079,7 +3074,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
-      if (showPreferences() || showShare() || showHelp()) return;
+      if (overlayOpen()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
       // text fields, without tabbing through the map (Tab adds ideas there).
       if (
@@ -3136,9 +3131,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const canvasClipboard = (e: ClipboardEvent) =>
       storageReady() &&
       !writing() &&
-      !showPreferences() &&
-      !showShare() &&
-      !showHelp() &&
+      !overlayOpen() &&
       !searchOpen() &&
       !(
         e.target instanceof Element &&
@@ -3337,75 +3330,34 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           >
             <ChevronDownIcon />
           </button>
-          <span class="toolbar-divider" />
           <fieldset
             aria-label="Project actions"
-            class="flex min-w-0 items-center gap-2 pr-2 text-xs text-stone-500"
+            class="flex min-w-0 items-center pr-2 pl-1 text-xs text-stone-500"
           >
-            <span
-              role="status"
-              class="save-state"
-              // With cloud saving healthy, one status is enough; the local one
-              // stays available to assistive technology.
-              classList={{
-                "sr-only":
-                  view().saving().local &&
-                  view().saving().cloud &&
-                  saveStatus() !== "error" &&
-                  ["saved", "saving", "offline"].includes(
-                    cloudStatus()?.status ?? "",
-                  ),
-              }}
-              data-tone={
-                !view().saving().local
-                  ? "muted"
-                  : saveStatus() === "error"
-                    ? "error"
-                    : saveStatus() === "saving"
-                      ? "busy"
-                      : "ok"
+            <Show
+              when={saveDot().tone === "error"}
+              fallback={
+                <span
+                  aria-hidden="true"
+                  class="save-state"
+                  data-tone={saveDot().tone}
+                  data-label={saveDot().label}
+                />
               }
             >
-              {!view().saving().local
-                ? "Local saving off"
-                : saveStatus() === "saving"
-                  ? "Saving…"
-                  : saveStatus() === "error"
-                    ? "Save failed"
-                    : "Saved locally"}
-            </span>
-            <Show when={cloudStatus()}>
-              {(status) => (
-                <span
-                  role="status"
-                  class="save-state"
-                  data-tone={
-                    status().status === "saved"
-                      ? "ok"
-                      : status().status === "saving" ||
-                          status().status === "deleting"
-                        ? "busy"
-                        : status().status === "disabled"
-                          ? "muted"
-                          : "warn"
-                  }
-                >
-                  {status().status === "disabled"
-                    ? "Cloud saving off"
-                    : status().status === "deleting"
-                      ? "Deleting cloud copy…"
-                      : status().status === "saved"
-                        ? "Saved to cloud"
-                        : status().status === "saving"
-                          ? "Saving to cloud…"
-                          : status().status === "offline"
-                            ? "Offline · cloud save pending"
-                            : "message" in status()
-                              ? (status() as { message: string }).message
-                              : ""}
-                </span>
-              )}
+              <button
+                type="button"
+                class="save-state"
+                data-tone="error"
+                data-label="Couldn’t save · click for details"
+                aria-label="Save error details"
+                aria-haspopup="dialog"
+                onClick={() => setSaveErrorOpen(true)}
+              />
             </Show>
+            <span role="status" class="sr-only">
+              {saveDot().label}
+            </span>
           </fieldset>
         </section>
         <Show when={menuOpen()}>
@@ -3618,18 +3570,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             </fieldset>
           </div>
         </Show>
-        <Show
-          when={
-            storageMessage() ||
-            recoveryPending() ||
-            !storageReady() ||
-            saveStatus() === "error" ||
-            memoryOnly() ||
-            ["retrying", "blocked", "auth"].includes(
-              cloudStatus()?.status ?? "",
-            )
-          }
-        >
+        <Show when={storageMessage() || !storageReady() || memoryOnly()}>
           <div
             data-no-pan
             data-toolbar
@@ -3643,51 +3584,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <p role="status" class="empty:hidden">
               {storageMessage()}
             </p>
-            <Show when={recoveryPending()}>
-              <p role="status">
-                Edits from the previous account could not be saved. They remain
-                in memory; retry before leaving.
-              </p>
-            </Show>
-            <div class="flex flex-wrap gap-1 empty:hidden">
-              <Show
-                when={
-                  recoveryPending() ||
-                  !storageReady() ||
-                  saveStatus() === "error"
-                }
-              >
+            <Show when={!storageReady()}>
+              <div class="flex flex-wrap gap-1">
                 <button
                   type="button"
                   class="map-control text-xs"
-                  onClick={() =>
-                    void retryLocalSaving().catch(() =>
-                      setStorageMessage(
-                        "Browser storage is still unavailable. Free up space and retry.",
-                      ),
-                    )
-                  }
+                  onClick={retryLocal}
                 >
                   Retry local saving
                 </button>
-              </Show>
-              <Show
-                when={["retrying", "blocked", "auth"].includes(
-                  cloudStatus()?.status ?? "",
-                )}
-              >
-                <button
-                  type="button"
-                  class="map-control text-xs"
-                  onClick={() => {
-                    if (account().status === "expired") void auth.check();
-                    else cloud?.retry();
-                  }}
-                >
-                  Retry
-                </button>
-              </Show>
-            </div>
+              </div>
+            </Show>
           </div>
         </Show>
       </div>
@@ -4307,50 +4214,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </section>
         </Show>
       </div>
-      <Show
-        when={
-          !hintDismissed() &&
-          !outlineOpen() &&
-          forest().length > 0 &&
-          details().size <= 4
-        }
-      >
-        <aside
-          data-no-pan
-          data-toolbar
-          aria-label="Getting started"
-          class="map-toolbar absolute bottom-3 left-3 z-10 hidden w-64 cursor-default p-3 text-xs leading-5 text-stone-600 lg:block"
-        >
-          <div class="mb-1 flex items-center justify-between">
-            <p class="panel-title">Quick start</p>
-            <button
-              type="button"
-              class="icon-button -mr-1.5 -mt-1.5"
-              aria-label="Dismiss quick start"
-              onClick={dismissHint}
-            >
-              <CloseIcon class="size-4" />
-            </button>
-          </div>
-          <ul class="space-y-0.5">
-            <li>
-              <kbd>Tab</kbd> adds a child, <kbd>Enter</kbd> a sibling
-            </li>
-            <li>Type to rewrite the selected idea</li>
-            <li>Drag an idea onto another to move it under</li>
-            <li>
-              <kbd>{MOD_LABEL}Z</kbd> undoes anything
-            </li>
-          </ul>
-          <button
-            type="button"
-            class="mt-2 font-medium text-accent-deep hover:underline"
-            onClick={() => setShowHelp(true)}
-          >
-            All shortcuts
-          </button>
-        </aside>
-      </Show>
       <div
         class="map-layer absolute w-full h-full origin-top-left"
         classList={{ "map-layer-easing": easingView() }}
@@ -4658,13 +4521,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </div>
         )}
       </Show>
-      <div class="pointer-events-none absolute right-3 bottom-3 z-20 flex items-center gap-2">
-        <fieldset
-          data-no-pan
-          data-toolbar
-          aria-label="Canvas zoom"
-          class="map-toolbar pointer-events-auto flex items-center gap-0.5 text-sm cursor-default"
-        >
+      <div
+        data-no-pan
+        data-toolbar
+        class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
+      >
+        <fieldset aria-label="Canvas zoom" class="flex items-center gap-0.5">
           <button
             type="button"
             class="icon-button"
@@ -4716,23 +4578,39 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <FitSelectionIcon />
           </button>
         </fieldset>
-        <div
-          data-no-pan
-          data-toolbar
-          class="map-toolbar pointer-events-auto flex cursor-default"
+        <span class="toolbar-divider" />
+        <button
+          type="button"
+          class="icon-button"
+          aria-label="Keyboard shortcuts and navigation"
+          title="Shortcuts and navigation (?)"
+          aria-haspopup="dialog"
+          onClick={() => setShowHelp(true)}
         >
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Keyboard shortcuts and navigation"
-            title="Shortcuts and navigation (?)"
-            aria-haspopup="dialog"
-            onClick={() => setShowHelp(true)}
-          >
-            <HelpIcon />
-          </button>
-        </div>
+          <HelpIcon />
+        </button>
       </div>
+      <SaveErrorDialog
+        open={saveErrorOpen()}
+        onClose={() => {
+          setSaveErrorOpen(false);
+          canvas.focus({ preventScroll: true });
+        }}
+        problems={saveProblems()}
+        safeInBrowser={
+          view().saving().local &&
+          storageReady() &&
+          !localSave.message() &&
+          !recoveryPending()
+        }
+        retryingAlone={
+          !!localSave.message() || cloudStatus()?.status === "retrying"
+        }
+        onRetryLocal={
+          localSave.message() || recoveryPending() ? retryLocal : undefined
+        }
+        onRetryCloud={cloudProblem() ? retryCloud : undefined}
+      />
       <ShortcutsDialog
         open={showHelp()}
         onClose={() => {

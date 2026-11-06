@@ -36,6 +36,10 @@ export function createQueryClient() {
 
 export const queryClient = createQueryClient();
 
+// Backoff shared by the queries that keep saving until a save succeeds.
+export const saveRetryDelay = (attempt: number) =>
+  Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+
 // Services outside Solid's component tree use the same mutation cache.
 export function executeMutation<TData, TVariables>(
   client: QueryClient,

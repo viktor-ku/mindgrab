@@ -297,7 +297,7 @@ async function refreshAccount() {
 const claim = () =>
   page.getByRole("button", { name: "Add anonymous projects to this account" });
 async function cloudSaved() {
-  await page.getByText("Saved to cloud", { exact: true }).waitFor();
+  await page.getByText(/^Saved to cloud/).waitFor();
 }
 
 test("lost registration and repeated/concurrent claims reuse one target and retain Loro history", async () => {
@@ -472,11 +472,13 @@ test("forced logout parks failed local writes outside anonymous UI until they ca
       .count(),
   ).toBe(0);
   await call("failWrites", false);
+  await page.getByRole("button", { name: "Save error details" }).click();
   await page
     .getByRole("button", { name: "Retry local saving", exact: true })
     .click();
   await page
     .getByText(/Edits from the previous account could not be saved/)
+    .first()
     .waitFor({ state: "detached" });
   await login();
   await page
@@ -554,6 +556,33 @@ test("durable hints recover the workspace and logout when localStorage is missin
   expect(await page.getByText(A.name, { exact: true }).count()).toBe(0);
 });
 
+test("the red save dot opens the failure and clears itself once saving recovers", async () => {
+  await call("failWrites", true);
+  await edit("A failed local edit");
+  const dot = page.getByRole("button", { name: "Save error details" });
+  await dot.waitFor();
+  const details = page.getByRole("dialog", { name: "Couldn’t save" });
+  expect(await details.isVisible()).toBe(false);
+
+  await dot.click();
+  await details.waitFor();
+  await page.keyboard.press("Escape");
+  await details.waitFor({ state: "hidden" });
+  await dot.click();
+  await details.waitFor();
+  await page.mouse.click(20, 400);
+  await details.waitFor({ state: "hidden" });
+
+  await dot.click();
+  await details.waitFor();
+  await call("failWrites", false);
+  await dot.waitFor({ state: "detached" });
+  await details.waitFor({ state: "hidden" });
+  expect(await page.locator(".save-state").getAttribute("data-tone")).toBe(
+    "local",
+  );
+});
+
 test("an aborted durable account hint prevents logout acknowledgement and can be retried", async () => {
   await login();
   await cloudSaved();
@@ -578,7 +607,9 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await projectMenu("Project preferences…");
   const dialog = page.getByRole("dialog", { name: "Project preferences" });
   await dialog.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
-  await page.getByText("Cloud saving off", { exact: true }).waitFor();
+  await page
+    .getByText("Saved locally · cloud saving off", { exact: true })
+    .waitFor();
   expect(backend.projects.has(id)).toBe(false);
   await dialog
     .getByRole("switch", { name: "Save locally", exact: true })
@@ -628,7 +659,9 @@ test("cloud-only projects load after reload without leaving a local copy", async
   await page
     .getByRole("menuitem", { name: `Cloud only project · ${id.slice(0, 8)}` })
     .click();
-  await page.getByText("Local saving off", { exact: true }).waitFor();
+  await page
+    .getByText("Saved to cloud · local saving off", { exact: true })
+    .waitFor();
   expect(await call("id")).toBe(id);
   expect(
     await page.evaluate(

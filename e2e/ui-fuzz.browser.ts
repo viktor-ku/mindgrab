@@ -679,7 +679,6 @@ const BUTTONS = [
   'button[aria-label="Close notes"]',
   'button[aria-label="Close outline"]',
   'button[aria-label="Close search"]',
-  'button[aria-label="Dismiss quick start"]',
   'button[aria-label="Return from search"]',
   'button[aria-label="Stay here"]',
   '[aria-label="Branch focus"] button',

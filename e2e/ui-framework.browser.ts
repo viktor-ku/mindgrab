@@ -204,7 +204,6 @@ describe("dragging onto ideas", () => {
     const a = await addChild(root, "A");
     const b = await addChild(root, "B");
     const c = await addChild(root, "C");
-    await page.getByRole("button", { name: "Dismiss quick start" }).click();
 
     const target = await box(a);
     await dragTo(c, {
@@ -554,16 +553,6 @@ describe("view controls", () => {
     await page.keyboard.press("ArrowLeft");
     expect(await selected()).toBe(root);
     expect(await insideViewport(root)).toBe(true);
-  });
-
-  test("the quick start can be dismissed for good", async () => {
-    const hint = page.getByRole("complementary", { name: "Getting started" });
-    await hint.waitFor();
-    await hint.getByRole("button", { name: "Dismiss quick start" }).click();
-    await hint.waitFor({ state: "detached" });
-    await page.reload();
-    await ready();
-    expect(await hint.count()).toBe(0);
   });
 });
 

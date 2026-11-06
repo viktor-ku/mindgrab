@@ -193,11 +193,7 @@ async function edit(text: string) {
   await page.getByLabel("Node text").press("Enter");
   await page.getByRole("button", { name: "Project menu" }).click();
   await page.getByRole("menuitem", { name: "Save now" }).click();
-  await page.waitForFunction(() =>
-    document
-      .querySelector('[aria-label="Project actions"]')
-      ?.textContent?.includes("Saved locally"),
-  );
+  await page.getByText("Saved locally.", { exact: true }).waitFor();
 }
 async function cacheKeys() {
   return page.evaluate(async () => {

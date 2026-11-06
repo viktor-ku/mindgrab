@@ -13,6 +13,7 @@ export function Dialog(props: {
   // "center" floats mid-screen and leaves the body to scroll itself. "side"
   // slides in from the right, pads its content and scrolls as a whole.
   variant: "center" | "side";
+  size?: "small";
   children: JSX.Element;
 }) {
   let dialog!: HTMLDialogElement;
@@ -25,6 +26,7 @@ export function Dialog(props: {
     <dialog
       ref={dialog}
       class={props.variant === "side" ? "dialog-side" : "dialog-center"}
+      data-size={props.size}
       aria-labelledby={titleId}
       data-no-pan
       onClose={props.onClose}
