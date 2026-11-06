@@ -9,7 +9,7 @@ import {
   test,
 } from "bun:test";
 import { fileURLToPath } from "node:url";
-import type { Browser, BrowserContext, Page } from "playwright";
+import type { Browser, BrowserContext, Locator, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
@@ -97,6 +97,8 @@ const settle = async () => {
 };
 const selected = () =>
   page.locator("[data-selected=true]").getAttribute("data-node-id");
+const activeLabel = () =>
+  page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
 const zoomLabel = () =>
   page.getByRole("button", { name: "Zoom to 100%" }).textContent();
 const notice = (text: string | RegExp) =>
@@ -307,7 +309,7 @@ describe("structure shortcuts", () => {
     const a = await addChild(root, "A");
     const b = await addChild(root, "B");
     await node(b).click({ button: "right" });
-    const menu = page.getByRole("menu", { name: "Node actions" });
+    const menu = page.getByRole("menu", { name: "Idea actions" });
     expect(
       await menu.getByRole("menuitem", { name: /Move out/ }).isEnabled(),
     ).toBe(true);
@@ -431,7 +433,7 @@ describe("branch focus", () => {
     ).toBe(0);
     await page.keyboard.press("Escape");
     await node(a).click();
-    await page.getByRole("button", { name: "Focus branch" }).click();
+    await page.getByRole("button", { name: "Focus on this branch" }).click();
     await breadcrumbs.waitFor();
     expect(
       await page.getByRole("button", { name: "Leave focus" }).count(),
@@ -505,7 +507,7 @@ describe("view controls", () => {
     expect(Math.abs(zoomed.y + zoomed.height / 2 - center.y)).toBeLessThan(2);
 
     await page
-      .getByRole("button", { name: "Keyboard shortcuts and navigation" })
+      .getByRole("button", { name: "Shortcuts and navigation" })
       .click();
     const dialog = page.getByRole("dialog", {
       name: "Shortcuts and navigation",
@@ -525,7 +527,7 @@ describe("view controls", () => {
     await page.reload();
     await ready();
     await page
-      .getByRole("button", { name: "Keyboard shortcuts and navigation" })
+      .getByRole("button", { name: "Shortcuts and navigation" })
       .click();
     expect(
       await dialog.getByRole("radio", { name: /Scroll zooms/ }).isChecked(),
@@ -823,6 +825,998 @@ describe("clipboard", () => {
   });
 });
 
+describe("dialogs, panels and search", () => {
+  const ideaCount = async () => (await call("ids")).length;
+
+  test("a dialog keeps the wheel, right-click and keys away from the map", async () => {
+    const root = await rootId();
+    const before = await box(root);
+    await page
+      .getByRole("button", { name: "Shortcuts and navigation" })
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Shortcuts and navigation",
+    });
+    await dialog.waitFor();
+    const list = dialog.locator(".scroll-fade");
+    const bounds = await list.boundingBox();
+    if (!bounds) throw new Error("The shortcut list is not visible.");
+    const inside = { x: bounds.x + 40, y: bounds.y + 40 };
+    await page.mouse.move(inside.x, inside.y);
+    await page.mouse.wheel(0, 120);
+    await page.waitForFunction(
+      () => (document.querySelector(".scroll-fade")?.scrollTop ?? 0) > 0,
+    );
+    expect(await box(root)).toEqual(before);
+
+    await page.mouse.click(inside.x, inside.y, { button: "right" });
+    expect(await page.getByRole("menu").count()).toBe(0);
+    expect(await selected()).toBe(root);
+
+    // Page keys scroll the list; the dialog itself, with its header, stays put.
+    await page.keyboard.press("PageDown");
+    await page.keyboard.press("ArrowDown");
+    expect(
+      await dialog.evaluate((element) => [
+        element.scrollTop,
+        element.scrollHeight - element.clientHeight,
+      ]),
+    ).toEqual([0, 0]);
+
+    // Mod+S never reaches the browser's "Save page" dialog.
+    expect(await pressLayoutKey("s", "KeyS", { ctrlKey: true })).toBe(false);
+    const close = dialog.getByRole("button", { name: "Close shortcuts" });
+    expect(await close.getAttribute("title")).toBe("Close shortcuts (Esc)");
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    // The dialog's close event, which focuses the map again, comes a frame late.
+    await settle();
+    expect(await activeLabel()).toBe("Mind map canvas");
+    expect(await pressLayoutKey("s", "KeyS", { ctrlKey: true })).toBe(false);
+    await page.locator(".notice", { hasText: "Saved locally" }).waitFor();
+    await page.keyboard.type("x");
+    expect(await pressLayoutKey("s", "KeyS", { ctrlKey: true })).toBe(false);
+    // In a text field the key only holds the browser back; the edit goes on.
+    expect(await editor().count()).toBe(1);
+  });
+
+  test("side dialogs share the centered header and offer sign-in when signed out", async () => {
+    await page.getByRole("button", { name: "Project menu" }).click();
+    await page.getByRole("menuitem", { name: "Share link…" }).click();
+    const share = page.getByRole("dialog", { name: "Share" });
+    await share.waitFor();
+    await share.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+    expect(
+      await share.evaluate((element) => {
+        const header = element.querySelector("header") as HTMLElement;
+        const title = header.querySelector("h2") as HTMLElement;
+        const body = element.querySelector("header + *") as HTMLElement;
+        return {
+          bleed: header.offsetWidth - element.clientWidth,
+          height: header.offsetHeight,
+          title:
+            title.getBoundingClientRect().left -
+            body.getBoundingClientRect().left,
+        };
+      }),
+    ).toEqual({ bleed: 0, height: 69, title: 0 });
+    await share.getByRole("button", { name: "Close sharing" }).click();
+    await share.waitFor({ state: "hidden" });
+    expect(await activeLabel()).toBe("Mind map canvas");
+
+    // Phones keep the account controls in the menu panel, so it opens instead.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator(".phone-menu-button").click();
+    const panel = page.getByRole("dialog", { name: "Project menu" });
+    await panel.getByRole("button", { name: "Share link…" }).click();
+    await share.getByRole("button", { name: "Sign in", exact: true }).click();
+    await share.waitFor({ state: "hidden" });
+    await panel.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  });
+
+  test("Escape closes search from its close button, a toolbar and the map", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Needle");
+    const field = page.getByRole("searchbox", { name: "Search ideas" });
+    const open = async () => {
+      await page.keyboard.press("ControlOrMeta+f");
+      await field.fill("needle");
+      expect(await selected()).toBe(child);
+    };
+
+    await node(root).click();
+    await open();
+    await page.keyboard.press("Tab");
+    expect(await activeLabel()).toBe("Close search");
+    await page.keyboard.press("Escape");
+    await field.waitFor({ state: "detached" });
+    expect(await selected()).toBe(root);
+    expect(await activeLabel()).toBe("Mind map canvas");
+
+    // A click would hand focus to the map; the keyboard leaves it here.
+    await open();
+    await page.getByRole("button", { name: "Zoom in" }).focus();
+    expect(await activeLabel()).toBe("Zoom in");
+    await page.keyboard.press("Escape");
+    await field.waitFor({ state: "detached" });
+    expect(await selected()).toBe(root);
+
+    // A dialog opened over the search returns to a map that still listens.
+    await open();
+    await page
+      .getByRole("button", { name: "Shortcuts and navigation" })
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Shortcuts and navigation",
+    });
+    await dialog.waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    expect(await field.count()).toBe(1);
+    await page.keyboard.press("Escape");
+    await field.waitFor({ state: "detached" });
+    await page.keyboard.press("ArrowRight");
+    expect(await selected()).toBe(child);
+
+    // Opening an idea's menu is working on the map, which ends the search.
+    await open();
+    await node(child).click({ button: "right" });
+    await page.getByRole("menu").waitFor();
+    await field.waitFor({ state: "detached" });
+    expect(await selected()).toBe(child);
+    await page.keyboard.press("Escape");
+    expect(await page.getByRole("menu").count()).toBe(0);
+    expect(await selected()).toBe(child);
+  });
+
+  test("Escape closes the outline from its close button and keeps the selection", async () => {
+    const root = await rootId();
+    await page.keyboard.press("Alt+o");
+    const outline = page.getByRole("complementary", { name: "Outline" });
+    await outline.waitFor();
+    await outline.getByRole("button", { name: "Close outline" }).focus();
+    await page.keyboard.press("Escape");
+    await outline.waitFor({ state: "hidden" });
+    expect(await selected()).toBe(root);
+    expect(await activeLabel()).toBe("Mind map canvas");
+
+    // A press on a panel's title keeps focus in the panel, so Esc closes it.
+    await page.keyboard.press("Alt+o");
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("complementary", { name: "Notes" });
+    for (const panel of [notes, outline]) {
+      await panel.getByRole("heading").click();
+      await page.keyboard.press("Escape");
+      await panel.waitFor({ state: "hidden" });
+      expect(await selected()).toBe(root);
+      expect(await activeLabel()).toBe("Mind map canvas");
+    }
+  });
+
+  test("F6 enters panels at their content and reaches the zoom island", async () => {
+    await page.keyboard.press("Alt+o");
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("complementary", { name: "Notes" });
+    await notes.getByRole("textbox").waitFor();
+    expect(
+      await notes
+        .getByRole("button", { name: "Close notes" })
+        .getAttribute("title"),
+    ).toBe("Close notes (Esc)");
+    await page.keyboard.press("Escape");
+    await notes.waitFor({ state: "hidden" });
+    await page.keyboard.press("Alt+n");
+    await notes.getByRole("textbox").waitFor();
+    await page.locator('[aria-label="Mind map canvas"]').focus();
+
+    // Where focus lands in each region, until the cycle returns to the map.
+    const stops: string[] = [];
+    for (let presses = 0; presses < 12; presses++) {
+      await page.keyboard.press("F6");
+      const stop = await page.evaluate(() => {
+        const active = document.activeElement;
+        const region = active?.closest("[data-toolbar][aria-label]");
+        return `${region?.getAttribute("aria-label") ?? "canvas"}: ${active?.getAttribute("role") ?? active?.tagName.toLowerCase()}`;
+      });
+      if (stop.startsWith("canvas")) break;
+      stops.push(stop);
+    }
+    expect(stops).toContain("Notes: textarea");
+    expect(stops).toContain("Outline: treeitem");
+    expect(stops).toContain("View and help: button");
+  });
+
+  test("ideas are not tab stops, and an arrow key selects the first idea", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    await node(child).click();
+    await page.keyboard.press("Alt+g");
+    await node(root).click();
+    await page.keyboard.press("Alt+g");
+    expect(
+      await page
+        .locator("[data-node-id] button")
+        .evaluateAll((buttons) =>
+          buttons.map((button) => (button as HTMLElement).tabIndex),
+        ),
+    ).toEqual([-1, -1]);
+    await page.keyboard.press("Alt+g");
+
+    // Tabbing on from the last toolbar button passes the map without adding.
+    const count = await ideaCount();
+    await page.getByRole("button", { name: "More actions" }).focus();
+    await page.keyboard.press("Tab");
+    expect(await activeLabel()).toBe("Zoom out");
+    await page.keyboard.press("Tab");
+    expect(await ideaCount()).toBe(count);
+
+    await page.locator('[aria-label="Mind map canvas"]').focus();
+    await page.keyboard.press("Escape");
+    expect(await page.locator("[data-selected=true]").count()).toBe(0);
+    await page.keyboard.press("ArrowDown");
+    expect(await selected()).toBe(root);
+    expect(await ideaCount()).toBe(count);
+  });
+
+  test("focusing an idea outside the view cannot scroll the canvas", async () => {
+    const root = await rootId();
+    // Past the right and bottom edges, where a scroll container would follow.
+    await page.mouse.move(200, 200);
+    await page.mouse.wheel(-900, -700);
+    expect(await insideViewport(root)).toBe(false);
+    expect((await box(root)).x).toBeGreaterThan(VIEWPORT.width);
+    expect(
+      await node(root)
+        .getByRole("button")
+        .evaluate((button) => {
+          button.focus();
+          const canvas = button.closest(
+            '[aria-label="Mind map canvas"]',
+          ) as HTMLElement;
+          canvas.scrollTop = 80;
+          return [canvas.scrollLeft, canvas.scrollTop];
+        }),
+    ).toEqual([0, 0]);
+  });
+});
+
+describe("menus and popovers", () => {
+  const CANVAS = "Mind map canvas";
+  const projectMenu = () => page.getByRole("menu", { name: "Project menu" });
+  const ideaMenu = () => page.locator("[data-context-menu]");
+  const colors = () =>
+    page.getByRole("region", { name: "Selected node color controls" });
+  const button = (name: string) =>
+    page.getByRole("button", { name, exact: true });
+  const isActive = (element: Element) => element === document.activeElement;
+  // In the padding beside a menu's items, clear of its rounded corners.
+  const padding = { position: { x: 2, y: 40 } };
+
+  test("More actions toggles its menu, and disclosure buttons report their state", async () => {
+    const root = await rootId();
+    const more = button("More actions");
+    expect(await more.getAttribute("aria-expanded")).toBe("false");
+    await more.click();
+    await ideaMenu().waitFor();
+    expect(await more.getAttribute("aria-expanded")).toBe("true");
+    await more.click();
+    await ideaMenu().waitFor({ state: "detached" });
+    expect(await more.getAttribute("aria-expanded")).toBe("false");
+    expect(await activeLabel()).toBe(CANVAS);
+
+    // A right-click menu is not the button's, and Esc returns to the map.
+    await node(root).click({ button: "right" });
+    await ideaMenu().waitFor();
+    expect(await more.getAttribute("aria-expanded")).toBe("false");
+    await page.keyboard.press("Escape");
+    await ideaMenu().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe(CANVAS);
+    expect(await selected()).toBe(root);
+
+    for (const name of ["Outline", "Notes"]) {
+      expect(await button(name).getAttribute("aria-expanded")).toBe("false");
+      await button(name).click();
+      expect(await button(name).getAttribute("aria-expanded")).toBe("true");
+      expect(await button(name).getAttribute("aria-pressed")).toBeNull();
+    }
+  });
+
+  test("a press on a layer's plain content keeps it open and keeps its keys", async () => {
+    const root = await rootId();
+    await button("Project menu").click();
+    await projectMenu().click(padding);
+    expect(await projectMenu().isVisible()).toBe(true);
+    await page.keyboard.press("ArrowUp");
+    expect(
+      await projectMenu().getByRole("menuitem").last().evaluate(isActive),
+    ).toBe(true);
+    await projectMenu().click(padding);
+    await page.keyboard.press("ArrowDown");
+    expect(
+      await projectMenu().getByRole("menuitem").first().evaluate(isActive),
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await projectMenu().waitFor({ state: "detached" });
+
+    await button("More actions").click();
+    await ideaMenu().click(padding);
+    expect(await ideaMenu().isVisible()).toBe(true);
+    await page.keyboard.press("ArrowDown");
+    expect(
+      await ideaMenu().getByRole("menuitem").first().evaluate(isActive),
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await ideaMenu().waitFor({ state: "detached" });
+
+    await button("Color").click();
+    await colors()
+      .getByText(/^Changes only/)
+      .click();
+    expect(await colors().isVisible()).toBe(true);
+    await page.keyboard.press("Escape");
+    await colors().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("Color");
+    expect(await selected()).toBe(root);
+  });
+
+  test("Escape closes a layer from its trigger or the map and returns focus", async () => {
+    const root = await rootId();
+    await button("Project menu").click();
+    await projectMenu().getByRole("menuitem").first().waitFor();
+    await page.keyboard.press("Shift+Tab");
+    expect(await button("Project menu").evaluate(isActive)).toBe(true);
+    await page.keyboard.press("Escape");
+    await projectMenu().waitFor({ state: "detached" });
+    expect(await button("Project menu").evaluate(isActive)).toBe(true);
+    expect(await selected()).toBe(root);
+
+    await button("More actions").focus();
+    await page.keyboard.press("Enter");
+    await ideaMenu().waitFor();
+    await page.keyboard.press("Escape");
+    await ideaMenu().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("More actions");
+
+    await button("Color").click();
+    await colors().waitFor();
+    await page.locator(`[aria-label="${CANVAS}"]`).focus();
+    await page.keyboard.press("Escape");
+    await colors().waitFor({ state: "detached" });
+    expect(await selected()).toBe(root);
+  });
+
+  test("tabbing out closes a menu or popover", async () => {
+    await button("More actions").focus();
+    await page.keyboard.press("Enter");
+    await ideaMenu().waitFor();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Tab");
+    await ideaMenu().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("Zoom out");
+
+    await button("Color").click();
+    await colors().getByRole("button").last().focus();
+    await page.keyboard.press("Tab");
+    await colors().waitFor({ state: "detached" });
+
+    // The trigger belongs to the menu; the field before it does not.
+    await button("Project menu").click();
+    await projectMenu().getByRole("menuitem").first().waitFor();
+    await page.keyboard.press("Shift+Tab");
+    expect(await projectMenu().isVisible()).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    await projectMenu().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("Project name");
+  });
+
+  test("the open project menu keeps map shortcuts from acting behind it", async () => {
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("Step");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    expect(await page.locator("[data-selected=true]").count()).toBe(0);
+    const ideas = (await call("ids")).length;
+    const search = page.getByRole("searchbox", { name: "Search ideas" });
+
+    await button("Project menu").click();
+    await projectMenu().getByRole("menuitem").first().waitFor();
+    await page.keyboard.press("/");
+    await page.keyboard.press("?");
+    await page.keyboard.press("ControlOrMeta+z");
+    await settle();
+    expect(await search.count()).toBe(0);
+    expect(await page.locator("dialog[open]").count()).toBe(0);
+    expect((await call("ids")).length).toBe(ideas);
+    expect(await projectMenu().isVisible()).toBe(true);
+
+    await page.keyboard.press("Escape");
+    await projectMenu().waitFor({ state: "detached" });
+    await page.keyboard.press("/");
+    await search.waitFor();
+  });
+
+  test("the project menu fits a short window, and Enter opens the filtered map", async () => {
+    await page.setViewportSize({ width: 1280, height: 640 });
+    const name = page.getByRole("textbox", { name: "Project name" });
+    await name.fill("Zebra plan");
+    await name.press("Enter");
+    expect(await activeLabel()).toBe(CANVAS);
+    const zebra = await call("projectId");
+    for (let count = 0; count < 7; count++) {
+      const previous = await call("projectId");
+      await button("Project menu").click();
+      await page.getByRole("menuitem", { name: "New map" }).click();
+      await page.waitForFunction(
+        (id) => window.harness.projectId() !== id,
+        previous,
+      );
+    }
+
+    await button("Project menu").click();
+    await page.getByRole("menuitem", { name: "Open map…" }).click();
+    const filter = page.getByRole("searchbox", { name: "Filter maps" });
+    await filter.waitFor();
+    const bounds = await projectMenu().boundingBox();
+    expect((bounds?.y ?? 0) + (bounds?.height ?? 640)).toBeLessThan(640);
+    // The menu scrolls as a whole: the list and dividers keep their size.
+    expect(
+      await page
+        .locator("#saved-projects")
+        .evaluate((list) => list.clientHeight),
+    ).toBe(240);
+    expect(
+      await projectMenu()
+        .locator(".menu-divider")
+        .evaluateAll((lines) => lines.map((line) => line.clientHeight)),
+    ).toEqual([1, 1]);
+    await page.keyboard.press("End");
+    const last = projectMenu().getByRole("menuitem").last();
+    expect(await last.evaluate(isActive)).toBe(true);
+    const item = await last.boundingBox();
+    expect((item?.y ?? 0) + (item?.height ?? 640)).toBeLessThan(640);
+
+    // The filter keeps the arrow keys, not Mod+S or F6.
+    await filter.focus();
+    await page.keyboard.press("ArrowDown");
+    expect(await activeLabel()).toBe("Filter maps");
+    expect(await pressLayoutKey("s", "KeyS", { ctrlKey: true })).toBe(false);
+    await page.keyboard.press("F6");
+    await projectMenu().waitFor({ state: "detached" });
+    expect(await activeLabel()).not.toBe("Filter maps");
+
+    // In a small window the menu reaches the selection toolbar and opens
+    // over it.
+    await page.setViewportSize({ width: 800, height: 600 });
+    await node(await rootId()).click();
+    await button("Project menu").click();
+    await page.getByRole("menuitem", { name: "Open map…" }).click();
+    await filter.waitFor();
+    await settle();
+    expect(
+      await projectMenu().evaluate((menu) => {
+        const bar = document.querySelector('[aria-label="Selected idea"]');
+        if (!bar) throw new Error("The selection toolbar is not shown.");
+        const from = menu.getBoundingClientRect();
+        const to = bar.getBoundingClientRect();
+        const x = Math.max(from.left, to.left) + 8;
+        const y = Math.max(from.top, to.top) + 8;
+        return {
+          overlap: x < from.right && y < from.bottom,
+          onTop: menu.contains(document.elementFromPoint(x, y)),
+        };
+      }),
+    ).toEqual({ overlap: true, onTop: true });
+
+    // Enter opens nothing from the unfiltered list, then the first match.
+    await filter.press("Enter");
+    expect(await projectMenu().isVisible()).toBe(true);
+    await filter.fill("zeb");
+    await filter.press("Enter");
+    await projectMenu().waitFor({ state: "detached" });
+    await page.waitForFunction(
+      (id) => window.harness.projectId() === id,
+      zebra,
+    );
+  });
+
+  test("view buttons and menu items hand the keyboard back to the map", async () => {
+    const root = await rootId();
+    const a = await addChild(root, "Alpha");
+    await addChild(a, "Alpha one");
+    await node(a).click();
+
+    await button("More actions").click();
+    await page.getByRole("menuitem", { name: /^Fit selection/ }).click();
+    expect(await activeLabel()).toBe(CANVAS);
+
+    for (const name of ["Zoom in", "Zoom to 100%", "Zoom out", "Fit map"]) {
+      await button(name).click();
+      expect(await activeLabel()).toBe(CANVAS);
+    }
+    // From the keyboard the button keeps focus, so Enter can repeat it.
+    await button("Zoom in").focus();
+    await page.keyboard.press("Enter");
+    expect(await activeLabel()).toBe("Zoom in");
+    await button("Outline").click();
+    expect(await activeLabel()).toBe(CANVAS);
+    await button("Outline").click();
+    await button("Color").click();
+    await colors().waitFor();
+    await button("Color").click();
+    await colors().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe(CANVAS);
+
+    await button("Focus on this branch").click();
+    const breadcrumbs = page.getByRole("navigation", { name: "Branch focus" });
+    await breadcrumbs.waitFor();
+    expect(await activeLabel()).toBe(CANVAS);
+    await page.keyboard.press("ArrowRight");
+    expect(await selected()).not.toBe(a);
+    // An ancestor crumb becomes plain text once it is the focused branch.
+    await breadcrumbs.getByRole("button").nth(1).click();
+    await node(root).waitFor();
+    expect(await activeLabel()).toBe(CANVAS);
+
+    await page.keyboard.press("ControlOrMeta+f");
+    await page.getByRole("searchbox", { name: "Search ideas" }).fill("one");
+    await page.keyboard.press("Enter");
+    await button("Stay here").click();
+    expect(await activeLabel()).toBe(CANVAS);
+  });
+
+  test("the color popover opens over the notice in its slot", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Short-lived");
+    await node(child).click();
+    await page.keyboard.press("Delete");
+    await notice("Deleted “Short-lived”").waitFor();
+    expect(await selected()).toBe(root);
+    await button("Color").click();
+    expect(
+      await colors()
+        .getByText(/^Changes only/)
+        .evaluate((hint) => {
+          const box = hint.getBoundingClientRect();
+          return hint.contains(
+            document.elementFromPoint(
+              box.x + box.width / 2,
+              box.y + box.height / 2,
+            ),
+          );
+        }),
+    ).toBe(true);
+    // And hides it: the popover is not glass like the toolbar it opens from.
+    expect(
+      await colors().evaluate(
+        (popover) => getComputedStyle(popover).backgroundColor,
+      ),
+    ).toBe("rgb(255, 255, 255)");
+  });
+});
+
+describe("islands and stacking", () => {
+  const region = (name: string) => page.getByRole("region", { name });
+  const outline = () => page.getByRole("complementary", { name: "Outline" });
+  const notes = () => page.getByRole("complementary", { name: "Notes" });
+  const notesButton = () =>
+    region("Selected idea").getByRole("button", { name: "Notes" });
+  async function edges(target: ReturnType<typeof region>) {
+    await settle();
+    const bounds = await target.boundingBox();
+    if (!bounds) throw new Error("The island is not visible.");
+    return {
+      left: bounds.x,
+      right: bounds.x + bounds.width,
+      top: bounds.y,
+      bottom: bounds.y + bounds.height,
+      center: bounds.x + bounds.width / 2,
+    };
+  }
+  // A chain of ideas, so the last one has a three-level path above it.
+  async function chain() {
+    const root = await rootId();
+    const a = await addChild(root, "Alpha with a long name");
+    const b = await addChild(a, "Beta with a long name");
+    const c = await addChild(b, "Gamma with a long name");
+    return { root, a, b, c, leaf: await addChild(c, "Needle") };
+  }
+
+  test("the selection toolbar and its notice keep clear of the zoom island in a small window", async () => {
+    const root = await rootId();
+    await addChild(root, "Kept");
+    const child = await addChild(root, "Short-lived");
+    await node(child).click();
+    await page.keyboard.press("Delete");
+    await notice("Deleted “Short-lived”").waitFor();
+    // The central idea has children, so its toolbar is at its widest.
+    await node(root).click();
+    const toolbar = region("Selected idea");
+    const more = toolbar.getByRole("button", { name: "More actions" });
+    for (const width of [660, 800]) {
+      await page.setViewportSize({ width, height: 600 });
+      await more.waitFor();
+      const bar = await edges(toolbar);
+      expect(bar.right).toBeLessThan(
+        (await edges(region("View and help"))).left,
+      );
+      expect(bar.left).toBeGreaterThanOrEqual(0);
+      expect(
+        Math.abs((await edges(page.locator(".notice"))).center - bar.center),
+      ).toBeLessThan(1);
+      // Nothing lies over the last button.
+      await more.click({ trial: true });
+    }
+    await page.setViewportSize({ width: 1024, height: 700 });
+    await settle();
+    expect(Math.abs((await edges(toolbar)).center - 512)).toBeLessThan(1);
+  });
+
+  test("the top bars stack in the strip between the open panels", async () => {
+    await page.setViewportSize({ width: 1024, height: 700 });
+    const { c } = await chain();
+    await page.keyboard.press("Alt+o");
+    await page.getByRole("button", { name: "Fit map" }).click();
+    await node(c).click();
+    await page.keyboard.press("Alt+f");
+    await notesButton().click();
+    const crumbs = page.getByRole("navigation", { name: "Branch focus" });
+    const between = async (bar: ReturnType<typeof region>) => {
+      const bounds = await edges(bar);
+      expect(bounds.left).toBeGreaterThan((await edges(outline())).right);
+      expect(bounds.right).toBeLessThan((await edges(notes())).left);
+      return bounds;
+    };
+    await between(crumbs);
+    // The panels' own controls stay in reach.
+    await page.getByRole("button", { name: "Close notes" }).click({
+      trial: true,
+    });
+    await page.getByRole("button", { name: "Close outline" }).click({
+      trial: true,
+    });
+
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const field = page.getByRole("searchbox", { name: "Search ideas" });
+    await field.fill("needle");
+    // Search steps aside for the notes it would cover.
+    expect(
+      (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
+    ).toBeLessThan((await edges(notes())).left);
+    await field.press("Enter");
+    const back = await between(
+      page.getByRole("navigation", { name: "Return from search" }),
+    );
+    expect(back.top).toBeGreaterThan((await between(crumbs)).bottom);
+
+    // With less room the steps above the branch go, then the label of the way
+    // out: the focused branch is never clipped away.
+    const place = crumbs.locator('[aria-current="location"]');
+    for (const [width, height, steps] of [
+      [1024, 700, 0],
+      [800, 600, 0],
+      [1440, 900, 3],
+    ]) {
+      await page.setViewportSize({ width, height });
+      const bar = await between(crumbs);
+      const here = await edges(place);
+      expect(here.right).toBeLessThanOrEqual(bar.right);
+      expect(here.right - here.left).toBeGreaterThan(60);
+      // "Whole map", then a button for each step above the focused branch.
+      expect(await crumbs.getByRole("button").count()).toBe(1 + steps);
+      await crumbs
+        .getByRole("button", { name: "Whole map" })
+        .click({ trial: true });
+    }
+  });
+
+  test("the outline starts under the storage island", async () => {
+    await page.getByRole("button", { name: "Project menu" }).click();
+    await page.getByRole("menuitem", { name: "Project preferences…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Project preferences" });
+    await dialog.getByRole("switch", { name: "Save locally" }).click();
+    await dialog.getByText("This map lives only in memory.").waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    const island = page.locator(".map-toolbar", {
+      hasText: "In memory only",
+    });
+    await island.waitFor();
+    await page.keyboard.press("Alt+o");
+    expect((await edges(outline())).top).toBeGreaterThan(
+      (await edges(island)).bottom,
+    );
+    await page.getByRole("button", { name: "Close outline" }).click();
+    await outline().waitFor({ state: "hidden" });
+  });
+
+  test("a panel that opens over the selected idea moves the map aside", async () => {
+    const { root, leaf } = await chain();
+    await page.getByRole("button", { name: "Fit map" }).click();
+    await node(leaf).click();
+    const before = await box(leaf);
+    await notesButton().click();
+    const panel = await edges(notes());
+    expect(before.x + before.width).toBeGreaterThan(panel.left);
+    const after = await box(leaf);
+    expect(after.x + after.width).toBeLessThan(panel.left);
+    await page.getByRole("button", { name: "Close notes" }).click();
+
+    await page.getByRole("button", { name: "Fit map" }).click();
+    await node(root).click();
+    expect((await box(root)).x).toBeLessThan(300);
+    await page.keyboard.press("Alt+o");
+    expect((await box(root)).x).toBeGreaterThan((await edges(outline())).right);
+  });
+});
+
+describe("buttons and controls", () => {
+  const ACCENT = "rgb(107, 61, 245)";
+  const style = (target: Locator, property: string) =>
+    target.evaluate(
+      (element, property) =>
+        getComputedStyle(element).getPropertyValue(property),
+      property,
+    );
+  // Hover and press colors ease in, so they are waited for.
+  async function background(target: Locator, color: string) {
+    const element = await target.elementHandle();
+    await page.waitForFunction(
+      ([element, color]) =>
+        getComputedStyle(element as Element).backgroundColor === color,
+      [element, color] as const,
+    );
+  }
+  const height = async (target: Locator) =>
+    (await target.boundingBox())?.height;
+
+  test("a toggle keeps its on color under the pointer, and a press shows", async () => {
+    const outline = page.getByRole("button", { name: "Outline", exact: true });
+    await outline.click();
+    // The pointer is still on the button.
+    await background(outline, "rgb(239, 234, 255)");
+    const zoom = page.getByRole("button", { name: "Zoom to 100%" });
+    await zoom.hover();
+    await page.mouse.down();
+    await background(zoom, "rgb(232, 234, 239)");
+    await page.mouse.up();
+    // The sign-in island is a primary button dressed as an island.
+    const signIn = page
+      .getByRole("region", { name: "Account" })
+      .getByRole("button", { name: "Sign in" });
+    await signIn.hover();
+    await background(signIn, "rgb(255, 255, 255)");
+    await page.mouse.down();
+    await background(signIn, "rgb(232, 234, 239)");
+    // Off the button before letting go, so the press does not sign in.
+    await page.mouse.move(600, 400);
+    await page.mouse.up();
+  });
+
+  test("toolbar rows are 44px with 36px controls, and disabled labels stay readable", async () => {
+    const root = await rootId();
+    const a = await addChild(root, "Alpha");
+    await addChild(a, "Needle");
+    await node(a).click();
+    await page.keyboard.press("Alt+f");
+    const crumbs = page.getByRole("navigation", { name: "Branch focus" });
+    await crumbs.waitFor();
+    expect(await height(crumbs)).toBe(44);
+    expect(
+      await height(crumbs.getByRole("button", { name: "Whole map" })),
+    ).toBe(36);
+    // The focused idea has no sibling to add.
+    const sibling = page
+      .getByRole("region", { name: "Selected idea" })
+      .getByRole("button", { name: /Sibling/ });
+    expect(await sibling.isDisabled()).toBe(true);
+    expect(await style(sibling, "color")).toBe("rgb(154, 162, 174)");
+
+    await page.keyboard.press("ControlOrMeta+f");
+    const field = page.getByRole("searchbox", { name: "Search ideas" });
+    await field.fill("needle");
+    await field.press("Enter");
+    const back = page.getByRole("navigation", { name: "Return from search" });
+    await back.waitFor();
+    expect(await height(back)).toBe(44);
+    expect(await height(back.getByRole("button", { name: "Stay here" }))).toBe(
+      36,
+    );
+    expect(
+      await height(page.getByRole("button", { name: "Zoom to 100%" })),
+    ).toBe(36);
+  });
+
+  test("focus rings follow the keyboard and sit on the card or island around a field", async () => {
+    await node(await rootId()).click();
+    await page.getByRole("button", { name: "Color" }).click();
+    const scopes = page.locator(".color-scope");
+    await scopes.nth(1).click();
+    expect(await style(scopes.nth(1), "outline-style")).toBe("none");
+    await page.keyboard.press("ArrowLeft");
+    expect(await style(scopes.nth(0), "outline-color")).toBe(ACCENT);
+    await page.keyboard.press("Escape");
+
+    await page.keyboard.press("ControlOrMeta+f");
+    const search = page.getByRole("search", { name: "Search ideas" });
+    await search.waitFor();
+    expect(await style(search, "outline-style")).toBe("solid");
+    expect(await style(search, "outline-color")).toBe(ACCENT);
+    await search.getByRole("button", { name: "Close search" }).focus();
+    expect(await style(search, "outline-style")).toBe("none");
+    await page.keyboard.press("Escape");
+
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("textbox", { name: "Idea notes" });
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
+    );
+    expect(await style(notes, "box-shadow")).toContain(
+      `${ACCENT} 0px 0px 0px 2px inset`,
+    );
+    await page.keyboard.press("Escape");
+
+    await page
+      .getByRole("button", { name: "Shortcuts and navigation" })
+      .click();
+    const dialog = page.getByRole("dialog", {
+      name: "Shortcuts and navigation",
+    });
+    await dialog.getByRole("radio").first().focus();
+    await page.keyboard.press("ArrowDown");
+    const card = dialog.locator(".choice-card:has(input:checked)");
+    expect(await style(card, "outline-color")).toBe(ACCENT);
+    expect(await style(card.locator("input"), "outline-style")).toBe("none");
+  });
+
+  test("a saving switch keeps the keyboard while it works", async () => {
+    await page.getByRole("button", { name: "Project menu" }).click();
+    await page.getByRole("menuitem", { name: "Project preferences…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Project preferences" });
+    const local = (checked: boolean) =>
+      dialog.getByRole("switch", {
+        name: "Save locally",
+        exact: true,
+        checked,
+      });
+    await local(true).focus();
+    await page.keyboard.press("Space");
+    await local(false).waitFor();
+    await dialog.getByText("This map lives only in memory.").waitFor();
+    expect(
+      await page.evaluate(() =>
+        document.activeElement?.getAttribute("aria-labelledby"),
+      ),
+    ).toBe("saving-local");
+    // A secondary action on the dialog's surface is an outlined button, 36px
+    // tall whatever the line height of the text around it.
+    const exportBackup = dialog.getByRole("button", { name: "Export backup" });
+    expect(await style(exportBackup, "border-top-width")).toBe("1px");
+    expect(Math.round((await height(exportBackup)) ?? 0)).toBe(36);
+    expect(
+      Math.round(
+        (await height(dialog.getByRole("button", { name: "Sign in" }))) ?? 0,
+      ),
+    ).toBe(36);
+    // Once the change is done, the same key turns it back on.
+    await dialog
+      .locator('[role="switch"][data-busy]')
+      .first()
+      .waitFor({ state: "detached" });
+    await page.keyboard.press("Space");
+    await local(true).waitFor();
+  });
+});
+
+describe("wording", () => {
+  const button = (name: string) =>
+    page.getByRole("button", { name, exact: true });
+  const ideaMenu = () => page.getByRole("menu", { name: "Idea actions" });
+
+  test("the Enter hint on Sibling shows only where Enter adds a sibling", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    // Enter on a central idea adds a child, so neither control names the key.
+    await node(root).click();
+    expect(await button("Sibling").getAttribute("title")).toBe(
+      "Add a sibling idea",
+    );
+    await node(root).click({ button: "right" });
+    expect(
+      await ideaMenu()
+        .getByRole("menuitem", { name: /^Add sibling/ })
+        .innerText(),
+    ).toBe("Add sibling idea");
+    await page.keyboard.press("Escape");
+
+    await node(child).click();
+    expect(await button("Sibling").getAttribute("title")).toBe(
+      "Add a sibling idea (Enter)",
+    );
+    await node(child).click({ button: "right" });
+    expect(
+      await ideaMenu()
+        .getByRole("menuitem", { name: /^Add sibling/ })
+        .innerText(),
+    ).toMatch(/^Add sibling idea\s+Enter$/);
+  });
+
+  test("menus and the color popover say idea, and tooltips start with the button's name", async () => {
+    const root = await rootId();
+    // An edit brings Undo and Redo into the toolbar.
+    await node(root).click();
+    await page.keyboard.press("Tab");
+    await editor().press("Enter");
+    await node(root).click({ button: "right" });
+    await ideaMenu()
+      .getByRole("menuitem", { name: /^Add child idea/ })
+      .waitFor();
+    await page.keyboard.press("Escape");
+    const bounds = await box(root);
+    await page.mouse.click(bounds.x + bounds.width + 200, bounds.y + 200, {
+      button: "right",
+    });
+    await page
+      .getByRole("menu", { name: "Canvas actions" })
+      .getByRole("menuitem", { name: "New central idea" })
+      .waitFor();
+    await page.keyboard.press("Escape");
+
+    await node(root).click();
+    await button("Color").click();
+    const colors = page.getByRole("region", {
+      name: "Selected node color controls",
+    });
+    await colors.getByText("This idea", { exact: true }).waitFor();
+    await colors.getByText("Changes only the selected idea.").waitFor();
+    await page.keyboard.press("Escape");
+
+    // An icon button's tooltip is its name, then the key that runs it.
+    await button("Search").click();
+    const tooltips = await page
+      .locator("[data-toolbar] .icon-button[title]")
+      .evaluateAll((buttons) =>
+        buttons.map((button) => [
+          button.getAttribute("aria-label") ?? "",
+          button.getAttribute("title") ?? "",
+        ]),
+      );
+    const names = tooltips.map(([name]) => name);
+    for (const name of [
+      "Close search",
+      "Focus on this branch",
+      "Shortcuts and navigation",
+    ])
+      expect(names).toContain(name);
+    expect(
+      tooltips.filter(
+        ([name, title]) => title !== name && !title.startsWith(`${name} (`),
+      ),
+    ).toEqual([]);
+    // Shortcut hints use one style per platform, never a mix of both.
+    const redo = (await button("Redo").getAttribute("title")) ?? "";
+    expect(redo).toMatch(/^Redo \((⌘⇧|Ctrl\+Shift\+)Z\)$/);
+    // "?" types into a selected idea, and the tooltip says so.
+    expect(await button("Shortcuts and navigation").getAttribute("title")).toBe(
+      "Shortcuts and navigation (? with nothing selected)",
+    );
+  });
+
+  test("a confirmation notice has no period, and a collapsed badge is named by what it shows", async () => {
+    const root = await rootId();
+    await addChild(root, "Child");
+    await node(root).click();
+    await page.getByRole("button", { name: "Project menu" }).click();
+    await page.getByRole("menuitem", { name: "Save now" }).click();
+    await page
+      .locator(".notice")
+      .getByText("Saved locally", { exact: true })
+      .waitFor();
+    await button("Collapse children").click();
+    const badge = page.getByRole("button", { name: "Expand 1 idea" });
+    expect(await badge.innerText()).toBe("+1 idea");
+  });
+});
+
 describe("phone layout", () => {
   test("one button opens a panel holding the map controls", async () => {
     // Short enough that the opened sections overflow the panel.
@@ -848,7 +1842,7 @@ describe("phone layout", () => {
     await panel.getByRole("button", { name: "Export outline (.md)" }).waitFor();
     await panel.getByRole("button", { name: "Open map…" }).click();
     // The panel scrolls as a whole, so a long menu must not squash this list.
-    const saved = await panel.getByLabel("Available projects").boundingBox();
+    const saved = await panel.getByLabel("Saved maps").boundingBox();
     expect(saved?.height).toBeGreaterThan(24);
     await panel.getByRole("button", { name: "Fit map" }).click();
     await panel.waitFor({ state: "hidden" });

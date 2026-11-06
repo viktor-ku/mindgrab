@@ -67,6 +67,8 @@ const [consentOpen, setConsentOpen] = createSignal(
 export { consent, consentOpen };
 // Reopens the choice so it can be withdrawn as easily as it was given.
 export const reviewConsent = () => analyticsEnabled && setConsentOpen(true);
+// Puts a reviewed choice away unchanged.
+export const closeConsent = () => setConsentOpen(false);
 
 export interface AnalyticsUser {
   id: number;

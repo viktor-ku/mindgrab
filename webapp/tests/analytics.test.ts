@@ -103,3 +103,12 @@ test("declining keeps capturing cookieless and never identifies", () => {
   expect(names()).toEqual(["opt_out", "capture"]);
   expect(document.cookie).toContain("mindgrab_analytics_consent=denied");
 });
+
+test("a choice reopened for review can be put away unchanged", () => {
+  analytics.reviewConsent();
+  expect(analytics.consentOpen()).toBe(true);
+  analytics.closeConsent();
+  expect(analytics.consentOpen()).toBe(false);
+  expect(analytics.consent()).toBe("denied");
+  expect(calls).toEqual([]);
+});

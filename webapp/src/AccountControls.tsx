@@ -1,8 +1,8 @@
-import { makeEventListener } from "@solid-primitives/event-listener";
 import { createMutation } from "@tanstack/solid-query";
 import { createSignal, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
 import type { SessionState } from "./auth-session";
+import { menuArrowKeys, transientLayer } from "./transient-layer";
 
 export function AccountControls(props: {
   state: SessionState;
@@ -15,6 +15,8 @@ export function AccountControls(props: {
   // A message already on screen elsewhere, which this section need not repeat.
   shownElsewhere?: string;
   onAuthError?: () => void;
+  // Hands out the sign-in action, for a "Sign in" offered outside this section.
+  signInRef?: (signIn: () => void) => void;
 }) {
   const [authError, setAuthError] = createSignal("");
   const [menuOpen, setMenuOpen] = createSignal(false);
@@ -36,16 +38,10 @@ export function AccountControls(props: {
   const navigate = (action: "login" | "logout") => {
     if (!navigating()) navigation.mutate(action);
   };
+  props.signInRef?.(() => {
+    if (!props.claiming) navigate("login");
+  });
   onMount(() => {
-    // Menus close on any press outside them, like native menus.
-    makeEventListener(window, "pointerdown", (e) => {
-      if (
-        menuOpen() &&
-        e.target instanceof Element &&
-        !e.target.closest('[aria-label="Account"]')
-      )
-        setMenuOpen(false);
-    });
     const url = new URL(window.location.href);
     if (!url.searchParams.has("auth_error")) return;
     setAuthError(
@@ -85,9 +81,10 @@ export function AccountControls(props: {
       data-no-pan
       data-toolbar
       class={
+        // z-10 lifts the island over the search island, where its menu opens.
         props.inline
           ? "panel-account flex flex-col gap-1 text-sm"
-          : "pointer-events-auto relative flex max-w-72 flex-col gap-1 text-sm cursor-default"
+          : "pointer-events-auto relative z-10 flex max-w-72 flex-col gap-1 text-sm cursor-default"
       }
       classList={{ "map-toolbar": !bare() && !props.inline }}
       aria-label="Account"
@@ -125,7 +122,7 @@ export function AccountControls(props: {
                   <Show when={props.state.status === "authenticated"}>
                     <button
                       type="button"
-                      class="map-control text-xs"
+                      class="map-control"
                       disabled={navigating() || props.claiming}
                       onClick={() => navigate("logout")}
                     >
@@ -163,26 +160,19 @@ export function AccountControls(props: {
                 </button>
                 <Show when={menuOpen()}>
                   <div
+                    ref={(el) =>
+                      transientLayer(el, {
+                        trigger: () => menuButton,
+                        close: () => setMenuOpen(false),
+                      })
+                    }
                     role="menu"
                     aria-label="Account menu"
-                    class="map-toolbar menu-panel absolute top-full right-0 mt-2 w-60 cursor-default"
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setMenuOpen(false);
-                        menuButton?.focus();
-                      }
-                    }}
-                    onFocusOut={(e) => {
-                      // Tabbing out of the menu closes it, like a native menu.
-                      const next = e.relatedTarget;
-                      if (
-                        next instanceof Element &&
-                        !next.closest('[aria-label="Account"]')
-                      )
-                        setMenuOpen(false);
-                    }}
+                    class="map-toolbar menu-panel absolute top-full right-0 mt-2 w-60 cursor-default outline-none"
+                    // A backdrop blur stops at the island it sits in, so glass
+                    // here would show the search results it opens over.
+                    style={{ background: "var(--surface)" }}
+                    onKeyDown={menuArrowKeys}
                   >
                     <div class="px-2.5 py-1.5">{identity()}</div>
                     <div class="menu-divider" />
@@ -220,10 +210,10 @@ export function AccountControls(props: {
             type="button"
             class={
               props.inline
-                ? `primary-button ${props.state.user ? "shrink-0 px-3! py-1.5! text-xs!" : "w-full"}`
+                ? `primary-button ${props.state.user ? "compact shrink-0" : "w-full"}`
                 : bare()
                   ? "primary-button account-signin"
-                  : "primary-button px-3! py-1.5! text-xs!"
+                  : "primary-button compact"
             }
             disabled={navigating() || props.claiming}
             onClick={() => void navigate("login")}
@@ -235,7 +225,7 @@ export function AccountControls(props: {
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
         {accountMessage()}
       </p>
-      <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
+      <p role="alert" class="px-2 text-xs text-stone-600 empty:hidden">
         {props.claimMessage}
       </p>
       <Show
@@ -246,7 +236,8 @@ export function AccountControls(props: {
       >
         <button
           type="button"
-          class="map-control text-xs"
+          // Starts where the message above it starts.
+          class="map-control outlined mb-1 ml-2 self-start"
           onClick={props.onRetry}
         >
           Check account again

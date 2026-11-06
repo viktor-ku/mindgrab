@@ -314,7 +314,7 @@ type SaveFilePicker = (options: {
 
 const JSON_FILE_TYPE = [
   {
-    description: "Mindgrab project",
+    description: "Mindgrab backup",
     accept: { "application/json": [".mindgrab.json", ".json"] },
   },
 ];

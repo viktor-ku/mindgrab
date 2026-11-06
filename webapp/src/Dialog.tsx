@@ -39,9 +39,12 @@ export function Dialog(props: {
     >
       <header
         class={`flex items-center justify-between gap-4 border-b border-stone-100 ${
-          { center: "px-6 py-4", side: "pb-4", panel: "gap-1! border-b-0!" }[
-            props.variant
-          ]
+          {
+            center: "px-6 py-4",
+            // Bleeds through the drawer's padding so the divider spans it.
+            side: "-mx-7 -mt-7 px-7 py-4",
+            panel: "gap-1! border-b-0!",
+          }[props.variant]
         }`}
       >
         <Show
@@ -61,6 +64,7 @@ export function Dialog(props: {
           // raise the phone keyboard.
           autofocus={props.variant === "panel"}
           aria-label={props.closeLabel}
+          title={`${props.closeLabel} (Esc)`}
           onClick={props.onClose}
         >
           <CloseIcon />

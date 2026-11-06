@@ -14,7 +14,11 @@ import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import type { ProjectDocument } from "../webapp/src/project-document";
 import type { User } from "../webapp/src/auth-session";
-import { openProjectDocument } from "../webapp/src/project-document";
+import {
+  createChild,
+  createProjectDocument,
+  openProjectDocument,
+} from "../webapp/src/project-document";
 import type { AccountHarness } from "./accounts-harness";
 
 setDefaultTimeout(30_000);
@@ -53,6 +57,8 @@ class Backend {
   leaveCookieOnLogout = false;
   loginRequests = 0;
   logoutRequests = 0;
+  // What every share link answers: a project, or a failure status.
+  shared: { projectId: string; data: string } | number = 404;
   projects = new Map<
     string,
     { ownerId: number; doc: ProjectDocument; updatedAt?: string }
@@ -88,6 +94,19 @@ class Backend {
         status: 303,
         headers: { Location: harnessPath },
       });
+    }
+    if (url.pathname === "/api/getSharedProject") {
+      const shared = this.shared;
+      return typeof shared === "number"
+        ? error(shared, "unavailable")
+        : route.fulfill({
+            json: {
+              ...shared,
+              name: null,
+              revision: "1",
+              encoding: "loro-snapshot",
+            },
+          });
     }
     if (url.pathname === "/api/getMe") {
       this.meStarted = true;
@@ -290,7 +309,10 @@ async function rename(name: string) {
   await page.getByRole("textbox", { name: "Project name" }).fill(name);
   await page.getByRole("textbox", { name: "Project name" }).press("Enter");
   await projectMenu("Save now");
-  await page.getByText("Saved locally.", { exact: true }).waitFor();
+  await page
+    .locator(".notice")
+    .getByText("Saved locally", { exact: true })
+    .waitFor();
 }
 async function edit(text: string) {
   await page.locator("[data-node-id]").first().dblclick();
@@ -301,7 +323,7 @@ async function refreshAccount() {
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
 }
 const claim = () =>
-  page.getByRole("button", { name: "Add anonymous projects to this account" });
+  page.getByRole("button", { name: "Add maps to this account" });
 async function cloudSaved() {
   await page.getByText(/^Saved to cloud/).waitFor();
 }
@@ -314,7 +336,11 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
   await claim().waitFor();
   backend.lostRegistration = true;
   await claim().click();
-  await page.getByText(/Could not finish adding anonymous projects/).waitFor();
+  // A failure interrupts a screen reader; it does not wait for a pause.
+  await page
+    .getByRole("alert")
+    .filter({ hasText: /Could not finish adding your maps/ })
+    .waitFor();
   const marker = (await call("catalog", "anonymous", true)).find(
     (entry) => entry.id === id,
   )?.claim;
@@ -330,7 +356,7 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
   await Promise.all([
     claim().click(),
     concurrent
-      .getByRole("button", { name: "Add anonymous projects to this account" })
+      .getByRole("button", { name: "Add maps to this account" })
       .click(),
   ]);
   await page.getByRole("textbox", { name: "Project name" }).waitFor();
@@ -400,6 +426,29 @@ test("signing in from fresh browsers opens the latest cloud map instead of addin
     expect(accountMaps()).toHaveLength(2);
     expect(backend.registrations).toHaveLength(registrations);
   }
+});
+
+test("the claims banner keeps between the open panels in a small window", async () => {
+  await rename("Made before signing in");
+  await login();
+  await claim().waitFor();
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.keyboard.press("Alt+o");
+  await page.keyboard.press("Alt+n");
+  const edges = async (name: string, role: "region" | "complementary") => {
+    const box = await page.getByRole(role, { name }).boundingBox();
+    if (!box) throw new Error(`${name} is not visible.`);
+    return { left: box.x, right: box.x + box.width };
+  };
+  const banner = await edges("Maps from before sign-in", "region");
+  expect(banner.left).toBeGreaterThan(
+    (await edges("Outline", "complementary")).right,
+  );
+  expect(banner.right).toBeLessThan(
+    (await edges("Notes", "complementary")).left,
+  );
+  for (const name of ["Close outline", "Close notes", "Not now"])
+    await page.getByRole("button", { name }).click({ trial: true });
 });
 
 test("a UUID owned elsewhere is copied to a new UUID without merging unrelated content", async () => {
@@ -575,6 +624,10 @@ test("the account menu holds the name and sign out, and closes like a menu", asy
 
   await avatar.click();
   await menu.getByText(A.email, { exact: true }).waitFor();
+  // Opaque: it opens over the search results.
+  expect(
+    await menu.evaluate((el) => getComputedStyle(el).backgroundColor),
+  ).toBe("rgb(255, 255, 255)");
   await page.keyboard.press("Escape");
   await menu.waitFor({ state: "detached" });
   expect(await page.evaluate(() => document.activeElement?.tagName)).toBe(
@@ -584,6 +637,42 @@ test("the account menu holds the name and sign out, and closes like a menu", asy
   await avatar.click();
   await menu.waitFor();
   await page.mouse.click(640, 500);
+  await menu.waitFor({ state: "detached" });
+
+  // The open menu owns the keyboard: map shortcuts do not act behind it.
+  await page.keyboard.press("Escape");
+  expect(await page.locator("[data-selected=true]").count()).toBe(0);
+  await avatar.click();
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute("role") === "menuitem",
+  );
+  await page.keyboard.press("/");
+  await page.keyboard.press("?");
+  expect(await menu.isVisible()).toBe(true);
+  expect(await page.getByRole("searchbox").count()).toBe(0);
+  expect(await page.locator("dialog[open]").count()).toBe(0);
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+
+  // The menu opens over the search island, and a press on its text keeps it.
+  await page.keyboard.press("ControlOrMeta+f");
+  const search = page.getByRole("searchbox", { name: "Search ideas" });
+  await search.fill("no idea says this");
+  await avatar.click();
+  await menu.getByText(A.email, { exact: true }).click();
+  expect(await menu.isVisible()).toBe(true);
+  // Esc on the avatar closes the menu and nothing behind it.
+  await avatar.focus();
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  expect(await avatar.evaluate((el) => el === document.activeElement)).toBe(
+    true,
+  );
+  expect(await search.count()).toBe(1);
+  // Tabbing on from the last item closes it, like a native menu.
+  await avatar.click();
+  await page.getByRole("menuitem", { name: "Sign out" }).waitFor();
+  await page.keyboard.press("Tab");
   await menu.waitFor({ state: "detached" });
 });
 
@@ -626,7 +715,7 @@ test("on a phone the menu button shows a save failure and leads to its details",
   await menu.click();
   await page
     .getByRole("dialog", { name: "Project menu" })
-    .getByRole("button", { name: /Save failed/ })
+    .getByRole("button", { name: /Couldn’t save/ })
     .click();
   const details = page.getByRole("dialog", { name: "Couldn’t save" });
   await details.waitFor();
@@ -650,7 +739,7 @@ test("an aborted durable account hint prevents logout acknowledgement and can be
   const id = await call("id");
   await call("failAuthDatabase", true);
   await signOut();
-  await page.getByText(/Could not save your project before leaving/).waitFor();
+  await page.getByText(/Could not save your map before leaving/).waitFor();
   expect(backend.logoutRequests).toBe(0);
   expect(await call("id")).toBe(id);
   await page.getByText(A.name, { exact: true }).waitFor();
@@ -675,7 +764,7 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await dialog
     .getByRole("switch", { name: "Save locally", exact: true })
     .click();
-  await dialog.getByText("This project lives only in memory.").waitFor();
+  await dialog.getByText("This map lives only in memory.").waitFor();
   await page.waitForFunction(
     async (id) =>
       !(await indexedDB.databases()).some((db) =>
@@ -691,9 +780,21 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await edit("Secret work stays here");
   await refreshAccount();
   await projectMenu("Save now");
+  const localOff = page.getByText(
+    "Local saving is off. Export a backup to keep your work.",
+  );
+  await localOff.waitFor();
+  // A message that has been read can be put away; the standing warning stays.
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await localOff.waitFor({ state: "detached" });
   await page
-    .getByText("Local saving is off. Export a copy to keep your work.")
+    .getByText("In memory only · Export before closing this tab.")
     .waitFor();
+  expect(
+    await page.evaluate(() =>
+      document.activeElement?.getAttribute("aria-label"),
+    ),
+  ).toBe("Mind map canvas");
   expect(backend.uploads).toHaveLength(uploads);
   expect(backend.registrations).toHaveLength(registrations);
   expect(backend.projects.has(id)).toBe(false);
@@ -701,8 +802,71 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await page.waitForFunction((id) => window.accountHarness.id() !== id, id);
   expect(backend.registrations).toHaveLength(registrations);
   await page
-    .getByText("Memory only · Export before closing this tab.")
+    .getByText("In memory only · Export before closing this tab.")
     .waitFor();
+});
+
+test("signed-out Share and Project preferences start the normal sign-in", async () => {
+  await projectMenu("Share link…");
+  const share = page.getByRole("dialog", { name: "Share" });
+  await share.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await ready();
+  expect(backend.loginRequests).toBe(1);
+  expect(await share.isVisible()).toBe(false);
+
+  await signOut();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await ready();
+  await projectMenu("Project preferences…");
+  const preferences = page.getByRole("dialog", { name: "Project preferences" });
+  await preferences
+    .getByRole("button", { name: "Sign in", exact: true })
+    .click();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  expect(backend.loginRequests).toBe(2);
+});
+
+test("Share returns from Project preferences once cloud saving is on", async () => {
+  await login();
+  await cloudSaved();
+  await projectMenu("Project preferences…");
+  const preferences = page.getByRole("dialog", { name: "Project preferences" });
+  const cloud = preferences.getByRole("switch", {
+    name: "Save in Mindgrab Cloud",
+  });
+  const close = preferences.getByRole("button", {
+    name: "Close project preferences",
+  });
+  await cloud.click();
+  await page
+    .getByText("Saved locally · cloud saving off", { exact: true })
+    .waitFor();
+  await close.click();
+
+  await projectMenu("Share link…");
+  const share = page.getByRole("dialog", { name: "Share" });
+  // Closing the preferences without turning cloud saving on ends the errand.
+  await share.getByRole("button", { name: "Open project preferences" }).click();
+  await close.click();
+  await preferences.waitFor({ state: "hidden" });
+  expect(await share.isVisible()).toBe(false);
+
+  await projectMenu("Share link…");
+  await share.getByRole("button", { name: "Open project preferences" }).click();
+  await share.waitFor({ state: "hidden" });
+  await cloud.click();
+  await cloudSaved();
+  await close.click();
+  await share.waitFor();
+  expect(await preferences.isVisible()).toBe(false);
+  await share.getByRole("button", { name: "Close sharing" }).click();
+
+  // Opened from the menu, the preferences close back to the map.
+  await projectMenu("Project preferences…");
+  await close.click();
+  await preferences.waitFor({ state: "hidden" });
+  expect(await share.isVisible()).toBe(false);
 });
 
 test("cloud-only projects load after reload without leaving a local copy", async () => {
@@ -746,4 +910,130 @@ test("anonymous projects with cloud saving off are never offered for account upl
   expect(await claim().count()).toBe(0);
   const anonymous = await call("catalog", "anonymous");
   expect(anonymous.find((entry) => entry.id === id)?.saving?.cloud).toBe(false);
+});
+
+test("the shared view has editor-sized islands, plain tooltips and a retry that keeps the keyboard", async () => {
+  const doc = createProjectDocument(crypto.randomUUID(), "Shared", {
+    text: "Root",
+  });
+  createChild(doc, doc.view().roots[0], { text: "Child", note: "A note" });
+  backend.shared = { projectId: doc.id, data: base64(doc.snapshot()) };
+  doc.destroy();
+  // The live channel stays open and silent.
+  await page.routeWebSocket(/\/sync\/share\//, () => {});
+  await page.goto(new URL("/s/token", appUrl).href);
+  await page.waitForSelector("[data-node-id]");
+  const island = page.getByRole("region", { name: "Shared map" });
+  const own = page.getByRole("link", { name: "Make your own map" });
+  expect((await own.boundingBox())?.height).toBe(44);
+  expect((await own.boundingBox())?.y).toBe((await island.boundingBox())?.y);
+  expect((await island.boundingBox())?.height).toBe(44);
+
+  // The shared view has no shortcuts, so its tooltips name none.
+  for (const name of ["Zoom out", "Zoom to 100%", "Zoom in", "Fit map"])
+    expect(await page.getByRole("button", { name }).getAttribute("title")).toBe(
+      name,
+    );
+  expect(
+    await page.getByRole("img", { name: "Has notes" }).getAttribute("title"),
+  ).toBe("Has notes");
+  expect(await page.locator("[aria-keyshortcuts]").count()).toBe(0);
+  await page.getByRole("button", { name: "Outline", exact: true }).click();
+  expect(
+    await page
+      .getByRole("button", { name: "Close outline" })
+      .getAttribute("title"),
+  ).toBe("Close outline");
+  await page.getByRole("treeitem", { name: "Root" }).focus();
+  await page.keyboard.press("ArrowLeft");
+  expect(
+    await page
+      .getByRole("button", { name: "Expand 1 idea" })
+      .getAttribute("title"),
+  ).toBe("Expand children");
+
+  // A dead link is announced, as the loading text it replaces was.
+  backend.shared = 404;
+  await page.goto(new URL("/s/gone", appUrl).href);
+  expect(await page.getByRole("alert").innerText()).toContain(
+    "This link isn’t shared anymore",
+  );
+
+  // A page that only offers a retry shows it as the primary button.
+  backend.shared = 503;
+  await page.goto(new URL("/s/other", appUrl).href);
+  const retry = page.getByRole("button", { name: "Retry", exact: true });
+  await retry.waitFor();
+  // The failure replaces the announced loading text, so it is announced too.
+  expect(await page.getByRole("alert").innerText()).toBe(
+    "Couldn’t open this map\n\nCheck your connection and try again.",
+  );
+  expect((await island.boundingBox())?.height).toBe(44);
+  expect(
+    await retry.evaluate((button) => getComputedStyle(button).backgroundColor),
+  ).toBe("rgb(27, 31, 38)");
+  // The button turns itself off while it retries, so focus moves to the map.
+  await retry.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () =>
+      document.activeElement?.getAttribute("aria-label") === "Shared mind map",
+  );
+});
+
+test("an unknown address shows a page with a way back", async () => {
+  await page.goto(new URL("/no/such/page", appUrl).href);
+  await page.getByRole("heading", { name: "Page not found" }).waitFor();
+  await page.getByRole("link", { name: "Open Mindgrab" }).click();
+  await page.waitForURL(new URL("/", appUrl).href);
+  await ready();
+});
+
+test("checking the account again from the keyboard leaves focus on the map", async () => {
+  await login();
+  await cloudSaved();
+  backend.meStatus = 503;
+  await refreshAccount();
+  const again = page.getByRole("button", { name: "Check account again" });
+  await again.waitFor();
+  expect(
+    await again.evaluate((button) => getComputedStyle(button).borderTopWidth),
+  ).toBe("1px");
+  backend.meStatus = undefined;
+  await again.focus();
+  await page.keyboard.press("Enter");
+  await again.waitFor({ state: "detached" });
+  expect(
+    await page.evaluate(() =>
+      document.activeElement?.getAttribute("aria-label"),
+    ),
+  ).toBe("Mind map canvas");
+});
+
+test("retrying a failed storage change from the keyboard keeps focus in the dialog", async () => {
+  await projectMenu("Project preferences…");
+  const dialog = page.getByRole("dialog", { name: "Project preferences" });
+  const local = dialog.getByRole("switch", {
+    name: "Save locally",
+    exact: true,
+  });
+  await local.click();
+  await dialog.getByText("This map lives only in memory.").waitFor();
+  await dialog
+    .locator('[role="switch"][data-busy]')
+    .first()
+    .waitFor({ state: "detached" });
+  await call("failWrites", true);
+  await local.click();
+  const retry = dialog.getByRole("button", { name: "Retry", exact: true });
+  await retry.focus();
+  // The button disables itself and goes away while the retry runs.
+  await page.keyboard.press("Enter");
+  expect(await local.evaluate((el) => el === document.activeElement)).toBe(
+    true,
+  );
+  await dialog.getByRole("alert").waitFor();
+  expect(await local.evaluate((el) => el === document.activeElement)).toBe(
+    true,
+  );
 });

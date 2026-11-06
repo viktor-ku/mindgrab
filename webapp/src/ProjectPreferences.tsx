@@ -13,8 +13,11 @@ export function ProjectPreferences(props: {
   cloudStatus?: CloudStatus;
   signedIn: boolean;
   onExport: () => void;
+  // Starts sign-in; absent while signed in or while the account is checked.
+  onSignIn?: () => void;
   onReviewAnalytics?: () => void;
 }) {
+  let firstSwitch: HTMLButtonElement | undefined;
   return (
     <Dialog
       open={props.open}
@@ -24,9 +27,9 @@ export function ProjectPreferences(props: {
       variant="side"
     >
       <p class="my-6 text-sm leading-6 text-stone-600">
-        Choose where this project is saved. Turning a switch off deletes its
-        existing copy from that location. Your open project stays available in
-        this tab.
+        Choose where this map is saved. Turning a switch off deletes its
+        existing copy from that location. Your open map stays available in this
+        tab.
       </p>
       <div class="flex flex-col gap-6">
         <For
@@ -58,19 +61,24 @@ export function ProjectPreferences(props: {
                 </p>
               </div>
               <button
+                ref={(el) => {
+                  if (option.key === "local") firstSwitch = el;
+                }}
                 type="button"
                 role="switch"
                 aria-checked={props.saving[option.key]}
                 aria-labelledby={`saving-${option.key}`}
                 aria-describedby={`saving-${option.key}-description`}
                 class="saving-switch"
-                disabled={props.busy}
-                onClick={() =>
+                aria-disabled={props.busy}
+                data-busy={props.busy ? "" : undefined}
+                onClick={() => {
+                  if (props.busy) return;
                   props.onChange({
                     ...props.saving,
                     [option.key]: !props.saving[option.key],
-                  })
-                }
+                  });
+                }}
               >
                 <span>{props.saving[option.key] ? "On" : "Off"}</span>
               </button>
@@ -82,29 +90,38 @@ export function ProjectPreferences(props: {
         <p class="mt-5 text-sm text-stone-600">
           Sign in to save in Mindgrab Cloud.
         </p>
+        <Show when={props.onSignIn}>
+          <button
+            type="button"
+            class="map-control outlined mt-2"
+            onClick={() => props.onSignIn?.()}
+          >
+            Sign in
+          </button>
+        </Show>
       </Show>
       {/* Without an account cloud saving cannot run, so local off means memory only. */}
       <Show
         when={!props.saving.local && (!props.saving.cloud || !props.signedIn)}
       >
         <div class="mt-8 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
-          <p class="font-semibold">This project lives only in memory.</p>
+          <p class="font-semibold">This map lives only in memory.</p>
           <p>
-            Export a file before closing or reloading this tab. Import it when
+            Export a backup before closing or reloading this tab. Import it when
             you want to continue working.
           </p>
           <button
             type="button"
-            class="map-control mt-2 bg-white"
+            class="map-control outlined mt-2"
             onClick={props.onExport}
           >
-            Export project
+            Export backup
           </button>
         </div>
       </Show>
       <Show when={!props.saving.local && props.saving.cloud && props.signedIn}>
         <p class="mt-8 text-sm leading-6 text-stone-600">
-          Wait for the green save dot before leaving, or export a copy. This
+          Wait for the green save dot before leaving, or export a backup. This
           browser will not keep an offline copy.
         </p>
       </Show>
@@ -135,17 +152,21 @@ export function ProjectPreferences(props: {
         </p>
         <button
           type="button"
-          class="map-control mt-2"
+          class="map-control outlined mt-2"
           disabled={props.busy}
-          onClick={() => props.onChange(props.saving)}
+          onClick={() => {
+            props.onChange(props.saving);
+            // This button disables itself and then goes away.
+            firstSwitch?.focus();
+          }}
         >
-          Retry storage change
+          Retry
         </button>
       </Show>
       <Show when={props.onReviewAnalytics}>
         <button
           type="button"
-          class="map-control mt-6"
+          class="map-control outlined mt-6"
           onClick={() => props.onReviewAnalytics?.()}
         >
           Analytics choice…
