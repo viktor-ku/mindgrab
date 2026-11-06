@@ -9,6 +9,7 @@ import {
 } from "./project-document";
 import type { ProjectDocument } from "./project-document";
 import type { ProjectHandle, ProjectRepository } from "./project-repository";
+import { saveRetryDelay } from "./query-client";
 
 export type CloudStatus =
   | { status: "saving" | "saved" | "offline" | "disabled" | "deleting" }
@@ -84,8 +85,6 @@ export interface SyncOptions {
   manual?: boolean;
   onStatus?: (status: CloudStatus) => void;
 }
-const retryDelay = (attempt: number) =>
-  Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
 const fenced = () => new DOMException("Disposed", "AbortError");
 
 // One query per project lifetime. Query serializes runs, retries transient
@@ -160,7 +159,7 @@ export class ProjectSync {
       refetchOnReconnect: true,
       retry: (_count: number, error: Error) =>
         !manual && error instanceof SyncError,
-      retryDelay,
+      retryDelay: saveRetryDelay,
       gcTime: 0,
     };
   }
@@ -515,7 +514,7 @@ export class CloudWorkspace {
       retry: (_count, error) =>
         !this.#abort.signal.aborted &&
         !(error instanceof SyncError && error.kind === "auth"),
-      retryDelay,
+      retryDelay: saveRetryDelay,
       gcTime: 0,
     });
     this.#stopQuery = this.#observer.subscribe(() => {});

@@ -1,5 +1,6 @@
 import { makeEventListener } from "@solid-primitives/event-listener";
 import { debounce } from "@solid-primitives/scheduled";
+import { Dialog } from "./Dialog";
 import { ProjectPreferences } from "./ProjectPreferences";
 import { ShareDialog } from "./ShareDialog";
 import {
@@ -96,7 +97,6 @@ import {
   ChildIcon,
   CloseIcon,
   FitMapIcon,
-  FitSelectionIcon,
   FocusIcon,
   FoldIcon,
   HelpIcon,
@@ -107,8 +107,8 @@ import {
   PlusIcon,
   RedoIcon,
   SearchIcon,
+  MenuIcon,
   SiblingIcon,
-  TrashIcon,
   UndoIcon,
   UnfoldIcon,
 } from "./icons";
@@ -136,6 +136,9 @@ import type {
 import { backendDeployment } from "./backend";
 import { CloudWorkspace, openLatestCloudProject } from "./project-sync";
 import type { CloudStatus } from "./project-sync";
+import { createLocalSave } from "./local-save";
+import { SaveErrorDialog } from "./SaveErrorDialog";
+import { saveIndicator } from "./save-indicator";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -179,7 +182,6 @@ function storeWheelMode(mode: WheelMode) {
   }
 }
 
-const HINT_KEY = "mindgrab:hint-dismissed";
 function storedFlag(key: string) {
   try {
     return localStorage.getItem(key) === "1";
@@ -187,7 +189,7 @@ function storedFlag(key: string) {
     return false;
   }
 }
-function storeFlag(key: string, value = true) {
+function storeFlag(key: string, value: boolean) {
   try {
     if (value) localStorage.setItem(key, "1");
     else localStorage.removeItem(key);
@@ -512,7 +514,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   createEffect(on(accountId, () => setClaimDismissed(false)));
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
-  let stopDurability: (() => void) | undefined;
   let stopCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
   let authNavigationPending = false;
@@ -576,6 +577,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     mutationFn: performRetryLocalSaving,
   }));
   const retryLocalSaving = () => recoveryMutation.mutateAsync();
+  const retryLocal = () =>
+    void retryLocalSaving().catch(() =>
+      setStorageMessage(
+        "Browser storage is still unavailable. Free up space and retry.",
+      ),
+    );
+  const retryCloud = () => {
+    if (account().status === "expired") void auth.check();
+    else cloud?.retry();
+  };
   const loadMutation = createMutation(() => ({
     mutationKey: ["project", "load-menu"],
     mutationFn: performOpenLoad,
@@ -669,37 +680,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await handle.close();
       return;
     }
-    stopDurability?.();
     handleRepository = owner;
     activeHandle = handle;
     resetProjectUi();
     setDoc(handle.doc);
     setStorageReady(true);
     cloud?.activate(handle);
-    setSaveStatus(
-      ["saved", "disabled"].includes(handle.durability().status)
-        ? "done"
-        : "saving",
-    );
-    stopDurability = handle.onDurability((durability) => {
-      if (activeHandle !== handle || repository !== owner || disposed) return;
-      setSaveStatus(
-        durability.status === "saved" || durability.status === "disabled"
-          ? "done"
-          : durability.status === "saving"
-            ? "saving"
-            : "error",
-      );
-      if (durability.status === "unsaved")
-        setStorageMessage(
-          `${durability.error.message} Export a copy to keep your changes.`,
-        );
-      else if (
-        durability.status === "saved" ||
-        durability.status === "disabled"
-      )
-        setStorageMessage("");
-    });
+    setSavingHandle(handle);
     if (previous && previous !== handle) await previous.close();
     try {
       const preference = await queryClient.fetchQuery({
@@ -872,7 +859,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
     saveView.clear();
     stopCatalog?.();
-    stopDurability?.();
     finishWriting();
     finishProjectName();
     const previousRepository = repository;
@@ -894,6 +880,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setWorkspace(nextRepository);
     handleRepository = nextRepository;
     activeHandle = undefined;
+    setSavingHandle(undefined);
     resetProjectUi();
     setDoc(ephemeralDocument());
     setStorageReady(false);
@@ -965,10 +952,43 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
   const [storageReady, setStorageReady] = createSignal(false);
-  const [saveStatus, setSaveStatus] = createSignal<
-    "" | "saving" | "done" | "error"
-  >("");
+  const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
+  const localSave = createLocalSave(savingHandle);
   const [storageMessage, setStorageMessage] = createSignal("");
+  const saveDot = () =>
+    saveIndicator({
+      local: view().saving().local && storageReady(),
+      localStatus: localSave.status(),
+      cloud: cloudStatus(),
+      recovering: recoveryPending(),
+    });
+  const cloudProblem = () => {
+    const status = cloudStatus();
+    return status && "message" in status ? status.message : "";
+  };
+  const [saveErrorOpen, setSaveErrorOpen] = createSignal(false);
+  // A retry that turns the dot yellow leaves the details open; a save closes them.
+  createEffect(() => {
+    if (saveDot().tone !== "error" && saveDot().tone !== "saving")
+      setSaveErrorOpen(false);
+  });
+  const saveProblems = () =>
+    [
+      localSave.message() &&
+        `${localSave.message()} Export a copy to keep your changes.`,
+      cloudProblem(),
+      recoveryPending() &&
+        "Edits from the previous account could not be saved. They remain in memory; retry before leaving.",
+    ].filter((problem) => !!problem) as string[];
+  createEffect(
+    on(
+      localSave.status,
+      (status) => {
+        if (status === "done" && view().saving().local) setStorageMessage("");
+      },
+      { defer: true },
+    ),
+  );
   const session = createMemo(() => {
     const current = doc();
     const handle = activeHandle?.doc === current ? activeHandle : undefined;
@@ -1067,8 +1087,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
+  const [showBackup, setShowBackup] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
   const [showShare, setShowShare] = createSignal(false);
+  const [menuOpen, setMenuOpen] = createSignal(false);
+  // Phones get one button: everything else lives in the panel it opens.
+  const phoneQuery = window.matchMedia("(max-width: 639px)");
+  const [isPhone, setIsPhone] = createSignal(phoneQuery.matches);
+  makeEventListener(phoneQuery, "change", (e) => setIsPhone(e.matches));
+  const itemRole = () => (isPhone() ? undefined : "menuitem");
+  // An open overlay owns the keyboard; the canvas stays out of its way.
+  const overlayOpen = () =>
+    showPreferences() ||
+    showShare() ||
+    showHelp() ||
+    saveErrorOpen() ||
+    (isPhone() && menuOpen());
   const savingMutation = createMutation(() => ({
     mutationKey: ["project", "saving"],
     mutationFn: performChangeSaving,
@@ -1099,11 +1133,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
-  function clearSaveStatus() {
-    setSaveStatus("");
-  }
-
-  onCleanup(clearSaveStatus);
   const [selectedId, setSelectedId] = createSignal<string>();
   const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
   const details = createMemo(() => nodeDetails(forest()));
@@ -1573,7 +1602,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }),
   );
 
-  const [menuOpen, setMenuOpen] = createSignal(false);
   function closeProjectMenu() {
     setMenuOpen(false);
     document
@@ -1684,14 +1712,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // keyboard users never land on the page body.
   createEffect(
     on(
-      () => [
-        outlineOpen(),
-        notesOpen(),
-        menuOpen(),
-        showPreferences(),
-        showShare(),
-        showHelp(),
-      ],
+      () => [outlineOpen(), notesOpen(), menuOpen(), overlayOpen()],
       () => {
         if (!document.activeElement || document.activeElement === document.body)
           canvas?.focus({ preventScroll: true });
@@ -1882,11 +1903,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     [() => Boolean(focusId()), "branch_focused"],
   ] as const)
     createEffect(on(opened, (open) => open && track(event), { defer: true }));
-  const [hintDismissed, setHintDismissed] = createSignal(storedFlag(HINT_KEY));
-  function dismissHint() {
-    setHintDismissed(true);
-    storeFlag(HINT_KEY);
-  }
 
   const saveView = debounce(
     (
@@ -1956,7 +1972,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function resetProjectUi() {
-    clearSaveStatus();
     finishWriting();
     editorSelection = undefined;
     cancelPointer();
@@ -2059,11 +2074,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const owner = repository;
     const handle = activeHandle;
     setShowLoad(false);
-    setSaveStatus("saving");
     try {
-      await handle.flush();
+      await localSave.save();
       if (repository !== owner || activeHandle !== handle || disposed) return;
-      setSaveStatus("done");
       track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
@@ -2074,10 +2087,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
-      setSaveStatus("error");
-      setStorageMessage(
-        error instanceof Error ? error.message : "Could not save this project.",
-      );
       throw error;
     }
   }
@@ -2091,7 +2100,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       parked.delete(recovery);
     }
     setRecoveryPending(parked.size > 0);
-    if (activeHandle) await activeHandle.flush();
+    if (activeHandle) await localSave.save();
     else {
       const owner = repository;
       const current = doc();
@@ -2106,7 +2115,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function saveBeforeAuth(action: "login" | "logout") {
     finishWriting();
     finishProjectName();
-    clearSaveStatus();
     const owner = repository;
     const handle = activeHandle;
     if (!handle || claiming()) {
@@ -2156,7 +2164,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   async function performOpenLoad() {
-    clearSaveStatus();
     finishWriting();
     const owner = repository;
     try {
@@ -2793,7 +2800,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queryKey: ["anonymous-claims", deployment],
       });
       queryClient.removeQueries({ queryKey: ["anonymous-claims", deployment] });
-      stopDurability?.();
       void repository.close();
       for (const recovery of parked) void recovery.repository.close();
     });
@@ -2812,8 +2818,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
-      if (showPreferences() || showShare() || showHelp() || searchOpen())
-        return;
+      if (overlayOpen() || searchOpen()) return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -3079,7 +3084,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
-      if (showPreferences() || showShare() || showHelp()) return;
+      if (overlayOpen()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
       // text fields, without tabbing through the map (Tab adds ideas there).
       if (
@@ -3136,9 +3141,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const canvasClipboard = (e: ClipboardEvent) =>
       storageReady() &&
       !writing() &&
-      !showPreferences() &&
-      !showShare() &&
-      !showHelp() &&
+      !overlayOpen() &&
       !searchOpen() &&
       !(
         e.target instanceof Element &&
@@ -3247,6 +3250,119 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     });
   });
 
+  const toggleProjectMenu = () => {
+    finishWriting();
+    finishProjectName();
+    setShowLoad(false);
+    setShowBackup(false);
+    setMenuOpen((open) => !open);
+  };
+  // Runs a phone panel action on the map, with the panel out of the way.
+  const fromPanel = (run: () => void) => () => {
+    setMenuOpen(false);
+    run();
+  };
+  const ProjectNameInput = () => (
+    <input
+      type="text"
+      required
+      aria-label="Project name"
+      class="project-name"
+      style={
+        isPhone()
+          ? undefined
+          : {
+              width: `${Math.min(28, Math.max(6, (projectNameDraft() ?? view().name()).length + 1))}ch`,
+            }
+      }
+      value={projectNameDraft() ?? view().name()}
+      onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
+      onBlur={finishProjectName}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+      }}
+    />
+  );
+  const OpenMapItems = () => (
+    <>
+      <button
+        type="button"
+        role={itemRole()}
+        class="menu-item"
+        aria-expanded={showLoad()}
+        aria-controls="saved-projects"
+        disabled={!storageReady()}
+        onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
+      >
+        Open map…
+        <ChevronRightIcon
+          class={`ml-auto size-4 transition-transform ${showLoad() ? "rotate-90" : ""}`}
+        />
+      </button>
+      <Show when={showLoad()}>
+        <Show when={savedProjects().length > 6}>
+          <input
+            type="search"
+            aria-label="Filter maps"
+            placeholder="Filter maps"
+            class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            value={mapFilter()}
+            onInput={(e) => setMapFilter(e.currentTarget.value)}
+            // Escape clears, then closes; arrow keys stay in the field.
+            ref={(el) =>
+              closeOnEscape(el, () => {
+                if (mapFilter()) setMapFilter("");
+                else closeProjectMenu();
+              })
+            }
+            onKeyDown={(e) => e.stopPropagation()}
+          />
+        </Show>
+        <ul
+          id="saved-projects"
+          aria-label="Available projects"
+          class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
+        >
+          <For
+            each={listedProjects()}
+            fallback={
+              <li class="px-2 py-2 text-stone-500">
+                {mapFilter().trim()
+                  ? "No maps match."
+                  : "No saved projects yet."}
+              </li>
+            }
+          >
+            {(project) => (
+              <li>
+                <button
+                  type="button"
+                  role={itemRole()}
+                  class="menu-item"
+                  aria-label={`${project.name} · ${project.id.slice(0, 8)}`}
+                  aria-current={project.id === doc().id ? "true" : undefined}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    load(project.id);
+                  }}
+                >
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate">{project.name}</span>
+                    <span class="block text-[11px] font-normal text-stone-500">
+                      {project.id === doc().id
+                        ? "Open now"
+                        : `Created ${formatDate(project.createdAt)}`}
+                    </span>
+                  </span>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </>
+  );
+
   return (
     <section
       ref={canvas}
@@ -3282,6 +3398,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cloudStatus={cloudStatus()}
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
+        onReviewAnalytics={
+          isPhone() && analyticsEnabled
+            ? () => {
+                setShowPreferences(false);
+                reviewConsent();
+              }
+            : undefined
+        }
       />
       <ShareDialog
         open={showShare()}
@@ -3297,118 +3421,76 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }}
         onShared={(enabled) => track("share_link_changed", { enabled })}
       />
-      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-14.75rem)] flex-col items-start gap-2 sm:max-w-[calc(100%-1.5rem)]">
-        <section
-          data-no-pan
-          data-toolbar
-          aria-label="Project"
-          class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
-        >
-          <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
-          <input
-            type="text"
-            required
-            aria-label="Project name"
-            class="project-name"
-            style={{
-              width: `${Math.min(28, Math.max(6, (projectNameDraft() ?? view().name()).length + 1))}ch`,
-            }}
-            value={projectNameDraft() ?? view().name()}
-            onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
-            onBlur={finishProjectName}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === "Escape")
-                e.currentTarget.blur();
-            }}
-          />
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Project menu"
-            title="Project menu"
-            aria-haspopup="menu"
-            aria-expanded={menuOpen()}
-            onClick={() => {
-              finishWriting();
-              finishProjectName();
-              setShowLoad(false);
-              setMenuOpen((open) => !open);
-            }}
-          >
-            <ChevronDownIcon />
-          </button>
-          <span class="toolbar-divider" />
-          <fieldset
-            aria-label="Project actions"
-            class="flex min-w-0 items-center gap-2 pr-2 text-xs text-stone-500"
-          >
-            <span
-              role="status"
-              class="save-state"
-              // With cloud saving healthy, one status is enough; the local one
-              // stays available to assistive technology.
-              classList={{
-                "sr-only":
-                  view().saving().local &&
-                  view().saving().cloud &&
-                  saveStatus() !== "error" &&
-                  ["saved", "saving", "offline"].includes(
-                    cloudStatus()?.status ?? "",
-                  ),
-              }}
-              data-tone={
-                !view().saving().local
-                  ? "muted"
-                  : saveStatus() === "error"
-                    ? "error"
-                    : saveStatus() === "saving"
-                      ? "busy"
-                      : "ok"
-              }
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2">
+        <span role="status" class="sr-only">
+          {saveDot().label}
+        </span>
+        <Show
+          when={!isPhone()}
+          fallback={
+            <button
+              type="button"
+              data-no-pan
+              data-toolbar
+              class="map-toolbar phone-menu-button pointer-events-auto"
+              data-problem={saveDot().tone === "error" ? "" : undefined}
+              aria-label="Project menu"
+              aria-haspopup="dialog"
+              aria-expanded={menuOpen()}
+              onClick={toggleProjectMenu}
             >
-              {!view().saving().local
-                ? "Local saving off"
-                : saveStatus() === "saving"
-                  ? "Saving…"
-                  : saveStatus() === "error"
-                    ? "Save failed"
-                    : "Saved locally"}
-            </span>
-            <Show when={cloudStatus()}>
-              {(status) => (
-                <span
-                  role="status"
+              <MenuIcon />
+            </button>
+          }
+        >
+          <section
+            data-no-pan
+            data-toolbar
+            aria-label="Project"
+            class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
+          >
+            <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
+            <ProjectNameInput />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Project menu"
+              title="Project menu"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen()}
+              onClick={toggleProjectMenu}
+            >
+              <ChevronDownIcon />
+            </button>
+            <fieldset
+              aria-label="Project actions"
+              class="flex min-w-0 items-center pr-2 pl-1 text-xs text-stone-500"
+            >
+              <Show
+                when={saveDot().tone === "error"}
+                fallback={
+                  <span
+                    aria-hidden="true"
+                    class="save-state"
+                    data-tone={saveDot().tone}
+                    data-label={saveDot().label}
+                  />
+                }
+              >
+                <button
+                  type="button"
                   class="save-state"
-                  data-tone={
-                    status().status === "saved"
-                      ? "ok"
-                      : status().status === "saving" ||
-                          status().status === "deleting"
-                        ? "busy"
-                        : status().status === "disabled"
-                          ? "muted"
-                          : "warn"
-                  }
-                >
-                  {status().status === "disabled"
-                    ? "Cloud saving off"
-                    : status().status === "deleting"
-                      ? "Deleting cloud copy…"
-                      : status().status === "saved"
-                        ? "Saved to cloud"
-                        : status().status === "saving"
-                          ? "Saving to cloud…"
-                          : status().status === "offline"
-                            ? "Offline · cloud save pending"
-                            : "message" in status()
-                              ? (status() as { message: string }).message
-                              : ""}
-                </span>
-              )}
-            </Show>
-          </fieldset>
-        </section>
-        <Show when={menuOpen()}>
+                  data-tone="error"
+                  data-label="Couldn’t save · click for details"
+                  aria-label="Save error details"
+                  aria-haspopup="dialog"
+                  onClick={() => setSaveErrorOpen(true)}
+                />
+              </Show>
+            </fieldset>
+          </section>
+        </Show>
+        <Show when={menuOpen() && !isPhone()}>
           <div
             ref={(el) => {
               projectMenu = el;
@@ -3444,85 +3526,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               >
                 New map
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                class="menu-item"
-                aria-expanded={showLoad()}
-                aria-controls="saved-projects"
-                disabled={!storageReady()}
-                onClick={() =>
-                  showLoad() ? setShowLoad(false) : void openLoad()
-                }
-              >
-                Open map…
-                <ChevronRightIcon
-                  class={`ml-auto size-4 transition-transform ${showLoad() ? "rotate-90" : ""}`}
-                />
-              </button>
-              <Show when={showLoad()}>
-                <Show when={savedProjects().length > 6}>
-                  <input
-                    type="search"
-                    aria-label="Filter maps"
-                    placeholder="Filter maps"
-                    class="search-field mx-1 mb-1 rounded-md bg-stone-100 px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                    value={mapFilter()}
-                    onInput={(e) => setMapFilter(e.currentTarget.value)}
-                    // Escape clears, then closes; arrow keys stay in the field.
-                    ref={(el) =>
-                      closeOnEscape(el, () => {
-                        if (mapFilter()) setMapFilter("");
-                        else closeProjectMenu();
-                      })
-                    }
-                    onKeyDown={(e) => e.stopPropagation()}
-                  />
-                </Show>
-                <ul
-                  id="saved-projects"
-                  aria-label="Available projects"
-                  class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
-                >
-                  <For
-                    each={listedProjects()}
-                    fallback={
-                      <li class="px-2 py-2 text-stone-500">
-                        {mapFilter().trim()
-                          ? "No maps match."
-                          : "No saved projects yet."}
-                      </li>
-                    }
-                  >
-                    {(project) => (
-                      <li>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="menu-item"
-                          aria-label={`${project.name} · ${project.id.slice(0, 8)}`}
-                          aria-current={
-                            project.id === doc().id ? "true" : undefined
-                          }
-                          onClick={() => {
-                            setMenuOpen(false);
-                            load(project.id);
-                          }}
-                        >
-                          <span class="min-w-0 flex-1">
-                            <span class="block truncate">{project.name}</span>
-                            <span class="block text-[11px] font-normal text-stone-500">
-                              {project.id === doc().id
-                                ? "Open now"
-                                : `Created ${formatDate(project.createdAt)}`}
-                            </span>
-                          </span>
-                        </button>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </Show>
+              <OpenMapItems />
               <button
                 type="button"
                 role="menuitem"
@@ -3618,18 +3622,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             </fieldset>
           </div>
         </Show>
-        <Show
-          when={
-            storageMessage() ||
-            recoveryPending() ||
-            !storageReady() ||
-            saveStatus() === "error" ||
-            memoryOnly() ||
-            ["retrying", "blocked", "auth"].includes(
-              cloudStatus()?.status ?? "",
-            )
-          }
-        >
+        <Show when={storageMessage() || !storageReady() || memoryOnly()}>
           <div
             data-no-pan
             data-toolbar
@@ -3643,114 +3636,88 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <p role="status" class="empty:hidden">
               {storageMessage()}
             </p>
-            <Show when={recoveryPending()}>
-              <p role="status">
-                Edits from the previous account could not be saved. They remain
-                in memory; retry before leaving.
-              </p>
-            </Show>
-            <div class="flex flex-wrap gap-1 empty:hidden">
-              <Show
-                when={
-                  recoveryPending() ||
-                  !storageReady() ||
-                  saveStatus() === "error"
-                }
-              >
+            <Show when={!storageReady()}>
+              <div class="flex flex-wrap gap-1">
                 <button
                   type="button"
                   class="map-control text-xs"
-                  onClick={() =>
-                    void retryLocalSaving().catch(() =>
-                      setStorageMessage(
-                        "Browser storage is still unavailable. Free up space and retry.",
-                      ),
-                    )
-                  }
+                  onClick={retryLocal}
                 >
                   Retry local saving
                 </button>
-              </Show>
-              <Show
-                when={["retrying", "blocked", "auth"].includes(
-                  cloudStatus()?.status ?? "",
-                )}
-              >
-                <button
-                  type="button"
-                  class="map-control text-xs"
-                  onClick={() => {
-                    if (account().status === "expired") void auth.check();
-                    else cloud?.retry();
-                  }}
-                >
-                  Retry
-                </button>
-              </Show>
-            </div>
+              </div>
+            </Show>
           </div>
         </Show>
       </div>
       <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
-        <div class="flex flex-col items-end gap-2 sm:flex-row sm:items-start">
-          <nav
-            data-no-pan
-            data-toolbar
-            aria-label="Editing"
-            class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
-          >
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Search"
-              title={`Search (${MOD_LABEL}F)`}
-              aria-expanded={searchOpen()}
-              disabled={!storageReady()}
-              onClick={() => (searchOpen() ? closeSearch(false) : openSearch())}
+        <Show when={!isPhone()}>
+          <div class="flex items-start gap-2">
+            <nav
+              data-no-pan
+              data-toolbar
+              aria-label="Editing"
+              class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
             >
-              <SearchIcon />
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Outline"
-              title={`Outline (${ALT_LABEL}O)`}
-              aria-pressed={outlineOpen()}
-              disabled={!storageReady()}
-              onClick={() => setOutlineOpen((open) => !open)}
-            >
-              <OutlineIcon />
-            </button>
-            <span class="toolbar-divider" />
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Undo"
-              title={`Undo (${MOD_LABEL}Z)`}
-              disabled={!storageReady() || !canUndo()}
-              onClick={undo}
-            >
-              <UndoIcon />
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Redo"
-              title={`Redo (${MOD_LABEL}⇧Z)`}
-              disabled={!storageReady() || !canRedo()}
-              onClick={redo}
-            >
-              <RedoIcon />
-            </button>
-          </nav>
-          <AccountControls
-            state={account()}
-            beforeNavigate={saveBeforeAuth}
-            onRetry={() => void auth.check()}
-            claiming={claiming()}
-            claimMessage={claimMessage()}
-          />
-        </div>
+              {/* Undo and redo appear with the first edit. They sit at the far end
+                so the buttons already on screen stay where they are. */}
+              <Show when={canUndo() || canRedo()}>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Undo"
+                  title={`Undo (${MOD_LABEL}Z)`}
+                  disabled={!storageReady() || !canUndo()}
+                  onClick={undo}
+                >
+                  <UndoIcon />
+                </button>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Redo"
+                  title={`Redo (${MOD_LABEL}⇧Z)`}
+                  disabled={!storageReady() || !canRedo()}
+                  onClick={redo}
+                >
+                  <RedoIcon />
+                </button>
+                <span class="toolbar-divider" />
+              </Show>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Search"
+                title={`Search (${MOD_LABEL}F)`}
+                aria-expanded={searchOpen()}
+                disabled={!storageReady()}
+                onClick={() =>
+                  searchOpen() ? closeSearch(false) : openSearch()
+                }
+              >
+                <SearchIcon />
+              </button>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Outline"
+                title={`Outline (${ALT_LABEL}O)`}
+                aria-pressed={outlineOpen()}
+                disabled={!storageReady()}
+                onClick={() => setOutlineOpen((open) => !open)}
+              >
+                <OutlineIcon />
+              </button>
+            </nav>
+            <AccountControls
+              state={account()}
+              beforeNavigate={saveBeforeAuth}
+              onRetry={() => void auth.check()}
+              claiming={claiming()}
+              claimMessage={claimMessage()}
+            />
+          </div>
+        </Show>
         <Show when={searchOpen()}>
           <search
             data-no-pan
@@ -4040,7 +4007,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       {/* The notice keeps its place above the selection toolbar's slot, so the
           toolbar reappearing (when an edit ends on press) never moves it from
           under the pointer. */}
-      <div class="pointer-events-none absolute bottom-[8.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center sm:bottom-[4.25rem]">
+      <div class="pointer-events-none absolute bottom-[4.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center">
         <Show when={notice()}>
           {(current) => (
             <div
@@ -4074,7 +4041,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           )}
         </Show>
       </div>
-      <div class="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-20 flex sm:bottom-3 w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+      <div class="pointer-events-none absolute bottom-3 left-1/2 z-20 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
         <Show when={selectedId() && !writing() && !drag()}>
           <section
             data-no-pan
@@ -4294,63 +4261,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               <MoreIcon />
             </button>
-            <span class="toolbar-divider" />
-            <button
-              type="button"
-              class="icon-button hover:text-rose-700!"
-              aria-label="Delete idea"
-              title={`Delete with its children (Delete)`}
-              onClick={removeSelected}
-            >
-              <TrashIcon />
-            </button>
           </section>
         </Show>
       </div>
-      <Show
-        when={
-          !hintDismissed() &&
-          !outlineOpen() &&
-          forest().length > 0 &&
-          details().size <= 4
-        }
-      >
-        <aside
-          data-no-pan
-          data-toolbar
-          aria-label="Getting started"
-          class="map-toolbar absolute bottom-3 left-3 z-10 hidden w-64 cursor-default p-3 text-xs leading-5 text-stone-600 lg:block"
-        >
-          <div class="mb-1 flex items-center justify-between">
-            <p class="panel-title">Quick start</p>
-            <button
-              type="button"
-              class="icon-button -mr-1.5 -mt-1.5"
-              aria-label="Dismiss quick start"
-              onClick={dismissHint}
-            >
-              <CloseIcon class="size-4" />
-            </button>
-          </div>
-          <ul class="space-y-0.5">
-            <li>
-              <kbd>Tab</kbd> adds a child, <kbd>Enter</kbd> a sibling
-            </li>
-            <li>Type to rewrite the selected idea</li>
-            <li>Drag an idea onto another to move it under</li>
-            <li>
-              <kbd>{MOD_LABEL}Z</kbd> undoes anything
-            </li>
-          </ul>
-          <button
-            type="button"
-            class="mt-2 font-medium text-accent-deep hover:underline"
-            onClick={() => setShowHelp(true)}
-          >
-            All shortcuts
-          </button>
-        </aside>
-      </Show>
       <div
         class="map-layer absolute w-full h-full origin-top-left"
         classList={{ "map-layer-easing": easingView() }}
@@ -4641,11 +4554,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         <kbd class="ml-auto">{ALT_LABEL}F</kbd>
                       </button>
                     </Show>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      onClick={run(() => fitSelection(nodeId()))}
+                    >
+                      Fit selection
+                      <kbd class="ml-auto">{ALT_LABEL}2</kbd>
+                    </button>
                     <div class="menu-divider" />
                     <button
                       type="button"
                       role="menuitem"
-                      class="menu-item text-rose-700"
+                      class="menu-item text-rose-700!"
                       onClick={run(removeSelected)}
                     >
                       Delete
@@ -4658,69 +4580,55 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </div>
         )}
       </Show>
-      <div class="pointer-events-none absolute right-3 bottom-3 z-20 flex items-center gap-2">
-        <fieldset
-          data-no-pan
-          data-toolbar
-          aria-label="Canvas zoom"
-          class="map-toolbar pointer-events-auto flex items-center gap-0.5 text-sm cursor-default"
-        >
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Zoom out"
-            title={`Zoom out (${MOD_LABEL}−)`}
-            disabled={zoom() <= ZOOM_MIN}
-            onClick={() => changeZoom(zoom() / 1.2)}
-          >
-            <MinusIcon />
-          </button>
-          <button
-            type="button"
-            class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
-            aria-label="Zoom to 100%"
-            title={`Zoom to 100% (${MOD_LABEL}0)`}
-            onClick={() => changeZoom(1)}
-          >
-            {Math.round(zoom() * 100)}%
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Zoom in"
-            title={`Zoom in (${MOD_LABEL}+)`}
-            disabled={zoom() >= ZOOM_MAX}
-            onClick={() => changeZoom(zoom() * 1.2)}
-          >
-            <PlusIcon />
-          </button>
-          <span class="toolbar-divider" />
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Fit map"
-            title={`Fit map (${ALT_LABEL}1)`}
-            disabled={!forest().length}
-            onClick={fitMap}
-          >
-            <FitMapIcon />
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Fit selection"
-            title={`Fit selection (${ALT_LABEL}2)`}
-            disabled={!selectedId()}
-            onClick={() => fitSelection()}
-          >
-            <FitSelectionIcon />
-          </button>
-        </fieldset>
+      <Show when={!isPhone()}>
         <div
           data-no-pan
           data-toolbar
-          class="map-toolbar pointer-events-auto flex cursor-default"
+          class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
         >
+          <fieldset aria-label="Canvas zoom" class="flex items-center gap-0.5">
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Zoom out"
+              title={`Zoom out (${MOD_LABEL}−)`}
+              disabled={zoom() <= ZOOM_MIN}
+              onClick={() => changeZoom(zoom() / 1.2)}
+            >
+              <MinusIcon />
+            </button>
+            <button
+              type="button"
+              class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
+              aria-label="Zoom to 100%"
+              title={`Zoom to 100% (${MOD_LABEL}0)`}
+              onClick={() => changeZoom(1)}
+            >
+              {Math.round(zoom() * 100)}%
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Zoom in"
+              title={`Zoom in (${MOD_LABEL}+)`}
+              disabled={zoom() >= ZOOM_MAX}
+              onClick={() => changeZoom(zoom() * 1.2)}
+            >
+              <PlusIcon />
+            </button>
+            <span class="toolbar-divider" />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Fit map"
+              title={`Fit map (${ALT_LABEL}1)`}
+              disabled={!forest().length}
+              onClick={fitMap}
+            >
+              <FitMapIcon />
+            </button>
+          </fieldset>
+          <span class="toolbar-divider" />
           <button
             type="button"
             class="icon-button"
@@ -4732,7 +4640,197 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <HelpIcon />
           </button>
         </div>
-      </div>
+      </Show>
+      <Show when={isPhone()}>
+        <Dialog
+          variant="panel"
+          open={menuOpen()}
+          onClose={() => setMenuOpen(false)}
+          title="Project menu"
+          closeLabel="Close project menu"
+          heading={<ProjectNameInput />}
+        >
+          <Show
+            when={saveDot().tone === "error"}
+            fallback={
+              <p class="panel-status">
+                <span
+                  aria-hidden="true"
+                  class="save-state"
+                  data-tone={saveDot().tone}
+                />
+                {saveDot().label}
+              </p>
+            }
+          >
+            <button
+              type="button"
+              class="panel-status"
+              aria-haspopup="dialog"
+              onClick={fromPanel(() => setSaveErrorOpen(true))}
+            >
+              <span aria-hidden="true" class="save-state" data-tone="error" />
+              {saveDot().label}
+              <ChevronRightIcon class="ml-auto size-4" />
+            </button>
+          </Show>
+          <Show when={canUndo() || canRedo()}>
+            <div class="grid grid-cols-2 gap-2 py-2">
+              <button
+                type="button"
+                class="panel-pair"
+                disabled={!storageReady() || !canUndo()}
+                onClick={fromPanel(undo)}
+              >
+                <UndoIcon />
+                Undo
+              </button>
+              <button
+                type="button"
+                class="panel-pair"
+                disabled={!storageReady() || !canRedo()}
+                onClick={fromPanel(redo)}
+              >
+                <RedoIcon />
+                Redo
+              </button>
+            </div>
+          </Show>
+          <button
+            type="button"
+            class="menu-item"
+            disabled={!storageReady()}
+            onClick={fromPanel(openSearch)}
+          >
+            <SearchIcon />
+            Search
+          </button>
+          <button
+            type="button"
+            class="menu-item"
+            disabled={!storageReady()}
+            onClick={fromPanel(() => setOutlineOpen(true))}
+          >
+            <OutlineIcon />
+            Outline
+          </button>
+          <button
+            type="button"
+            class="menu-item"
+            disabled={!forest().length}
+            onClick={fromPanel(fitMap)}
+          >
+            <FitMapIcon />
+            Fit map
+          </button>
+          <div class="menu-divider" />
+          <fieldset disabled={fileBusy()} class="contents">
+            <button
+              type="button"
+              class="menu-item"
+              disabled={!storageReady()}
+              onClick={fromPanel(createNewProject)}
+            >
+              New map
+            </button>
+            <OpenMapItems />
+            <button
+              type="button"
+              class="menu-item"
+              disabled={!storageReady()}
+              aria-haspopup="dialog"
+              onClick={fromPanel(() => setShowShare(true))}
+            >
+              Share link…
+            </button>
+            <button
+              type="button"
+              class="menu-item"
+              aria-expanded={showBackup()}
+              onClick={() => setShowBackup((open) => !open)}
+            >
+              Backup and export
+              <ChevronRightIcon
+                class={`ml-auto size-4 transition-transform ${showBackup() ? "rotate-90" : ""}`}
+              />
+            </button>
+            <Show when={showBackup()}>
+              <div class="mx-1 mb-1 rounded-lg bg-stone-50 p-1">
+                <button
+                  type="button"
+                  class="menu-item"
+                  disabled={!storageReady()}
+                  onClick={fromPanel(importProjectFromFile)}
+                >
+                  Import backup…
+                </button>
+                <button
+                  type="button"
+                  class="menu-item"
+                  onClick={fromPanel(exportCurrentProject)}
+                >
+                  Export backup (.json)
+                </button>
+                <button
+                  type="button"
+                  class="menu-item"
+                  onClick={fromPanel(() => void exportMarkdown())}
+                >
+                  Export outline (.md)
+                </button>
+              </div>
+            </Show>
+            <button
+              type="button"
+              class="menu-item"
+              disabled={!storageReady()}
+              aria-haspopup="dialog"
+              onClick={fromPanel(() => setShowPreferences(true))}
+            >
+              Project preferences…
+            </button>
+            <button
+              type="button"
+              class="menu-item"
+              aria-haspopup="dialog"
+              onClick={fromPanel(() => setShowHelp(true))}
+            >
+              Help
+            </button>
+          </fieldset>
+          <AccountControls
+            inline
+            state={account()}
+            beforeNavigate={saveBeforeAuth}
+            onRetry={() => void auth.check()}
+            claiming={claiming()}
+            claimMessage={claimMessage()}
+            onAuthError={() => setMenuOpen(true)}
+            shownElsewhere={saveDot().label}
+          />
+        </Dialog>
+      </Show>
+      <SaveErrorDialog
+        open={saveErrorOpen()}
+        onClose={() => {
+          setSaveErrorOpen(false);
+          canvas.focus({ preventScroll: true });
+        }}
+        problems={saveProblems()}
+        safeInBrowser={
+          view().saving().local &&
+          storageReady() &&
+          !localSave.message() &&
+          !recoveryPending()
+        }
+        retryingAlone={
+          !!localSave.message() || cloudStatus()?.status === "retrying"
+        }
+        onRetryLocal={
+          localSave.message() || recoveryPending() ? retryLocal : undefined
+        }
+        onRetryCloud={cloudProblem() ? retryCloud : undefined}
+      />
       <ShortcutsDialog
         open={showHelp()}
         onClose={() => {

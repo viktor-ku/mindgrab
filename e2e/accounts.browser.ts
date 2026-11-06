@@ -275,6 +275,12 @@ async function login(user = A) {
   await page.getByText(user.name, { exact: true }).waitFor();
   await ready();
 }
+async function signOut(target = page) {
+  await target
+    .locator('[aria-label="Account"] button[aria-haspopup="menu"]')
+    .click();
+  await target.getByRole("menuitem", { name: "Sign out", exact: true }).click();
+}
 async function projectMenu(item: string) {
   await page.getByRole("button", { name: "Project menu" }).click();
   // Menu item names include their shortcut hints, such as "Save now ⌘S".
@@ -297,7 +303,7 @@ async function refreshAccount() {
 const claim = () =>
   page.getByRole("button", { name: "Add anonymous projects to this account" });
 async function cloudSaved() {
-  await page.getByText("Saved to cloud", { exact: true }).waitFor();
+  await page.getByText(/^Saved to cloud/).waitFor();
 }
 
 test("lost registration and repeated/concurrent claims reuse one target and retain Loro history", async () => {
@@ -432,7 +438,7 @@ test("logout from another tab fences a delayed getMe response and survives a sta
   await refreshAccount();
   while (!backend.meStarted) await Bun.sleep(10);
   backend.leaveCookieOnLogout = true;
-  await other.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOut(other);
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await ready();
   backend.meGate.resolve();
@@ -459,7 +465,7 @@ test("forced logout parks failed local writes outside anonymous UI until they ca
   await other.getByText(A.name, { exact: true }).waitFor();
   await call("failWrites", true);
   await edit("Retain these failed local edits");
-  await other.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOut(other);
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page
     .getByText(/Edits from the previous account could not be saved/)
@@ -472,11 +478,13 @@ test("forced logout parks failed local writes outside anonymous UI until they ca
       .count(),
   ).toBe(0);
   await call("failWrites", false);
+  await page.getByRole("button", { name: "Save error details" }).click();
   await page
     .getByRole("button", { name: "Retry local saving", exact: true })
     .click();
   await page
     .getByText(/Edits from the previous account could not be saved/)
+    .first()
     .waitFor({ state: "detached" });
   await login();
   await page
@@ -538,7 +546,7 @@ test("durable hints recover the workspace and logout when localStorage is missin
   await refreshAccount();
   await cloudSaved();
   backend.leaveCookieOnLogout = true;
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOut();
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   await page.evaluate((stale) => {
     if (stale)
@@ -554,18 +562,100 @@ test("durable hints recover the workspace and logout when localStorage is missin
   expect(await page.getByText(A.name, { exact: true }).count()).toBe(0);
 });
 
+test("the account menu holds the name and sign out, and closes like a menu", async () => {
+  await login();
+  const avatar = page.locator(
+    '[aria-label="Account"] button[aria-haspopup="menu"]',
+  );
+  const menu = page.getByRole("menu", { name: "Account menu" });
+  expect(await menu.count()).toBe(0);
+  expect(await page.getByRole("menuitem", { name: "Sign out" }).count()).toBe(
+    0,
+  );
+
+  await avatar.click();
+  await menu.getByText(A.email, { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  expect(await page.evaluate(() => document.activeElement?.tagName)).toBe(
+    "BUTTON",
+  );
+
+  await avatar.click();
+  await menu.waitFor();
+  await page.mouse.click(640, 500);
+  await menu.waitFor({ state: "detached" });
+});
+
+test("the red save dot opens the failure and clears itself once saving recovers", async () => {
+  await call("failWrites", true);
+  await edit("A failed local edit");
+  const dot = page.getByRole("button", { name: "Save error details" });
+  await dot.waitFor();
+  const details = page.getByRole("dialog", { name: "Couldn’t save" });
+  expect(await details.isVisible()).toBe(false);
+
+  await dot.click();
+  await details.waitFor();
+  await page.keyboard.press("Escape");
+  await details.waitFor({ state: "hidden" });
+  await dot.click();
+  await details.waitFor();
+  await page.mouse.click(20, 400);
+  await details.waitFor({ state: "hidden" });
+
+  await dot.click();
+  await details.waitFor();
+  await call("failWrites", false);
+  await dot.waitFor({ state: "detached" });
+  await details.waitFor({ state: "hidden" });
+  expect(await page.locator(".save-state").getAttribute("data-tone")).toBe(
+    "local",
+  );
+});
+
+test("on a phone the menu button shows a save failure and leads to its details", async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const menu = page.locator(".phone-menu-button");
+  await menu.waitFor();
+  expect(await menu.getAttribute("data-problem")).toBeNull();
+  await call("failWrites", true);
+  await edit("A failed local edit");
+  await page.locator(".phone-menu-button[data-problem]").waitFor();
+
+  await menu.click();
+  await page
+    .getByRole("dialog", { name: "Project menu" })
+    .getByRole("button", { name: /Save failed/ })
+    .click();
+  const details = page.getByRole("dialog", { name: "Couldn’t save" });
+  await details.waitFor();
+  await call("failWrites", false);
+  await details.waitFor({ state: "hidden" });
+  await page.locator(".phone-menu-button:not([data-problem])").waitFor();
+});
+
+test("a failed sign-in on a phone opens the menu to say so", async () => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${appUrl}?auth_error=unavailable`);
+  await page
+    .getByRole("dialog", { name: "Project menu" })
+    .getByText("Sign-in is temporarily unavailable. Please try again.")
+    .waitFor();
+});
+
 test("an aborted durable account hint prevents logout acknowledgement and can be retried", async () => {
   await login();
   await cloudSaved();
   const id = await call("id");
   await call("failAuthDatabase", true);
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOut();
   await page.getByText(/Could not save your project before leaving/).waitFor();
   expect(backend.logoutRequests).toBe(0);
   expect(await call("id")).toBe(id);
   await page.getByText(A.name, { exact: true }).waitFor();
   await call("failAuthDatabase", false);
-  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await signOut();
   await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   expect(backend.logoutRequests).toBe(1);
 });
@@ -578,7 +668,9 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
   await projectMenu("Project preferences…");
   const dialog = page.getByRole("dialog", { name: "Project preferences" });
   await dialog.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
-  await page.getByText("Cloud saving off", { exact: true }).waitFor();
+  await page
+    .getByText("Saved locally · cloud saving off", { exact: true })
+    .waitFor();
   expect(backend.projects.has(id)).toBe(false);
   await dialog
     .getByRole("switch", { name: "Save locally", exact: true })
@@ -628,7 +720,9 @@ test("cloud-only projects load after reload without leaving a local copy", async
   await page
     .getByRole("menuitem", { name: `Cloud only project · ${id.slice(0, 8)}` })
     .click();
-  await page.getByText("Local saving off", { exact: true }).waitFor();
+  await page
+    .getByText("Saved to cloud · local saving off", { exact: true })
+    .waitFor();
   expect(await call("id")).toBe(id);
   expect(
     await page.evaluate(

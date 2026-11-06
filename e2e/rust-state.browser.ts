@@ -118,7 +118,9 @@ async function newPage() {
 }
 async function login(page: Page) {
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("button", { name: "Sign out", exact: true }).waitFor();
+  await page
+    .locator('[aria-label="Account"] button[aria-haspopup="menu"]')
+    .waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
 }
 async function saved(page: Page) {

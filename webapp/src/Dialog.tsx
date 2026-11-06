@@ -1,4 +1,4 @@
-import { createEffect, createUniqueId, type JSX } from "solid-js";
+import { createEffect, createUniqueId, type JSX, Show } from "solid-js";
 import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
 
@@ -11,8 +11,12 @@ export function Dialog(props: {
   // The close button's accessible name, such as "Close sharing".
   closeLabel: string;
   // "center" floats mid-screen and leaves the body to scroll itself. "side"
-  // slides in from the right, pads its content and scrolls as a whole.
-  variant: "center" | "side";
+  // slides in from the right, pads its content and scrolls as a whole. "panel"
+  // does the same from the left, under the phone menu button.
+  variant: "center" | "side" | "panel";
+  size?: "small";
+  // Replaces the visible title, which then only names the dialog.
+  heading?: JSX.Element;
   children: JSX.Element;
 }) {
   let dialog!: HTMLDialogElement;
@@ -24,8 +28,10 @@ export function Dialog(props: {
   return (
     <dialog
       ref={dialog}
-      class={props.variant === "side" ? "dialog-side" : "dialog-center"}
-      aria-labelledby={titleId}
+      class={`dialog-${props.variant}`}
+      data-size={props.size}
+      aria-labelledby={props.heading ? undefined : titleId}
+      aria-label={props.heading ? props.title : undefined}
       data-no-pan
       onClose={props.onClose}
       onCancel={props.onClose}
@@ -33,15 +39,27 @@ export function Dialog(props: {
     >
       <header
         class={`flex items-center justify-between gap-4 border-b border-stone-100 ${
-          props.variant === "side" ? "pb-4" : "px-6 py-4"
+          { center: "px-6 py-4", side: "pb-4", panel: "gap-1! border-b-0!" }[
+            props.variant
+          ]
         }`}
       >
-        <h2 id={titleId} class="font-display text-xl font-semibold">
-          {props.title}
-        </h2>
+        <Show
+          when={props.heading}
+          fallback={
+            <h2 id={titleId} class="font-display text-xl font-semibold">
+              {props.title}
+            </h2>
+          }
+        >
+          {props.heading}
+        </Show>
         <button
           type="button"
           class="icon-button"
+          // A panel opens with its heading input first; focusing that would
+          // raise the phone keyboard.
+          autofocus={props.variant === "panel"}
           aria-label={props.closeLabel}
           onClick={props.onClose}
         >
