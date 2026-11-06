@@ -179,9 +179,7 @@ async function openNamed(page: Page, name: string) {
 test("main app signs in, claims anonymous work, reloads durable state, and accepts native Rust commands", async () => {
   await edit(page, "Anonymous work 🦀");
   await login(page);
-  await page
-    .getByRole("button", { name: "Add anonymous projects to this account" })
-    .click();
+  await page.getByRole("button", { name: "Add maps to this account" }).click();
   await page.getByText("Anonymous work 🦀", { exact: true }).waitFor();
   await saved(page);
   const id = await currentId(page);

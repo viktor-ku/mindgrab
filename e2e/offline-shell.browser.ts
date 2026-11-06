@@ -50,8 +50,8 @@ beforeAll(async () => {
           name: "release-fixture",
           transformIndexHtml: (html) =>
             html.replace(
-              "<title>mindgrab</title>",
-              `<title>mindgrab ${index}</title>`,
+              "<title>Mindgrab</title>",
+              `<title>Mindgrab ${index}</title>`,
             ),
         },
       ],
@@ -188,12 +188,21 @@ async function installed() {
   await page.waitForSelector('[data-storage-ready="true"]');
 }
 async function edit(text: string) {
+  // The fixture signs in, which swaps the anonymous map for the account's.
+  await page.waitForFunction(
+    () =>
+      !document.body.textContent?.includes("Checking account") &&
+      document.querySelector('[data-storage-ready="true"]'),
+  );
   await page.locator("[data-node-id]").first().dblclick();
   await page.getByLabel("Node text").fill(text);
   await page.getByLabel("Node text").press("Enter");
   await page.getByRole("button", { name: "Project menu" }).click();
   await page.getByRole("menuitem", { name: "Save now" }).click();
-  await page.getByText("Saved locally.", { exact: true }).waitFor();
+  await page
+    .locator(".notice")
+    .getByText("Saved locally", { exact: true })
+    .waitFor();
 }
 async function cacheKeys() {
   return page.evaluate(async () => {
@@ -309,13 +318,13 @@ test("a new production version waits for all tabs while unsynced edits remain du
   expect(await page.getByLabel("Offline application").innerText()).toContain(
     "An update is ready",
   );
-  expect(await page.title()).toBe("mindgrab 0");
-  expect(await second.title()).toBe("mindgrab 0");
+  expect(await page.title()).toBe("Mindgrab 0");
+  expect(await second.title()).toBe("Mindgrab 0");
   expect((await cacheKeys()).names).toHaveLength(2);
   await edit("Unsynced after upgrade installed");
   await page.reload();
   await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.title()).toBe("mindgrab 0");
+  expect(await page.title()).toBe("Mindgrab 0");
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Unsynced after upgrade installed",
   );
@@ -332,7 +341,7 @@ test("a new production version waits for all tabs while unsynced edits remain du
   await context.setOffline(true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.title()).toBe("mindgrab 1");
+  expect(await page.title()).toBe("Mindgrab 1");
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Unsynced after upgrade installed",
   );
@@ -361,7 +370,7 @@ test("a failed upgrade leaves the installed shell and local work intact", async 
   await context.setOffline(true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="true"]');
-  expect(await page.title()).toBe("mindgrab 0");
+  expect(await page.title()).toBe("Mindgrab 0");
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Retained during failed install",
   );
@@ -464,7 +473,7 @@ test("visible tabs retry failed release checks periodically without an online ev
   }
   // Allow the failed check's rejection to settle before advancing the clock.
   await page.clock.runFor(100);
-  expect(await page.title()).toBe("mindgrab 0");
+  expect(await page.title()).toBe("Mindgrab 0");
   workerUnavailable = false;
   await page.clock.fastForward(5 * 60_000);
   await waitForWorker(page, async () =>

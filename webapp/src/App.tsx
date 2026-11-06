@@ -77,7 +77,14 @@ import {
   writeProjectFile,
 } from "./project-import-export";
 import { closeOnEscape } from "./escape-key";
-import { ALT_LABEL, MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
+import { inOpenMenu, menuArrowKeys, transientLayer } from "./transient-layer";
+import {
+  ALT_LABEL,
+  DELETE_LABEL,
+  MOD_LABEL,
+  SHIFT_LABEL,
+  ShortcutsDialog,
+} from "./ShortcutsDialog";
 import { Outline } from "./Outline";
 import { NotesPanel } from "./NotesPanel";
 import {
@@ -139,6 +146,7 @@ import type { CloudStatus } from "./project-sync";
 import { createLocalSave } from "./local-save";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
+import { panelEdges, panelInsets } from "./view-insets";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -199,10 +207,6 @@ function storeFlag(key: string, value: boolean) {
 }
 
 const OUTLINE_KEY = "mindgrab:outline-open";
-
-// Screen space kept clear of floating toolbars and panels when fitting or
-// following nodes.
-const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
 
 function NodeEditor(props: {
   doc: ProjectDocument;
@@ -378,10 +382,19 @@ export function Node(props: {
           fallback={
             <button
               type="button"
+              // The editor picks ideas with the arrow keys: as tab stops they
+              // would add a child at every Tab. Shared views only have Tab.
+              tabIndex={props.readOnly ? undefined : -1}
               aria-pressed={props.selected}
               aria-expanded={props.descendants ? !props.collapsed : undefined}
-              aria-keyshortcuts={props.descendants ? "Alt+G" : undefined}
-              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer outline-none"
+              aria-keyshortcuts={
+                props.descendants && !props.readOnly ? "Alt+G" : undefined
+              }
+              class={`min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer ${
+                props.readOnly
+                  ? "rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
+                  : "outline-none"
+              }`}
             >
               {props.text || "New idea"}
             </button>
@@ -402,7 +415,11 @@ export function Node(props: {
             role="img"
             class="note-badge"
             aria-label="Has notes"
-            title={`Has notes · open them with ${ALT_LABEL}N`}
+            title={
+              props.readOnly
+                ? "Has notes"
+                : `Has notes · open them with ${ALT_LABEL}N`
+            }
           >
             <NoteIcon class="size-3.5" />
           </span>
@@ -410,9 +427,14 @@ export function Node(props: {
         <Show when={props.collapsed}>
           <button
             type="button"
-            class="rounded-md border border-current/15 bg-white/60 px-1.5 text-[10px] leading-4 font-semibold whitespace-nowrap cursor-pointer hover:bg-white/90 focus-visible:outline-2"
-            aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
-            title={`Expand children (${ALT_LABEL}G)`}
+            tabIndex={props.readOnly ? undefined : -1}
+            class="rounded-md border border-current/15 bg-white/60 px-1.5 text-[10px] leading-4 font-semibold whitespace-nowrap cursor-pointer hover:bg-white/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
+            aria-label={`Expand ${props.descendants} ${props.descendants === 1 ? "idea" : "ideas"}`}
+            title={
+              props.readOnly
+                ? "Expand children"
+                : `Expand children (${ALT_LABEL}G)`
+            }
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -548,7 +570,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const claiming = () => claimMutation.isPending;
   const claimMessage = () =>
     claimMutation.isError
-      ? "Could not finish adding anonymous projects. Your local work is retained; retry to continue."
+      ? "Could not finish adding your maps. Your local work is retained; retry to continue."
       : "";
   const addAnonymousProjects = () => {
     if (!claiming()) claimMutation.mutate();
@@ -893,7 +915,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch {
       if (repository === nextRepository && !disposed)
         setStorageMessage(
-          "Could not open this account’s local projects. Retry local saving.",
+          "Could not open this account’s local maps. Retry local saving.",
         );
     }
     if (repository === nextRepository && !disposed) {
@@ -951,6 +973,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Read synchronously, even inside a batch, to tie notices to history.
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
+  // Until a map opens, the canvas shows a placeholder document that is replaced
+  // without being saved, so nothing may select or edit its ideas.
   const [storageReady, setStorageReady] = createSignal(false);
   const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
   const localSave = createLocalSave(savingHandle);
@@ -975,7 +999,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const saveProblems = () =>
     [
       localSave.message() &&
-        `${localSave.message()} Export a copy to keep your changes.`,
+        `${localSave.message()} Export a backup to keep your changes.`,
       cloudProblem(),
       recoveryPending() &&
         "Edits from the previous account could not be saved. They remain in memory; retry before leaving.",
@@ -1090,6 +1114,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [showBackup, setShowBackup] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
   const [showShare, setShowShare] = createSignal(false);
+  // Share sends people to the preferences to turn cloud saving on, and takes
+  // them back once it is. An effect, not the dialog's onClose, which fires
+  // twice per close. Leaving the preferences for another task clears the flag.
+  let returnToShare = false;
+  createEffect(
+    on(
+      showPreferences,
+      (open) => {
+        if (open || !returnToShare) return;
+        returnToShare = false;
+        if (view().saving().cloud) setShowShare(true);
+      },
+      { defer: true },
+    ),
+  );
   const [menuOpen, setMenuOpen] = createSignal(false);
   // Phones get one button: everything else lives in the panel it opens.
   const phoneQuery = window.matchMedia("(max-width: 639px)");
@@ -1488,6 +1527,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
     });
     fitMap();
+    canvas.focus({ preventScroll: true });
   }
   function exitFocus() {
     if (notice()?.action?.label === "Leave focus") setNotice(undefined);
@@ -1566,6 +1606,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Reveals the result inside the folds the search started from, so moving
   // between results never accumulates unfolded branches.
   function previewResult(id: string) {
+    if (!storageReady()) return;
     const next = new Set(searchReturn?.collapsed ?? collapsedIds());
     for (
       let parent = details().get(id)?.parent;
@@ -1602,11 +1643,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }),
   );
 
+  const projectMenuButton = () =>
+    document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Project menu"]',
+    );
   function closeProjectMenu() {
     setMenuOpen(false);
-    document
-      .querySelector<HTMLButtonElement>('button[aria-label="Project menu"]')
-      ?.focus();
+    projectMenuButton()?.focus({ preventScroll: true });
   }
   const [mapFilter, setMapFilter] = createSignal("");
   createEffect(on(showLoad, () => setMapFilter(""), { defer: true }));
@@ -1644,25 +1687,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       { defer: true },
     ),
   );
-
-  function menuArrowKeys(e: KeyboardEvent & { currentTarget: HTMLElement }) {
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
-    e.preventDefault();
-    const items = Array.from(
-      e.currentTarget.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitem"]:not(:disabled)',
-      ),
-    );
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next =
-      e.key === "Home"
-        ? 0
-        : e.key === "End"
-          ? items.length - 1
-          : (current + (e.key === "ArrowDown" ? 1 : -1) + items.length) %
-            items.length;
-    items[next]?.focus();
-  }
 
   function resetPlacement(id: string) {
     const placed = placedIds(id);
@@ -1708,11 +1732,25 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
   const [notesOpen, setNotesOpen] = createSignal(false);
-  // A panel that closes while it holds focus hands focus back to the map, so
-  // keyboard users never land on the page body.
+  // Chrome that closes while it holds focus (a panel, a menu item, a banner
+  // button, a breadcrumb) hands focus back to the map, so keyboard users never
+  // land on the page body.
   createEffect(
     on(
-      () => [outlineOpen(), notesOpen(), menuOpen(), overlayOpen()],
+      () => [
+        outlineOpen(),
+        notesOpen(),
+        menuOpen(),
+        overlayOpen(),
+        !!contextMenu(),
+        colorOpen(),
+        !!returnView(),
+        focusId(),
+        claimCount() > 0 && !claimDismissed(),
+        consentOpen(),
+        // "Check account again" goes away once the check succeeds.
+        account().status === "unavailable" || account().status === "expired",
+      ],
       () => {
         if (!document.activeElement || document.activeElement === document.body)
           canvas?.focus({ preventScroll: true });
@@ -1720,6 +1758,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       { defer: true },
     ),
   );
+  // A mouse click on a button that only changes the view hands the keyboard
+  // back to the map. Pressed from the keyboard (detail 0) it keeps focus, so
+  // Enter can zoom again.
+  const backToCanvas = (e: MouseEvent) => {
+    if (e.detail > 0) canvas.focus({ preventScroll: true });
+  };
   // Opening notes from the keyboard moves focus into them; closing returns it.
   function toggleNotes(open = !notesOpen()) {
     finishWriting();
@@ -1735,13 +1779,74 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else canvas.focus({ preventScroll: true });
   }
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
-  const viewInsets = () => {
-    const wide = canvasSize().width >= 640;
+  const viewInsets = () =>
+    panelInsets(canvasSize().width, outlineOpen(), notesOpen());
+  // A panel that opens over the selected idea moves the map aside, as
+  // selecting that idea with the panel already open would.
+  createEffect(
+    on(
+      [outlineOpen, notesOpen],
+      (open, before) => {
+        const id = selectedId();
+        const opened = open.some((now, index) => now && !before?.[index]);
+        if (id && opened && !isPhone()) keepInView(id);
+      },
+      { defer: true },
+    ),
+  );
+  // The storage island shows in the corner where the outline starts, so the
+  // outline starts 8px under it: the island's top is at 64px.
+  const [storageIslandHeight, setStorageIslandHeight] = createSignal(0);
+  const outlineTop = () =>
+    storageIslandHeight() && !isPhone()
+      ? { top: `${64 + storageIslandHeight() + 8}px` }
+      : undefined;
+  // Centred chrome sits in a strip of the canvas, given as its distance from
+  // the left and right edges.
+  interface Strip {
+    left: number;
+    right: number;
+  }
+  const stripStyle = (strip: Strip) => ({
+    left: `${strip.left}px`,
+    right: `${strip.right}px`,
+  });
+  // The top bars keep to the strip between the open panels, 8px clear of
+  // each, so they never cover a panel's header.
+  const panelStrip = (): Strip => {
+    const edges = panelEdges(canvasSize().width, outlineOpen(), notesOpen());
     return {
-      ...VIEW_INSETS,
-      ...(wide && outlineOpen() && { left: 316 }),
-      ...(wide && notesOpen() && { right: 348 }),
+      left: edges.left ? edges.left + 8 : 12,
+      right: edges.right ? edges.right + 8 : 12,
     };
+  };
+  // Beside open panels the breadcrumb keeps the focused branch readable: it
+  // drops the steps above it first, then the label of the way out.
+  const crumbRoom = () =>
+    isPhone()
+      ? Number.POSITIVE_INFINITY
+      : canvasSize().width - panelStrip().left - panelStrip().right;
+  const crumbs = () =>
+    crumbRoom() < 480 ? focusPath().slice(-1) : focusPath();
+  // Under about 900px the centred selection toolbar would run under the zoom
+  // island, so it centres in the room left of it: the island's 241px, its
+  // 12px margin and an 8px gap.
+  const bottomStrip = (): Strip => {
+    const width = canvasSize().width;
+    return { left: 12, right: width >= 640 && width < 900 ? 261 : 12 };
+  };
+  // The notice stays centred over the toolbar and narrows until it is clear
+  // of the open panels. Where that leaves too little to read, it centres
+  // between the panels instead; with no room there either, it covers a
+  // panel's edge for the few seconds it shows.
+  const noticeStrip = (): Strip => {
+    const row = bottomStrip();
+    const panels = panelStrip();
+    const inset = Math.max(0, panels.left - row.left, panels.right - row.right);
+    const narrowed = { left: row.left + inset, right: row.right + inset };
+    const fits = (strip: Strip) =>
+      canvasSize().width - strip.left - strip.right >= 240;
+    return fits(narrowed) ? narrowed : fits(panels) ? panels : row;
   };
   // Branches travel through the clipboard as indented Markdown lists, so they
   // paste into other apps and pasted outlines become branches here.
@@ -1891,7 +1996,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const next =
       regions[(current + direction + regions.length) % regions.length];
     if (next === canvas) canvas.focus({ preventScroll: true });
-    else next.querySelector<HTMLElement>(focusable)?.focus();
+    // A panel is entered at its content, not at its close button.
+    else
+      (
+        next.querySelector<HTMLElement>(
+          'textarea, [role="tree"] [tabindex="0"]',
+        ) ?? next.querySelector<HTMLElement>(focusable)
+      )?.focus();
   }
 
   const [showHelp, setShowHelp] = createSignal(false);
@@ -2012,11 +2123,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         track("project_opened", { idea_count: details().size });
         setStorageMessage("");
         showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
-      } else setStorageMessage("Project is still loading.");
+      } else setStorageMessage("Map is still loading.");
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
-        error instanceof Error ? error.message : "Could not open this project.",
+        error instanceof Error ? error.message : "Could not open this map.",
       );
       throw error;
     }
@@ -2047,7 +2158,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
-        error instanceof Error ? error.message : "Could not create a project.",
+        error instanceof Error ? error.message : "Could not create a map.",
       );
       throw error;
     }
@@ -2068,7 +2179,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     finishWriting();
     finishProjectName();
     if (!activeHandle) {
-      setStorageMessage("Project storage is still opening.");
+      setStorageMessage("Map storage is still opening.");
       return;
     }
     const owner = repository;
@@ -2080,10 +2191,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
-        showNotice({ message: "Saved locally." });
+        showNotice({ message: "Saved locally" });
       } else
         setStorageMessage(
-          "Local saving is off. Export a copy to keep your work.",
+          "Local saving is off. Export a backup to keep your work.",
         );
     } catch (error) {
       if (repository !== owner || activeHandle !== handle || disposed) return;
@@ -2118,7 +2229,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const owner = repository;
     const handle = activeHandle;
     if (!handle || claiming()) {
-      setStorageMessage("Wait for local project storage before leaving.");
+      setStorageMessage("Wait for local map storage before leaving.");
       return false;
     }
     authNavigationPending = true;
@@ -2151,7 +2262,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch {
       if (repository !== owner || disposed) return false;
       setStorageMessage(
-        "Could not save your project before leaving. Free up browser storage and try again.",
+        "Could not save your map before leaving. Free up browser storage and retry.",
       );
       return false;
     } finally {
@@ -2178,9 +2289,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       track("project_list_opened", { project_count: projects.length });
     } catch (error) {
       if (repository !== owner || disposed) return;
-      setStorageMessage(
-        "Could not list projects. Browser storage is unavailable.",
-      );
+      setStorageMessage("Could not list maps. Browser storage is unavailable.");
       throw error;
     }
   }
@@ -2204,9 +2313,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
-          error instanceof Error
-            ? error.message
-            : "Could not export this project.",
+          error instanceof Error ? error.message : "Could not export this map.",
         );
         throw error;
       }
@@ -2266,7 +2373,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setStorageMessage(
           error instanceof Error
             ? error.message
-            : "Could not import this project file.",
+            : "Could not import this backup.",
         );
         throw error;
       }
@@ -2330,7 +2437,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function select(id: string) {
-    if (suppressClick) return;
+    if (suppressClick || !storageReady()) return;
     if (selectedId() !== id) {
       finishWriting();
       setColorScope("node");
@@ -2373,7 +2480,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function write(id: string) {
-    if (writing() && selectedId() === id) return;
+    if (!storageReady() || (writing() && selectedId() === id)) return;
     finishWriting();
     revealNode(id);
     if (selectedId() !== id) setColorScope("node");
@@ -2387,12 +2494,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let contextKeyAt = -Infinity;
   function openContextMenu(e: MouseEvent) {
     const target = e.target instanceof Element ? e.target : undefined;
-    const toolbar = target?.closest("[data-toolbar]");
+    const toolbar = target?.closest("[data-toolbar], dialog");
     const nodeElement = target?.closest<HTMLElement>("[data-node-id]");
     if (toolbar) {
       setContextMenu(undefined);
       return;
     }
+    if (!storageReady()) {
+      e.preventDefault();
+      return;
+    }
+    // Working on the map ends an open search, as a left press does.
+    if (searchOpen()) closeSearch(true);
 
     e.preventDefault();
     finishWriting();
@@ -2778,7 +2891,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setStorageMessage(
         error instanceof Error
           ? error.message
-          : "Could not open local project storage.",
+          : "Could not open local map storage.",
       );
     });
     onCleanup(() => {
@@ -2818,7 +2931,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
-      if (overlayOpen() || searchOpen()) return;
+      if (overlayOpen()) return;
       if (
         !storageReady() ||
         e.isComposing ||
@@ -2827,11 +2940,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           e.target.closest("textarea, input, [contenteditable=true]"))
       )
         return;
-      if (contextMenu()) {
+      // An open menu owns the keyboard; its own Esc handling closes it.
+      if (contextMenu() || menuOpen() || inOpenMenu(e.target)) return;
+      // While search is open the map ignores every key but Esc, which closes
+      // it from anywhere.
+      if (searchOpen()) {
         if (e.key === "Escape") {
           e.preventDefault();
-          setContextMenu(undefined);
-          canvas.focus({ preventScroll: true });
+          closeSearch(false);
         }
         return;
       }
@@ -2924,14 +3040,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         add("root");
         return;
       }
-      if (
-        !selectedId() ||
-        (e.target instanceof Element && e.target.closest("[data-toolbar]"))
-      )
+      if (e.target instanceof Element && e.target.closest("[data-toolbar]"))
         return;
-      const id = selectedId() as string;
       const arrow = ARROW_DIRECTIONS.get(e.key);
       const plain = !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+      const first = visibleForest()[0]?.id;
+      // Ideas are not tab stops, so with nothing selected an arrow key is the
+      // keyboard's way onto the map.
+      if (!selectedId() && arrow && plain && first) {
+        e.preventDefault();
+        setColorScope("node");
+        setSelectedId(first);
+        return;
+      }
+      if (!selectedId()) return;
+      const id = selectedId() as string;
       // Option+arrows move ideas everywhere. Ctrl+arrows also work, except that
       // macOS reserves them for Mission Control.
       const move = arrow && !e.shiftKey && !e.metaKey && e.altKey !== e.ctrlKey;
@@ -2998,6 +3121,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
     };
     const wheel = (e: WheelEvent) => {
+      if (e.target instanceof Element && e.target.closest("dialog")) {
+        // The dialog scrolls itself, but a pinch there must not zoom the page.
+        if (e.ctrlKey || e.metaKey) e.preventDefault();
+        return;
+      }
       if (
         e.target instanceof Element &&
         e.target.closest("[data-toolbar], textarea")
@@ -3029,16 +3157,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           setTop(top() - (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * unit);
         });
     };
-    const saveShortcut = (event: KeyboardEvent | null) => {
+    // Saving is automatic, so the key must first keep the browser's own "Save
+    // page" dialog away. It saves only from the map: in a text field or behind
+    // a dialog a save would end the edit or act out of sight.
+    const saveShortcut = (event: KeyboardEvent) => {
+      event.preventDefault();
       if (
-        !event ||
+        overlayOpen() ||
         event.isComposing ||
         writing() ||
         (event.target instanceof Element &&
           event.target.closest("textarea, input, [contenteditable=true]"))
       )
         return;
-      event.preventDefault();
       save();
     };
     const historyShortcut = (
@@ -3050,6 +3181,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         event.isComposing ||
         !storageReady() ||
         contextMenu() ||
+        menuOpen() ||
+        inOpenMenu(event.target) ||
         pointer
       )
         return;
@@ -3080,9 +3213,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       } else if (action === "undo") undo();
       else redo();
     };
-    // Let the callback decide whether the target accepts text before suppressing
-    // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
+      const mod = (event.ctrlKey || event.metaKey) && !event.altKey;
+      if (mod && !event.shiftKey && matchesLetter(event, "s")) {
+        saveShortcut(event);
+        return;
+      }
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
       if (overlayOpen()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
@@ -3098,44 +3234,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cycleRegions(event.shiftKey ? -1 : 1);
         return;
       }
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (!mod) return;
       if (matchesLetter(event, "f") && !event.shiftKey) {
         if (!storageReady() || showPreferences()) return;
         event.preventDefault();
         openSearch();
         return;
       }
-      if (matchesLetter(event, "s") && !event.shiftKey) saveShortcut(event);
-      else if (matchesLetter(event, "z"))
+      if (matchesLetter(event, "z"))
         historyShortcut(event, event.shiftKey ? "redo" : "undo");
       else if (matchesLetter(event, "y") && !event.shiftKey)
         historyShortcut(event, "redo");
     };
     makeEventListener(window, "keydown", shortcuts);
     makeEventListener(window, "keydown", keydown);
-    const dismissContextMenu = (e: PointerEvent) => {
-      // Menus close on any press outside them, like native menus.
-      if (
-        menuOpen() &&
-        e.target instanceof Element &&
-        !e.target.closest('[aria-label="Project menu"]')
-      )
-        setMenuOpen(false);
-      if (
-        colorOpen() &&
-        e.target instanceof Element &&
-        !e.target.closest(
-          '[aria-label="Selected node color controls"], button[aria-label="Color"]',
-        )
-      )
-        setColorOpen(false);
-      if (
-        !(e.target instanceof Element) ||
-        !e.target.closest("[data-context-menu]")
-      )
-        setContextMenu(undefined);
-    };
-    makeEventListener(window, "pointerdown", dismissContextMenu);
     makeEventListener(window, "pointerup", (e) => stopPointer(e, true));
     makeEventListener(canvas, "wheel", wheel, { passive: false });
     const canvasClipboard = (e: ClipboardEvent) =>
@@ -3257,6 +3369,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setShowBackup(false);
     setMenuOpen((open) => !open);
   };
+  // "Sign in" inside a dialog: the dialog closes and the normal sign-in
+  // starts, so its progress and failures show where they always do. Phones
+  // keep their account controls in the menu panel, which opens instead.
+  let signIn: (() => void) | undefined;
+  const signInFrom = (show: (open: boolean) => void) =>
+    account().status === "authenticated" || account().status === "checking"
+      ? undefined
+      : () => {
+          returnToShare = false;
+          show(false);
+          if (isPhone()) setMenuOpen(true);
+          else signIn?.();
+        };
   // Runs a phone panel action on the map, with the panel out of the way.
   const fromPanel = (run: () => void) => () => {
     setMenuOpen(false);
@@ -3268,6 +3393,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       required
       aria-label="Project name"
       class="project-name"
+      readOnly={!storageReady()}
       style={
         isPhone()
           ? undefined
@@ -3279,7 +3405,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
       onBlur={finishProjectName}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+        if (e.key !== "Enter" && e.key !== "Escape") return;
+        e.currentTarget.blur();
+        canvas.focus({ preventScroll: true });
       }}
     />
   );
@@ -3315,21 +3443,32 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 else closeProjectMenu();
               })
             }
-            onKeyDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              // Only the keys the menu would take stop here. The rest reach
+              // the window, which keeps Mod+S from the browser and runs F6.
+              if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key))
+                e.stopPropagation();
+              // Enter opens the first match, but only of a typed filter: the
+              // unfiltered list starts with whichever map is newest.
+              const first = listedProjects()[0];
+              if (e.key === "Enter" && mapFilter().trim() && first) {
+                e.preventDefault();
+                setMenuOpen(false);
+                load(first.id);
+              }
+            }}
           />
         </Show>
         <ul
           id="saved-projects"
-          aria-label="Available projects"
+          aria-label="Saved maps"
           class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
         >
           <For
             each={listedProjects()}
             fallback={
               <li class="px-2 py-2 text-stone-500">
-                {mapFilter().trim()
-                  ? "No maps match."
-                  : "No saved projects yet."}
+                {mapFilter().trim() ? "No maps match" : "No saved maps yet"}
               </li>
             }
           >
@@ -3383,7 +3522,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         if (e.target === canvas) stopPointer(e, false);
       }}
       onContextMenu={openContextMenu}
-      class="map-canvas overflow-hidden w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
+      class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
       <ProjectPreferences
@@ -3398,9 +3537,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cloudStatus={cloudStatus()}
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
+        onSignIn={signInFrom(setShowPreferences)}
         onReviewAnalytics={
           isPhone() && analyticsEnabled
             ? () => {
+                returnToShare = false;
                 setShowPreferences(false);
                 reviewConsent();
               }
@@ -3416,12 +3557,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }
         cloud={view().saving().cloud}
         onOpenPreferences={() => {
+          returnToShare = true;
           setShowShare(false);
           setShowPreferences(true);
         }}
+        onSignIn={signInFrom(setShowShare)}
         onShared={(enabled) => track("share_link_changed", { enabled })}
       />
-      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2">
+      {/* On desktop the two top columns hold the menus and the search results,
+          which open over the bottom chrome in a small window. */}
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2 sm:z-40">
         <span role="status" class="sr-only">
           {saveDot().label}
         </span>
@@ -3494,24 +3639,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             ref={(el) => {
               projectMenu = el;
-              closeOnEscape(el, closeProjectMenu);
+              transientLayer(el, {
+                trigger: projectMenuButton,
+                close: () => setMenuOpen(false),
+              });
             }}
             data-no-pan
             data-toolbar
             role="menu"
             aria-label="Project menu"
-            class="map-toolbar menu-panel pointer-events-auto w-72 cursor-default"
+            // A long menu scrolls itself rather than run off a short window.
+            class="map-toolbar menu-panel pointer-events-auto max-h-[calc(100dvh-5rem)] w-72 overflow-y-auto cursor-default outline-none"
             onKeyDown={menuArrowKeys}
-            onFocusOut={(e) => {
-              // Tabbing out of the menu closes it, like a native menu.
-              const next = e.relatedTarget;
-              if (
-                next instanceof Element &&
-                !e.currentTarget.contains(next) &&
-                !next.closest('[aria-label="Project menu"]')
-              )
-                setMenuOpen(false);
-            }}
           >
             <fieldset disabled={fileBusy()} class="contents">
               <button
@@ -3601,6 +3740,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   setMenuOpen(false);
                   finishWriting();
                   finishProjectName();
+                  returnToShare = false;
                   setShowPreferences(true);
                 }}
               >
@@ -3626,21 +3766,49 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             data-no-pan
             data-toolbar
-            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2 text-xs text-stone-600 cursor-default"
+            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
+            ref={(el) => {
+              const observer = new ResizeObserver(() =>
+                setStorageIslandHeight(el.offsetHeight),
+              );
+              observer.observe(el);
+              onCleanup(() => {
+                observer.disconnect();
+                setStorageIslandHeight(0);
+              });
+            }}
           >
             <Show when={memoryOnly()}>
               <p role="status" class="text-amber-800">
-                Memory only · Export before closing this tab.
+                In memory only · Export before closing this tab.
               </p>
             </Show>
-            <p role="status" class="empty:hidden">
-              {storageMessage()}
-            </p>
+            <div class="flex items-start gap-2 has-[p:empty]:hidden">
+              <p role="status" class="min-w-0 flex-1 self-center">
+                {storageMessage()}
+              </p>
+              {/* While local saving is unavailable the message explains the
+                  retry button below, so it stays. */}
+              <Show when={storageMessage() && storageReady()}>
+                <button
+                  type="button"
+                  class="icon-button size-8!"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => {
+                    setStorageMessage("");
+                    canvas.focus({ preventScroll: true });
+                  }}
+                >
+                  <CloseIcon class="size-4" />
+                </button>
+              </Show>
+            </div>
             <Show when={!storageReady()}>
               <div class="flex flex-wrap gap-1">
                 <button
                   type="button"
-                  class="map-control text-xs"
+                  class="map-control outlined"
                   onClick={retryLocal}
                 >
                   Retry local saving
@@ -3650,7 +3818,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </div>
         </Show>
       </div>
-      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2 sm:z-40">
         <Show when={!isPhone()}>
           <div class="flex items-start gap-2">
             <nav
@@ -3676,7 +3844,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   type="button"
                   class="icon-button"
                   aria-label="Redo"
-                  title={`Redo (${MOD_LABEL}⇧Z)`}
+                  title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
                   disabled={!storageReady() || !canRedo()}
                   onClick={redo}
                 >
@@ -3702,9 +3870,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 class="icon-button"
                 aria-label="Outline"
                 title={`Outline (${ALT_LABEL}O)`}
-                aria-pressed={outlineOpen()}
+                aria-expanded={outlineOpen()}
                 disabled={!storageReady()}
-                onClick={() => setOutlineOpen((open) => !open)}
+                onClick={(e) => {
+                  setOutlineOpen((open) => !open);
+                  backToCanvas(e);
+                }}
               >
                 <OutlineIcon />
               </button>
@@ -3715,6 +3886,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               onRetry={() => void auth.check()}
               claiming={claiming()}
               claimMessage={claimMessage()}
+              signInRef={(start) => {
+                signIn = start;
+              }}
             />
           </div>
         </Show>
@@ -3723,7 +3897,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             aria-label="Search ideas"
-            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default"
+            // The field fills the island, so the island carries its focus ring.
+            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
+            // Beside the notes, not over their header: previews select ideas,
+            // and their notes follow.
+            classList={{
+              "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
+                notesOpen() && !isPhone(),
+            }}
+            ref={(el) => closeOnEscape(el, () => closeSearch(false))}
           >
             <div class="flex items-center gap-2 px-2">
               <SearchIcon class="size-4 shrink-0 text-stone-400" />
@@ -3750,10 +3932,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 }}
                 onKeyDown={(e) => {
                   const count = searchResults().length;
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    closeSearch(false);
-                  } else if (e.key === "Enter") {
+                  if (e.key === "Enter") {
                     e.preventDefault();
                     closeSearch(count > 0);
                   } else if (
@@ -3773,7 +3952,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button -mr-1"
                 aria-label="Close search"
-                title="Close search and return (Esc)"
+                title="Close search (Esc)"
                 onClick={() => closeSearch(false)}
               >
                 <CloseIcon class="size-4" />
@@ -3860,13 +4039,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </div>
       </Show>
       <Show when={outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div
+          class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+          style={outlineTop()}
+        >
           <Outline
             roots={scopeForest()}
             text={(id) => view().text(id)}
             selectedId={selectedId()}
             collapsed={collapsedIds()}
             onSelect={(id, via) => {
+              if (!storageReady()) return;
               finishWriting();
               setColorScope("node");
               setSelectedId(id);
@@ -3885,136 +4068,151 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </div>
       </Show>
       <AnalyticsConsent />
-      <Show when={claimCount() > 0 && !claimDismissed()}>
-        <section
-          data-no-pan
-          data-toolbar
-          aria-label="Maps from before sign-in"
-          class="map-toolbar absolute top-16 left-1/2 z-30 w-[28rem] max-w-[calc(100%-1.5rem)] -translate-x-1/2 p-3 cursor-default"
-        >
-          <p class="text-sm font-semibold text-stone-800">
-            Your earlier work is safe
-          </p>
-          <p class="mt-0.5 text-xs leading-5 text-stone-600">
-            {claimCount() === 1
-              ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
-              : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
-          </p>
-          <div class="mt-2.5 flex flex-wrap items-center gap-2">
+      {/* One column, so these stack instead of covering each other. */}
+      <div
+        class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
+        style={stripStyle(panelStrip())}
+      >
+        <Show when={claimCount() > 0 && !claimDismissed()}>
+          <section
+            data-no-pan
+            data-toolbar
+            aria-label="Maps from before sign-in"
+            // Between two open panels in a small window it turns tall and
+            // narrow rather than cover their headers.
+            class="map-toolbar pointer-events-auto w-[28rem] max-w-full min-w-36 p-3! cursor-default"
+          >
+            <p class="text-sm font-semibold text-stone-800">
+              Your earlier work is safe
+            </p>
+            <p class="mt-0.5 text-xs leading-5 text-stone-600">
+              {claimCount() === 1
+                ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
+                : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
+            </p>
+            <div class="mt-2.5 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                class="primary-button compact"
+                disabled={claiming()}
+                onClick={() => void addAnonymousProjects()}
+              >
+                {claiming() ? "Adding maps…" : "Add maps to this account"}
+              </button>
+              <button
+                type="button"
+                // As small as the primary action beside it.
+                class="map-control py-1.5! text-xs!"
+                disabled={claiming()}
+                onClick={() => {
+                  track("anonymous_maps_claim_dismissed", {
+                    count: claimCount(),
+                  });
+                  setClaimDismissed(true);
+                }}
+              >
+                Not now
+              </button>
+            </div>
+          </section>
+        </Show>
+        <Show when={focusId()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Branch focus"
+            // Clipped, so nothing can spill over the panels beside it. The
+            // minimum keeps the way out in reach.
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 overflow-hidden text-sm cursor-default"
+          >
             <button
               type="button"
-              class="primary-button px-3! py-1.5! text-xs!"
-              disabled={claiming()}
-              onClick={() => void addAnonymousProjects()}
+              class="map-control flex h-9 shrink-0 items-center gap-1.5"
+              title="Show the whole map (Esc with nothing selected)"
+              onClick={exitFocus}
             >
-              {claiming()
-                ? "Adding projects…"
-                : "Add anonymous projects to this account"}
+              <ArrowLeftIcon class="size-4" />
+              <span classList={{ "sr-only": crumbRoom() < 240 }}>
+                Whole map
+              </span>
             </button>
-            <button
-              type="button"
-              class="map-control text-xs"
-              disabled={claiming()}
-              onClick={() => {
-                track("anonymous_maps_claim_dismissed", {
-                  count: claimCount(),
-                });
-                setClaimDismissed(true);
-              }}
-            >
-              Not now
-            </button>
-          </div>
-        </section>
-      </Show>
-      <Show when={returnView()}>
-        <nav
-          data-no-pan
-          data-toolbar
-          aria-label="Return from search"
-          class="map-toolbar absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
-          classList={{ "top-16": !focusId(), "top-[7.25rem]": !!focusId() }}
-        >
-          <button
-            type="button"
-            class="map-control flex items-center gap-1.5"
-            title="Restore the view and folds from before the search"
-            onClick={() => {
-              const back = returnView();
-              setReturnView(undefined);
-              if (back) restoreView(back);
-              canvas.focus({ preventScroll: true });
-            }}
-          >
-            <ArrowLeftIcon class="size-4" />
-            Back to where you were
-          </button>
-          <button
-            type="button"
-            class="icon-button size-8!"
-            aria-label="Stay here"
-            title="Stay here"
-            onClick={() => setReturnView(undefined)}
-          >
-            <CloseIcon class="size-4" />
-          </button>
-        </nav>
-      </Show>
-      <Show when={focusId()}>
-        <nav
-          data-no-pan
-          data-toolbar
-          aria-label="Branch focus"
-          class="map-toolbar absolute top-16 left-1/2 z-20 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
-        >
-          <button
-            type="button"
-            class="map-control flex items-center gap-1.5"
-            title="Show the whole map (Esc)"
-            onClick={exitFocus}
-          >
-            <ArrowLeftIcon class="size-4" />
-            Whole map
-          </button>
-          <For each={focusPath()}>
-            {(id, index) => (
-              <>
-                <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
-                <Show
-                  when={index() < focusPath().length - 1}
-                  fallback={
-                    <span
-                      aria-current="location"
-                      class="max-w-48 truncate px-2 font-medium text-stone-800"
+            <For each={crumbs()}>
+              {(id, index) => (
+                <>
+                  <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
+                  <Show
+                    when={index() < crumbs().length - 1}
+                    fallback={
+                      <span
+                        aria-current="location"
+                        class="max-w-48 truncate px-2 font-medium text-stone-800"
+                      >
+                        {nodeLabel(id)}
+                      </span>
+                    }
+                  >
+                    {/* The steps above give way first, so where you are stays
+                        readable. */}
+                    <button
+                      type="button"
+                      class="map-control h-9 max-w-36 shrink-3 truncate"
+                      onClick={() => focusBranch(id)}
                     >
                       {nodeLabel(id)}
-                    </span>
-                  }
-                >
-                  <button
-                    type="button"
-                    class="map-control max-w-36 truncate"
-                    onClick={() => focusBranch(id)}
-                  >
-                    {nodeLabel(id)}
-                  </button>
-                </Show>
-              </>
-            )}
-          </For>
-        </nav>
-      </Show>
+                    </button>
+                  </Show>
+                </>
+              )}
+            </For>
+          </nav>
+        </Show>
+        <Show when={returnView()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Return from search"
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 text-sm cursor-default"
+          >
+            <button
+              type="button"
+              class="map-control flex h-9 min-w-0 items-center gap-1.5"
+              title="Restore the view and folds from before the search"
+              onClick={() => {
+                const back = returnView();
+                setReturnView(undefined);
+                if (back) restoreView(back);
+                canvas.focus({ preventScroll: true });
+              }}
+            >
+              <ArrowLeftIcon class="size-4 shrink-0" />
+              <span class="truncate">Back to where you were</span>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Stay here"
+              title="Stay here"
+              onClick={() => setReturnView(undefined)}
+            >
+              <CloseIcon class="size-4" />
+            </button>
+          </nav>
+        </Show>
+      </div>
       {/* The notice keeps its place above the selection toolbar's slot, so the
           toolbar reappearing (when an edit ends on press) never moves it from
           under the pointer. */}
-      <div class="pointer-events-none absolute bottom-[4.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center">
+      <div
+        class="pointer-events-none absolute bottom-[4.25rem] z-30 flex justify-center"
+        style={stripStyle(noticeStrip())}
+      >
         <Show when={notice()}>
           {(current) => (
             <div
               role="status"
               data-no-pan
               data-toolbar
-              class="notice pointer-events-auto flex items-center gap-3 cursor-default"
+              class="notice pointer-events-auto flex min-w-0 items-center gap-3 cursor-default"
             >
               <span class="min-w-0 truncate">{current().message}</span>
               <Show when={current().action}>
@@ -4041,7 +4239,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           )}
         </Show>
       </div>
-      <div class="pointer-events-none absolute bottom-3 left-1/2 z-20 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+      {/* Level with the notice and after it, so the color popover, which opens
+          into the notice's slot, paints over it. */}
+      <div
+        class="pointer-events-none absolute bottom-3 z-30 flex flex-col items-center gap-2"
+        style={stripStyle(bottomStrip())}
+      >
         <Show when={selectedId() && !writing() && !drag()}>
           <section
             data-no-pan
@@ -4052,15 +4255,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <Show when={colorOpen()}>
               <section
                 aria-label="Selected node color controls"
-                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2"
+                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2 outline-none"
+                // Opaque: it opens over the notice and the analytics banner,
+                // and inside the toolbar its own blur cannot hide them.
+                style={{ background: "var(--surface)" }}
                 ref={(el) =>
-                  closeOnEscape(el, () => {
-                    setColorOpen(false);
-                    document
-                      .querySelector<HTMLButtonElement>(
+                  transientLayer(el, {
+                    trigger: () =>
+                      document.querySelector<HTMLButtonElement>(
                         'button[aria-label="Color"]',
-                      )
-                      ?.focus();
+                      ),
+                    close: () => setColorOpen(false),
                   })
                 }
               >
@@ -4080,7 +4285,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       checked={colorScope() === "node"}
                       onChange={() => setColorScope("node")}
                     />
-                    <span>This node</span>
+                    <span>This idea</span>
                   </label>
                   <label
                     class="color-scope"
@@ -4102,7 +4307,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <fieldset class="grid grid-cols-4 gap-1 px-1">
                   <legend class="sr-only">
                     Choose a color for{" "}
-                    {colorScope() === "node" ? "this node" : "this branch"}
+                    {colorScope() === "node" ? "this idea" : "this branch"}
                   </legend>
                   <For each={NODE_COLORS}>
                     {(color) => (
@@ -4113,7 +4318,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         aria-pressed={
                           (selectedNode()?.color ?? "blue") === color.value
                         }
-                        title={`${color.label} · ${colorScope() === "node" ? "This node" : "This branch"}`}
+                        title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
                         onClick={() => colorSelectedNode(color.value)}
                       >
                         <span
@@ -4147,8 +4352,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 </fieldset>
                 <p class="px-2 pb-1 text-xs text-stone-500">
                   {colorScope() === "node"
-                    ? "Changes only the selected node."
-                    : "Changes this node and all its descendants."}
+                    ? "Changes only the selected idea."
+                    : "Changes this idea and everything under it."}
                 </p>
               </section>
             </Show>
@@ -4164,7 +4369,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="tool-button"
-              title="Add a sibling idea (Enter)"
+              // Enter on a central idea adds a child instead.
+              title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
               disabled={selectedId() === focusId()}
               onClick={() => add("sibling")}
             >
@@ -4178,7 +4384,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Color"
               title="Color"
               aria-expanded={colorOpen()}
-              onClick={() => setColorOpen((open) => !open)}
+              onClick={(e) => {
+                setColorOpen((open) => !open);
+                if (!colorOpen()) backToCanvas(e);
+              }}
             >
               <span
                 aria-hidden="true"
@@ -4190,7 +4399,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               class="icon-button relative"
               aria-label="Notes"
               title={`Notes (${ALT_LABEL}N)`}
-              aria-pressed={notesOpen()}
+              aria-expanded={notesOpen()}
               onClick={() => toggleNotes()}
             >
               <NoteIcon />
@@ -4228,7 +4437,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button narrow-hide"
                 aria-label={
-                  focusId() === selectedId() ? "Leave focus" : "Focus branch"
+                  focusId() === selectedId()
+                    ? "Leave focus"
+                    : "Focus on this branch"
                 }
                 title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
                 aria-pressed={focusId() === selectedId()}
@@ -4245,7 +4456,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="More actions"
               title="More actions"
               aria-haspopup="menu"
+              aria-expanded={!!contextMenu()?.above}
               onClick={(e) => {
+                if (contextMenu()?.above) {
+                  setContextMenu(undefined);
+                  backToCanvas(e);
+                  return;
+                }
                 const bounds = e.currentTarget.getBoundingClientRect();
                 const id = selectedId();
                 setContextMenu({
@@ -4403,17 +4620,24 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             ref={(el) => {
               contextMenuElement = el;
-              closeOnEscape(el, () => {
-                setContextMenu(undefined);
-                canvas.focus({ preventScroll: true });
+              const moreActions = () =>
+                document.querySelector<HTMLButtonElement>(
+                  'button[aria-label="More actions"]',
+                );
+              transientLayer(el, {
+                trigger: moreActions,
+                close: () => setContextMenu(undefined),
+                // A right-click menu has no trigger; it came from the map.
+                returnFocus: () =>
+                  (contextMenu()?.above && moreActions()) || canvas,
               });
             }}
             data-no-pan
             data-toolbar
             data-context-menu
             role="menu"
-            aria-label={menu().nodeId ? "Node actions" : "Canvas actions"}
-            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default"
+            aria-label={menu().nodeId ? "Idea actions" : "Canvas actions"}
+            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default outline-none"
             style={{
               left: `${menu().x}px`,
               top: `${menu().y}px`,
@@ -4436,7 +4660,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     add("root", position);
                   }}
                 >
-                  Create root node
+                  New central idea
                 </button>
               }
             >
@@ -4456,7 +4680,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       class="menu-item"
                       onClick={run(() => add("child"))}
                     >
-                      Add child node
+                      Add child idea
                       <kbd class="ml-auto">Tab</kbd>
                     </button>
                     <button
@@ -4466,8 +4690,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       disabled={nodeId() === focusId()}
                       onClick={run(() => add("sibling"))}
                     >
-                      Add sibling
-                      <kbd class="ml-auto">Enter</kbd>
+                      Add sibling idea
+                      {/* Enter on a central idea adds a child instead. */}
+                      <Show when={details().get(nodeId())?.parent}>
+                        <kbd class="ml-auto">Enter</kbd>
+                      </Show>
                     </button>
                     <button
                       type="button"
@@ -4477,7 +4704,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(insertParent)}
                     >
                       Insert parent
-                      <kbd class="ml-auto">⇧Tab</kbd>
+                      <kbd class="ml-auto">{SHIFT_LABEL}Tab</kbd>
                     </button>
                     <div class="menu-divider" />
                     <button
@@ -4571,7 +4798,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(removeSelected)}
                     >
                       Delete
-                      <kbd class="ml-auto">⌫</kbd>
+                      <kbd class="ml-auto">{DELETE_LABEL}</kbd>
                     </button>
                   </>
                 );
@@ -4581,9 +4808,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         )}
       </Show>
       <Show when={!isPhone()}>
-        <div
+        <section
           data-no-pan
           data-toolbar
+          aria-label="View and help"
           class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
         >
           <fieldset aria-label="Canvas zoom" class="flex items-center gap-0.5">
@@ -4593,16 +4821,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom out"
               title={`Zoom out (${MOD_LABEL}−)`}
               disabled={zoom() <= ZOOM_MIN}
-              onClick={() => changeZoom(zoom() / 1.2)}
+              onClick={(e) => {
+                changeZoom(zoom() / 1.2);
+                backToCanvas(e);
+              }}
             >
               <MinusIcon />
             </button>
             <button
               type="button"
-              class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
+              class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
               aria-label="Zoom to 100%"
               title={`Zoom to 100% (${MOD_LABEL}0)`}
-              onClick={() => changeZoom(1)}
+              onClick={(e) => {
+                changeZoom(1);
+                backToCanvas(e);
+              }}
             >
               {Math.round(zoom() * 100)}%
             </button>
@@ -4612,7 +4846,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom in"
               title={`Zoom in (${MOD_LABEL}+)`}
               disabled={zoom() >= ZOOM_MAX}
-              onClick={() => changeZoom(zoom() * 1.2)}
+              onClick={(e) => {
+                changeZoom(zoom() * 1.2);
+                backToCanvas(e);
+              }}
             >
               <PlusIcon />
             </button>
@@ -4623,7 +4860,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Fit map"
               title={`Fit map (${ALT_LABEL}1)`}
               disabled={!forest().length}
-              onClick={fitMap}
+              onClick={(e) => {
+                fitMap();
+                backToCanvas(e);
+              }}
             >
               <FitMapIcon />
             </button>
@@ -4632,14 +4872,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="icon-button"
-            aria-label="Keyboard shortcuts and navigation"
-            title="Shortcuts and navigation (?)"
+            aria-label="Shortcuts and navigation"
+            title="Shortcuts and navigation (? with nothing selected)"
             aria-haspopup="dialog"
             onClick={() => setShowHelp(true)}
           >
             <HelpIcon />
           </button>
-        </div>
+        </section>
       </Show>
       <Show when={isPhone()}>
         <Dialog
@@ -4785,7 +5025,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               class="menu-item"
               disabled={!storageReady()}
               aria-haspopup="dialog"
-              onClick={fromPanel(() => setShowPreferences(true))}
+              onClick={fromPanel(() => {
+                returnToShare = false;
+                setShowPreferences(true);
+              })}
             >
               Project preferences…
             </button>

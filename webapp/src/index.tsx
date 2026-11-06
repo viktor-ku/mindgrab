@@ -29,7 +29,11 @@ render(
             <p role="alert" class="my-4">
               {upgradeMessage}
             </p>
-            <button type="button" onClick={() => window.location.reload()}>
+            <button
+              type="button"
+              class="primary-button"
+              onClick={() => window.location.reload()}
+            >
               Retry opening
             </button>
           </main>
