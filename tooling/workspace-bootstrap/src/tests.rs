@@ -249,10 +249,15 @@ fn moving_a_saved_callback_keeps_comments_and_table_order() -> Result<()> {
     bootstrap_worktree(&root, &target)?;
     let path = target.join(CONFIG);
     let current = fs::read_to_string(&path)?;
-    let wrapped = |text: &str| format!("[tools]\nnode = \"24\"\n\n# Keep this note.\n{text}");
-    fs::write(&path, wrapped(&current.replace(CALLBACK, OLD_CALLBACK)))?;
+    let wrapped = |text: &str, callback: &str| {
+        let line = format!("{callback}\"");
+        let text = text.replace(&line, &format!("{line} # Registered in staging"));
+        format!("[tools]\nnode = \"24\"\n\n# Keep this note.\n{text}")
+    };
+    let stale = current.replace(CALLBACK, OLD_CALLBACK);
+    fs::write(&path, wrapped(&stale, OLD_CALLBACK))?;
     bootstrap_worktree(&root, &target)?;
-    assert_eq!(fs::read_to_string(&path)?, wrapped(&current));
+    assert_eq!(fs::read_to_string(&path)?, wrapped(&current, CALLBACK));
     Ok(())
 }
 

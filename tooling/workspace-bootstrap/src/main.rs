@@ -188,7 +188,11 @@ fn bootstrap(main_checkout: &Path, directory: &Path) -> Result<Option<Environmen
         if let Some(uri) = moved {
             // Reread, because `env` left `config` above. The rest of the file stays as is.
             let mut config = read_config(&root)?;
-            config["env"]["WORKOS_REDIRECT_URI"] = value(&uri);
+            if let Some(callback) = config["env"]["WORKOS_REDIRECT_URI"].as_value_mut() {
+                let decor = callback.decor().clone();
+                *callback = uri.as_str().into();
+                *callback.decor_mut() = decor;
+            }
             write_file(&root, &config.to_string())?;
             saved.insert("WORKOS_REDIRECT_URI".to_owned(), uri);
         }

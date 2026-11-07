@@ -202,7 +202,8 @@ oversized body (the route's limit is 8 KiB) counts as empty fields, never a 4xx.
 Up to 64 MiB of an oversized body is read and discarded first: closing a connection
 with bytes unread resets it, and a browser still sending would never see the page.
 Reading stops after 15 seconds. Because the backend has no rate limit, at most 1,024
-attempts read or wait at once, and any others are denied immediately without one.
+attempts read or wait at once, and any others are denied immediately without reading
+the body.
 
 - **Credentials.** The password is only tested with `is_empty()`. Nothing submitted
   is logged, stored, traced, sent to analytics or forwarded, and the form struct must

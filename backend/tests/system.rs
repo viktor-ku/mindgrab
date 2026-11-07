@@ -53,6 +53,8 @@ async fn the_account_header_is_validated_before_the_session_so_deploys_can_probe
         .await
         .unwrap();
     assert_eq!(probe.status(), 400);
+    let body = probe.text().await.unwrap();
+    assert!(body.contains(r#""code":"invalid_request""#), "{body}");
     f.close().await;
 }
 
