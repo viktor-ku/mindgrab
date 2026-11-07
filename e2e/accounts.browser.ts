@@ -1366,6 +1366,12 @@ test("retrying a failed storage change from the keyboard keeps focus in the dial
   );
 });
 
+async function accountlessCatalog(size: number) {
+  await eventually(
+    async () => (await call("catalog", "anonymous")).length === size,
+    `anonymous catalog of ${size}`,
+  );
+}
 async function newMap() {
   const previous = await call("id");
   await projectMenu("New map");
@@ -1612,20 +1618,164 @@ test("a background switch to the account's map waits for search to close", async
   await eventually(async () => (await call("id")) !== seed, "the switch");
 });
 
-test("a saving switch flipped while a map opens applies to the map that opens", async () => {
+test("a background switch to the account's map waits for Notes to lose focus", async () => {
+  await cloudAccountWithTwoMaps();
+  await freshBrowser();
+  backend.recentGate = deferred();
+  const seed = await call("id");
+  await login();
+  await page.locator("[data-node-id]").first().click();
+  await page.getByRole("button", { name: /Notes/ }).first().click();
+  const notes = page.getByRole("textbox", { name: "Idea notes" });
+  await notes.click();
+  backend.recentGate.resolve();
+  backend.recentGate = undefined;
+  await accountCatalogSize(2);
+  await Bun.sleep(300);
+  expect(await call("id")).toBe(seed);
+  expect(await notes.evaluate((el) => el === document.activeElement)).toBe(
+    true,
+  );
+  await page.locator("[data-node-id]").first().click();
+  await eventually(async () => (await call("id")) !== seed, "the switch");
+});
+
+test("a saving switch flipped on the placeholder keeps it as the map and leaves the stored one alone", async () => {
+  await rename("Stored map");
   const stored = await call("id");
   await call("openGate", true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="false"]');
   await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
   await projectMenu("Project preferences…");
   const dialog = page.getByRole("dialog", { name: "Project preferences" });
   await dialog
     .getByRole("switch", { name: "Save locally", exact: true })
     .click();
-  await call("openGate", false);
   await dialog.getByText("This map lives only in memory.").waitFor();
-  expect(await call("id")).toBe(stored);
+  await call("openGate", false);
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await dialog.getByText("This map lives only in memory.").waitFor();
+  expect(
+    (await call("catalog", "anonymous")).find((entry) => entry.id === stored)
+      ?.saving?.local,
+  ).toBe(true);
+});
+
+test("waiting maps stay listed while the account check fails", async () => {
+  await rename("Waiting one");
+  await newMap();
+  await rename("Open map");
+  backend.registerGate = deferred();
+  await login();
+  await untilRegistrationRequested();
+  backend.meStatus = 503;
+  await page.reload();
+  await ready();
+  await projectMenu("Open map…");
+  await page.getByRole("menuitem", { name: /Waiting one/ }).waitFor();
+  await page.keyboard.press("Escape");
+  backend.meStatus = undefined;
+});
+
+test("a damaged remembered map does not stop a reload or the account check", async () => {
+  await rename("B healthy map");
+  const healthy = await call("id");
+  await newMap();
+  await rename("A damaged map");
+  const damaged = await call("id");
+  backend.registerGate = deferred();
+  await login();
+  await untilRegistrationRequested();
+  await call("corrupt", "anonymous", damaged);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(healthy);
+  await page.getByText(A.name, { exact: true }).waitFor();
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
+  await claimed(healthy);
+  expect(await claimPhase(damaged)).not.toBe("complete");
+});
+
+test("closing the tab warns about an edited placeholder", async () => {
+  await call("failOpen", true);
+  await page.reload();
+  await page.getByRole("button", { name: "Retry local saving" }).waitFor();
+  const warned = () =>
+    page.evaluate(() => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+  expect(await warned()).toBe(false);
+  await edit("Not stored anywhere");
+  expect(await warned()).toBe(true);
+});
+
+test("an open editor on the placeholder is left alone when the stored map arrives", async () => {
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  await page.locator("[data-node-id]").first().dblclick();
+  await page.getByRole("textbox", { name: "Node text" }).waitFor();
+  await call("openGate", false);
+  await Bun.sleep(300);
+  await page.keyboard.type("Hello");
+  await page.keyboard.press("Enter");
+  await page.getByText("Hello", { exact: true }).waitFor();
+  await ready();
+  expect(await call("id")).toBe(draft);
+});
+
+test("a name being composed survives storage opening under it", async () => {
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const name = page.getByRole("textbox", { name: "Project name" });
+  await name.fill("Plan ");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Input.imeSetComposition", {
+    text: "にほん",
+    selectionStart: 3,
+    selectionEnd: 3,
+  });
+  await call("openGate", false);
+  await Bun.sleep(300);
+  await cdp.send("Input.insertText", { text: "日本" });
+  await name.press("Enter");
+  await ready();
+  expect(await name.inputValue()).toBe("Plan 日本");
+});
+
+test("saving during a slow first visit leaves one map", async () => {
+  await context.close();
+  context = await browser.newContext();
+  context.setDefaultTimeout(15_000);
+  await context.route("**/api/**", (route) => backend.route(route));
+  await context.addInitScript(() => {
+    if (!sessionStorage.getItem("accountHarness/started")) {
+      sessionStorage.setItem("accountHarness/started", "1");
+      sessionStorage.setItem("accountHarness/open", "hold");
+    }
+  });
+  page = await context.newPage();
+  page.on("pageerror", (error) => errors.push(error));
+  await page.goto(appUrl);
+  await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  await page.getByRole("textbox", { name: "Project name" }).fill("Saved early");
+  await page.getByRole("textbox", { name: "Project name" }).press("Enter");
+  await projectMenu("Save now");
+  await call("openGate", false);
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await accountlessCatalog(1);
 });
 
 test("a memory-only anonymous map stays reachable after New map under an account", async () => {

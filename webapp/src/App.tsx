@@ -51,12 +51,13 @@ import {
   ORIGIN,
   setNodeNote,
   renameProject,
+  setSavingPreferences,
   reorderNode,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
 import { createProjectView } from "./project-view";
-import { bindTextarea, composing } from "./text-binding";
+import { bindTextarea, composing, trackComposition } from "./text-binding";
 import {
   ProjectRepository,
   accountNamespace,
@@ -767,7 +768,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } = {},
   ): Promise<boolean> {
     const request = ++activation;
-    if (disposed || !owned(owner)) {
+    if (composing()) await until(() => !composing());
+    if (disposed || request !== activation || !owned(owner)) {
       await handle.close();
       return false;
     }
@@ -922,6 +924,41 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
   }
 
+  // The first of these maps that can be read. One damaged map must not stand
+  // between the user and the rest; only when none opens does the error surface.
+  async function openFirstReadable(owner: ProjectRepository, ids: string[]) {
+    let failure: unknown;
+    for (const id of ids) {
+      if (!owned(owner) || disposed) return;
+      try {
+        return await owner.open(id);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (failure) throw failure;
+  }
+
+  // The map that opens first replaces the whole screen, so it waits while the
+  // user is busy on the placeholder. An edit ends the wait: the placeholder is
+  // then the map, whether or not the user has left the editor.
+  function untilFree() {
+    const placeholder = untrack(doc);
+    return until(() => {
+      historyRevision();
+      return (
+        doc() !== placeholder || doc().version() !== draftVersion || !occupied()
+      );
+    });
+  }
+  // Save or another action may put the placeholder in storage while the first
+  // map is still opening; that map then stays where it is.
+  const adopted = () => !!activeHandle;
+  async function arrive(handle: ProjectHandle, owner: ProjectRepository) {
+    await untilFree();
+    return activate(handle, owner, { unless: adopted });
+  }
+
   // Opens one of this browser's anonymous maps under the account: the
   // remembered one when it is among them, else the first. The migration
   // swaps it to its account copy later.
@@ -929,33 +966,34 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     source: ProjectRepository,
     entries: CatalogEntry[],
   ) {
-    const [first] = entries;
-    if (!first) return false;
     const remembered = await source.latestProject();
-    const id = entries.some((entry) => entry.id === remembered)
-      ? (remembered ?? first.id)
-      : first.id;
-    if (!owned(source) || disposed) return false;
+    const handle = await openFirstReadable(
+      source,
+      entries
+        .map((entry) => entry.id)
+        .sort((a, b) => +(b === remembered) - +(a === remembered)),
+    ).catch(() => undefined);
+    if (!handle) return false;
+    if (!owned(source) || disposed) {
+      await handle.close();
+      return false;
+    }
     setLookupArmed(true);
-    await activate(await source.open(id), source, { unless: adopted });
+    await arrive(handle, source);
     return true;
   }
-
-  // Save or another action may put the placeholder in storage while the first
-  // map is still opening; that map then stays where it is.
-  const adopted = () => !!activeHandle;
 
   async function openLatestOrCreate(target = repository) {
     const latest = await target.latestProject();
     if (target !== repository || disposed) return;
-    if (latest) {
-      await activate(await target.open(latest), target, { unless: adopted });
-      return;
-    }
-    const [local] = (await target.list()).sort(newestFirst);
+    const local = (await target.list()).sort(newestFirst);
     if (target !== repository || disposed) return;
-    if (local) {
-      await activate(await target.open(local.id), target, { unless: adopted });
+    const stored = [
+      ...new Set([...(latest ? [latest] : []), ...local.map(({ id }) => id)]),
+    ];
+    if (stored.length) {
+      const handle = await openFirstReadable(target, stored);
+      if (handle) await arrive(handle, target);
       return;
     }
     const source = anonymousRepo();
@@ -980,55 +1018,47 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return;
       }
       if (existing) {
-        await activate(existing, target, { unless: adopted });
+        await arrive(existing, target);
         return;
       }
-      // Without an answer from the cloud, an untouched anonymous map is a
-      // better first map than another empty one: it can still be swapped for
-      // the account's latest once the lookup gets through.
+      // An untouched anonymous map is a better first map than another empty
+      // one. It becomes the account's first if the cloud has none, and can
+      // still be swapped for the latest if the lookup got no answer.
       if (
-        existing === undefined &&
-        (await openAnonymous(
+        await openAnonymous(
           source,
-          (
-            await source.list()
-          ).filter((entry) => entry.saving?.local !== false),
-        ))
+          (await source.list()).filter(
+            (entry) => entry.saving?.local !== false,
+          ),
+        )
       )
         return;
       if (target !== repository || disposed || activeHandle) return;
     }
+    await untilFree();
     if (activeHandle) return;
-    // An edited placeholder is the first map; adopting it creates nothing.
-    if (!activeHandle && doc().version() !== draftVersion) {
-      await adoptDraft(target);
-      if (target === repository && !disposed)
-        track("project_created", { trigger: "first_open" });
-      return;
-    }
-    await activate(
-      await target.create({
-        name: generateProjectName([]),
-        root: { text: "New idea" },
-      }),
-      target,
-    );
-    if (target === repository && !disposed) {
+    // The placeholder is the first map, so nothing can race it into a second.
+    const untouched = doc().version() === draftVersion;
+    await adoptDraft(target);
+    if (target !== repository || disposed) return;
+    if (untouched && !occupied()) {
+      focusMap();
       selectFirstIdea();
-      track("project_created", { trigger: "first_open" });
     }
+    track("project_created", { trigger: "first_open" });
   }
 
   async function performInitializeWorkspace() {
     await auth.hydrate();
     if (disposed) return;
+    // The session never waits for a map to open, or for one that cannot.
+    auth.start();
     if (auth.state.user?.id !== activeUserId) await accountChanged(auth.state);
     else {
       setAccount(auth.state);
       watchCatalog(repository);
       await openLatestOrCreate(repository);
     }
-    if (!disposed) auth.start();
   }
 
   function watchCatalog(owner: ProjectRepository) {
@@ -1226,7 +1256,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Opening another map replaces the whole screen, so it also waits for the
   // search or panel the user is in.
   const occupied = () =>
-    typing() || searchOpen() || showLoad() || overlayOpen() || composing();
+    typing() ||
+    notesFocused() ||
+    searchOpen() ||
+    showLoad() ||
+    overlayOpen() ||
+    composing();
 
   // Moves the screen from the anonymous map to its account copy without the
   // user noticing: between two keystrokes, keeping selection and viewport.
@@ -1443,14 +1478,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       : null;
   });
   const openInclude = () => !openPristine() || lookupNull();
+  // The waiting maps are local, so listing them never depends on the account
+  // check getting through; only copying them does.
   const claims = createQuery(() => {
-    const userId = account().user?.id ?? null;
+    const userId = account().user?.id ?? activeUserId ?? null;
     const source = anonymousRepo();
     const id = openId();
     const include = openInclude();
     return {
       queryKey: ["anonymous-claims", deployment, userId, id, include],
-      enabled: account().status === "authenticated" && !!source,
+      enabled: !!userId && !!source,
       placeholderData: keepList,
       queryFn: () =>
         userId && source
@@ -1475,7 +1512,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const source = anonymousRepo();
     return {
       queryKey: ["anonymous-claims", deployment, "in-memory"],
-      enabled: account().status === "authenticated" && !!source,
+      enabled: !!source,
       placeholderData: keepList,
       queryFn: async () =>
         (await source?.list())?.filter(
@@ -1747,17 +1784,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function performChangeSaving(
     value: import("./project-document").SavingPreferences,
   ) {
-    // A switch flipped while a map opens applies to the map that opens; only
-    // when none will does the placeholder become the map.
-    await until(
-      () =>
-        !!activeHandle ||
-        !(initializeMutation.isPending || accountMutation.isPending),
-    );
-    if (!activeHandle) await adoptDraft(repository);
     const handle = activeHandle;
     const owner = handleRepository;
-    if (!handle) return;
+    // On the placeholder a switch is an edit like any other: the placeholder
+    // becomes the map, and the map that was opening stays in the list, its
+    // own switches untouched.
+    if (!handle) {
+      setSavingPreferences(doc(), value);
+      return;
+    }
     try {
       await owner.updateSaving(handle, value);
       track("saving_changed", { local: value.local, cloud: value.cloud });
@@ -2333,6 +2368,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
   const [notesOpen, setNotesOpen] = createSignal(false);
+  const [notesFocused, setNotesFocused] = createSignal(false);
+  const isNotesField = (target: EventTarget) =>
+    target instanceof Element &&
+    target.matches('textarea[aria-label="Idea notes"]');
   // Chrome that closes while it holds focus (a panel, a menu item, a banner
   // button, a breadcrumb) hands focus back to the map, so keyboard users never
   // land on the page body.
@@ -2701,10 +2740,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setReturnView(undefined);
       setFocusId(undefined);
     });
+    focusMap();
+  }
+
+  function focusMap() {
     // A first visit opens a project after the analytics banner has appeared;
-    // keep "Accept all" focused until the visitor chooses. A map arriving
-    // behind search leaves the cursor in the search box.
-    if (document.activeElement?.closest('[aria-label="Search ideas"]')) return;
+    // keep "Accept all" focused until the visitor chooses.
     const banner = consentOpen()
       ? document.querySelector<HTMLButtonElement>(
           '[aria-label="Analytics choice"] button',
@@ -3563,6 +3604,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (
         recoveryPending() ||
+        (!activeHandle && doc().version() !== draftVersion) ||
         repository.hasMemoryOnlyProjects() ||
         anonymousRepo()?.hasMemoryOnlyProjects() ||
         (!view().saving().local &&
@@ -4031,6 +4073,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   };
   const ProjectNameInput = () => (
     <input
+      ref={(input) => onCleanup(trackComposition(input))}
       type="text"
       required
       aria-label="Project name"
@@ -4148,6 +4191,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       tabIndex={-1}
       aria-label="Mind map canvas"
       data-storage-ready={storageReady()}
+      onFocusIn={(e) => setNotesFocused(isNotesField(e.target))}
+      onFocusOut={(e) => {
+        if (isNotesField(e.target)) setNotesFocused(false);
+      }}
       onPointerDown={(e) => {
         if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
           return;
