@@ -874,9 +874,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Persists the placeholder under its own UUID and keeps it on screen. The
   // snapshot is taken at the commit point, so keystrokes typed while the
   // project opened are included.
-  async function adoptDraft(owner: ProjectRepository) {
+  async function adoptDraft(owner: ProjectRepository, remember = true) {
     const current = doc();
-    const handle = await owner.open(current.id);
+    const handle = await owner.open(current.id, { remember });
     return activate(handle, owner, {
       adopted: true,
       keepView: true,
@@ -947,8 +947,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // user is busy on the placeholder. An edit ends the wait: the placeholder is
   // then the map, whether or not the user has left the editor.
   function untilFree() {
-    // The session does not wait for the user any more than they wait for it.
-    auth.start();
     const placeholder = untrack(doc);
     return until(() => {
       historyRevision();
@@ -994,6 +992,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (target !== repository || disposed) return;
     const local = (await target.list()).sort(newestFirst);
     if (target !== repository || disposed) return;
+    let unreadable = false;
     const stored = [
       ...new Set([...(latest ? [latest] : []), ...local.map(({ id }) => id)]),
     ];
@@ -1007,6 +1006,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return;
       }
       if (target !== repository || disposed) return;
+      unreadable = true;
     }
     const source = anonymousRepo();
     const userId = activeUserId;
@@ -1051,7 +1051,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (activeHandle) return;
     // The placeholder is the first map, so nothing can race it into a second.
     const untouched = doc().version() === draftVersion;
-    await adoptDraft(target);
+    // Stored maps that did not open may only be slow, so an empty stand-in
+    // does not take over as the map the next visit opens.
+    await adoptDraft(target, !(unreadable && untouched));
     if (target !== repository || disposed) return;
     if (untouched && !occupied()) {
       focusMap();
@@ -1273,7 +1275,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // search or panel the user is in.
   const occupied = () =>
     typing() ||
-    notesFocused() ||
+    fieldFocused() ||
     searchOpen() ||
     showLoad() ||
     overlayOpen() ||
@@ -2387,10 +2389,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
   const [notesOpen, setNotesOpen] = createSignal(false);
-  const [notesFocused, setNotesFocused] = createSignal(false);
-  const isNotesField = (target: EventTarget) =>
+  // A field can be in use before anything is typed into it.
+  const [fieldFocused, setFieldFocused] = createSignal(false);
+  const isTextField = (target: EventTarget) =>
     target instanceof Element &&
-    target.matches('textarea[aria-label="Idea notes"]');
+    target.matches(
+      'textarea[aria-label="Idea notes"], input[aria-label="Project name"]',
+    );
   // Chrome that closes while it holds focus (a panel, a menu item, a banner
   // button, a breadcrumb) hands focus back to the map, so keyboard users never
   // land on the page body.
@@ -4210,9 +4215,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       tabIndex={-1}
       aria-label="Mind map canvas"
       data-storage-ready={storageReady()}
-      onFocusIn={(e) => setNotesFocused(isNotesField(e.target))}
+      onFocusIn={(e) => setFieldFocused(isTextField(e.target))}
       onFocusOut={(e) => {
-        if (isNotesField(e.target)) setNotesFocused(false);
+        if (isTextField(e.target)) setFieldFocused(false);
       }}
       onPointerDown={(e) => {
         if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
@@ -4485,7 +4490,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               </p>
             </Show>
             <div class="flex items-start gap-2 has-[p:empty]:hidden">
-              <p role="status" class="min-w-0 flex-1 self-center">
+              <p
+                role="status"
+                data-storage-message
+                class="min-w-0 flex-1 self-center"
+              >
                 {storageMessage()}
               </p>
               {/* While local saving is unavailable the message explains the

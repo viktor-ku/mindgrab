@@ -59,6 +59,18 @@ class Socket {
 }
 window.WebSocket = Socket as unknown as typeof WebSocket;
 
+// Everything this page has told the user, including what cleared itself again
+// before a test could look.
+const messages = new Set<string>();
+new MutationObserver(() => {
+  for (const element of document.querySelectorAll(
+    '[data-storage-message], .notice, [role="alert"]',
+  )) {
+    const text = element.textContent?.trim();
+    if (text) messages.add(text);
+  }
+}).observe(document, { subtree: true, childList: true, characterData: true });
+
 let writesFail = false;
 let failedProject = "";
 let authWritesFail = false;
@@ -184,6 +196,9 @@ const accountHarness = {
       namespace,
     }).project(id);
   },
+  messages() {
+    return [...messages];
+  },
   failAuthWrites(value: boolean) {
     authWritesFail = value;
   },
@@ -193,8 +208,8 @@ const accountHarness = {
   openGate(value: boolean, only = "") {
     setOpenMode(value ? "hold" : null, only);
   },
-  failOpen(value: boolean) {
-    setOpenMode(value ? "fail" : null);
+  failOpen(value: boolean, only = "") {
+    setOpenMode(value ? "fail" : null, only);
   },
   editRetired(id: string) {
     const doc = retired.find((doc) => doc.id === id);

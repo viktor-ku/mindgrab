@@ -346,13 +346,12 @@ async function addChild(text: string, target = page) {
 }
 // The migration never asks or tells: no banner, no alert, no notice.
 async function expectSilence(target = page) {
-  expect(await target.getByRole("alert").count()).toBe(0);
-  expect(
-    await target
-      .getByRole("button", { name: "Add maps to this account" })
-      .count(),
-  ).toBe(0);
-  expect(await target.getByText(/Added \d+ maps?/).count()).toBe(0);
+  const messages = await target.evaluate(() =>
+    window.accountHarness.messages(),
+  );
+  expect(messages.filter((text) => !text.startsWith("Saved locally"))).toEqual(
+    [],
+  );
 }
 const claimPhase = (id: string, target = page) =>
   target.evaluate(
@@ -1825,22 +1824,62 @@ test("the account check does not wait for a map that cannot open", async () => {
   await eventually(async () => backend.meStarted, "the account check");
 });
 
-test("the account check does not wait for the user to leave search", async () => {
+test("a sign-in returning under a name being typed leaves the name alone", async () => {
   await login();
+  await rename("Account map");
+  await cloudSaved();
+  await signOut();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await ready();
+  await rename("My work");
+  const anon = await call("id");
+  await call("openGate", true, anon);
+  backend.nextUser = A;
+  await page.getByRole("button", { name: /Sign in/ }).click();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  const name = page.getByRole("textbox", { name: "Project name" });
+  await name.click();
+  await name.fill("");
+  await page.keyboard.type("My ");
+  await call("openGate", false);
+  await Bun.sleep(500);
+  await page.keyboard.type("plan");
+  await page.keyboard.press("Enter");
+  await ready();
+  expect(await name.inputValue()).toBe("My plan");
+  await expectSilence();
+});
+
+test("a focused name field is left alone when the stored map arrives", async () => {
+  await rename("Stored map");
   await call("openGate", true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="false"]');
   await page.waitForSelector("[data-node-id]");
-  await page.keyboard.press("ControlOrMeta+f");
-  await page.getByRole("searchbox", { name: "Search ideas" }).waitFor();
-  backend.meStarted = false;
+  const draft = await call("id");
+  const name = page.getByRole("textbox", { name: "Project name" });
+  await name.click();
   await call("openGate", false);
-  await eventually(async () => backend.meStarted, "the account check");
-  expect(
-    await page
-      .locator("[data-storage-ready]")
-      .getAttribute("data-storage-ready"),
-  ).toBe("false");
+  await Bun.sleep(300);
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("Plan");
+  await page.keyboard.press("Enter");
+  await ready();
+  expect(await name.inputValue()).toBe("Plan");
+  expect(await call("id")).toBe(draft);
+});
+
+test("a map that failed to open once is still the one the next visit opens", async () => {
+  await rename("Real map");
+  const real = await call("id");
+  await call("failOpen", true, real);
+  await page.reload();
+  await ready();
+  expect(await call("id")).not.toBe(real);
+  await call("failOpen", false);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(real);
 });
 
 test("a sign-in returning before the anonymous map opens keeps that map", async () => {
