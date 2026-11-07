@@ -3,8 +3,8 @@
 - Railway project `8b285039-3bb1-4136-a31d-5fede17bc0e8` (mindgrab.app), environment
   `production`. It has two app services plus `Postgres`: `mindgrab` builds the
   repository-root `Dockerfile` and serves the API at `api.mindgrab.app`, with
-  healthcheck `/checkhealth`; `web` builds `webapp/Dockerfile` and serves the static
-  webapp at `mindgrab.app` with Caddy. See `backend/README.md`.
+  healthcheck `/`; `web` builds `webapp/Dockerfile` and serves the
+  static webapp at `mindgrab.app` with Caddy. See `backend/README.md`.
 - Keep the API on a subdomain of the app. Login cookies are `SameSite=Lax`, so an API
   on another site, including a `*.up.railway.app` domain, cannot hold a session.
 - Railway deploys the `live` branch. `mise run golive` force-pushes `main` to `live`,

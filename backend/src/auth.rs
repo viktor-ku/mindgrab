@@ -19,8 +19,8 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-pub const SESSION_COOKIE: &str = "mindgrab_session_loro";
-const STATE_COOKIE: &str = "mindgrab_login_loro";
+pub const SESSION_COOKIE: &str = "PHPSESSID";
+const STATE_COOKIE: &str = "PHPLOGINID";
 const LOCAL_USER_ID: &str = "local_boba_tee";
 const LOCAL_TOKEN: &str = "local-development";
 pub fn hash(value: &str) -> String {
@@ -407,7 +407,7 @@ impl Auth {
         }
         tx.commit().await?;
         let user = result?;
-        if let Some(expected) = headers.get("x-mindgrab-account") {
+        if let Some(expected) = headers.get("x-mindgrab-account.php") {
             let value = expected
                 .to_str()
                 .ok()

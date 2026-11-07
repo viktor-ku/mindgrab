@@ -135,7 +135,7 @@ impl Fixture {
             database_url: database.to_string(),
             client_id: "client_test".into(),
             api_key: "test-secret".into(),
-            redirect_uri: format!("{origin}/api/auth/callback"),
+            redirect_uri: format!("{origin}/api/auth/callback.php"),
             app_url: format!("{origin}/"),
             issuer: ISSUER.into(),
             // Local mode must work even when no identity provider is reachable.
@@ -184,7 +184,7 @@ impl Fixture {
     }
     pub fn post(&self, method: &str, browser: &str) -> reqwest::RequestBuilder {
         self.client
-            .post(format!("{}/api/{method}", self.url))
+            .post(format!("{}/api/{method}.php", self.url))
             .header("origin", &self.origin)
             .header(
                 "cookie",

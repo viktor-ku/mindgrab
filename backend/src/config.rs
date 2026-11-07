@@ -18,7 +18,7 @@ pub struct Config {
     pub issuer: String,
     pub provider_url: String,
     pub secure_cookies: bool,
-    /// Product analytics; unset sends nothing and disables the /ingest proxy.
+    /// Product analytics; unset sends nothing and disables the /ingest.php proxy.
     pub posthog: Option<PostHogConfig>,
 }
 #[derive(Clone, Debug)]
@@ -109,7 +109,7 @@ impl Config {
                     return Err("Local authentication requires loopback APP_URL and HOST");
                 }
                 let redirect_uri = app
-                    .join("/api/auth/callback")
+                    .join("/api/auth/callback.php")
                     .map_err(|_| "Invalid callback URL")?
                     .to_string();
                 (String::new(), String::new(), redirect_uri, app_url)
@@ -130,9 +130,11 @@ impl Config {
         }
         if !same_site(&app, &redirect)
             || app.path() != "/"
-            || redirect.path() != "/api/auth/callback"
+            || redirect.path() != "/api/auth/callback.php"
         {
-            return Err("The callback must be on the APP_URL host or a subdomain of it");
+            return Err(
+                "The callback must be /api/auth/callback.php on the APP_URL host or a subdomain of it",
+            );
         }
         let issuer = get("WORKOS_ISSUER")
             .unwrap_or_else(|| format!("https://api.workos.com/user_management/{client_id}"));
@@ -249,17 +251,20 @@ mod tests {
                 false,
             )
         };
-        assert!(workos("https://mindgrab.app/api/auth/callback").is_ok());
-        let split = workos("https://api.mindgrab.app/api/auth/callback").unwrap();
+        assert!(workos("https://mindgrab.app/api/auth/callback.php").is_ok());
+        let split = workos("https://api.mindgrab.app/api/auth/callback.php").unwrap();
         assert_eq!(split.origin(), "https://mindgrab.app");
         for other_site in [
-            "https://mindgrab-production.up.railway.app/api/auth/callback",
-            "https://notmindgrab.app/api/auth/callback",
-            "http://api.mindgrab.app/api/auth/callback",
+            "https://mindgrab-production.up.railway.app/api/auth/callback.php",
+            "https://notmindgrab.app/api/auth/callback.php",
+            "http://api.mindgrab.app/api/auth/callback.php",
+            "https://api.mindgrab.app/api/auth/callback",
             "https://api.mindgrab.app/elsewhere",
         ] {
             assert!(workos(other_site).is_err(), "{other_site}");
         }
+        let stale = workos("https://api.mindgrab.app/api/auth/callback").err();
+        assert!(stale.unwrap().contains("/api/auth/callback.php"));
     }
 
     #[test]
@@ -271,14 +276,17 @@ mod tests {
                 ("WEBAPP_PORT", "24000"),
                 (
                     "WORKOS_REDIRECT_URI",
-                    "https://stale.example/api/auth/callback",
+                    "https://stale.example/api/auth/callback.php",
                 ),
             ],
             true,
         )
         .unwrap();
         assert_eq!(c.app_url, "http://localhost:24000/");
-        assert_eq!(c.redirect_uri, "http://localhost:24000/api/auth/callback");
+        assert_eq!(
+            c.redirect_uri,
+            "http://localhost:24000/api/auth/callback.php"
+        );
         assert_eq!(c.cookie_name("session"), "session_local_24000");
         assert!(c.api_key.is_empty());
         assert!(c.client_id.is_empty());
@@ -318,7 +326,7 @@ mod tests {
                 ("WORKOS_API_KEY", "secret"),
                 (
                     "WORKOS_REDIRECT_URI",
-                    "https://mindgrab.example/api/auth/callback",
+                    "https://mindgrab.example/api/auth/callback.php",
                 ),
             ],
             false,

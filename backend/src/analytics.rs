@@ -1,4 +1,4 @@
-//! Product analytics: the first-party `/ingest` proxy to PostHog and
+//! Product analytics: the first-party `/ingest.php` proxy to PostHog and
 //! server-side events only the backend can observe (such as sign-ups).
 //!
 //! The proxy forwards an allowlist of headers, never cookies, and passes the
@@ -98,7 +98,7 @@ impl Analytics {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(peer)| peer.ip());
         let (parts, body) = request.into_parts();
-        let path = parts.uri.path().strip_prefix("/ingest").unwrap_or("/");
+        let path = parts.uri.path().strip_prefix("/ingest.php").unwrap_or("/");
         let mut url = if path.starts_with("/static/") || path.starts_with("/array/") {
             config.assets_host.clone()
         } else {

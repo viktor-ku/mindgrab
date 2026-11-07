@@ -73,21 +73,15 @@ beforeAll(async () => {
     nativeUrl = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0] ?? "";
   }
   reader.releaseLock();
+  // Point the app's own proxy table at the fixture, so these tests go through it.
+  process.env.VITE_BACKEND_URL = nativeUrl;
   server = await createServer({
     root: `${root}/webapp`,
     configFile: `${root}/webapp/vite.config.ts`,
     cacheDir: "node_modules/.vite-rust-app-tests",
     logLevel: "error",
     define: { "import.meta.env.VITE_BACKEND_URL": JSON.stringify("") },
-    server: {
-      host: "127.0.0.1",
-      port,
-      strictPort: true,
-      proxy: {
-        "/api": { target: nativeUrl },
-        "/sync": { target: nativeUrl, ws: true },
-      },
-    },
+    server: { host: "127.0.0.1", port, strictPort: true },
   });
   await server.listen();
   browser = await chromium.launch();
@@ -143,7 +137,7 @@ async function edit(page: Page, text: string) {
 async function rpc(page: Page, method: string, args: unknown) {
   return page.evaluate(
     async ([method, args]) => {
-      const response = await fetch(`/api/${method}`, {
+      const response = await fetch(`/api/${method}.php`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(args),
@@ -246,12 +240,26 @@ test("independent offline devices merge edits and live native notifications conv
     .waitFor();
 });
 
+test("project sync receives revisions over a socket through the /ws proxy", async () => {
+  const frame = new Promise<string>((resolve) => {
+    page.on("websocket", (socket) => {
+      if (
+        socket.url().startsWith(`${origin.replace("http", "ws")}/ws/project/`)
+      )
+        socket.on("framereceived", ({ payload }) => resolve(String(payload)));
+    });
+  });
+  await login(page);
+  await saved(page);
+  expect(JSON.parse(await frame)).toHaveProperty("revision");
+});
+
 test("a failed upload retries without losing unsent local edits", async () => {
   await login(page);
   await saved(page);
   let fail = true;
   let attempts = 0;
-  await page.route("**/api/mergeProject?**", (route) => {
+  await page.route("**/api/mergeProject.php?**", (route) => {
     attempts++;
     return fail
       ? route.fulfill({ status: 503, json: { error: { code: "unavailable" } } })
@@ -292,11 +300,14 @@ test("note commands and textarea drafts round-trip between browser WASM and nati
       input.value = "Browser 🌲 note";
       input.setSelectionRange(input.value.length, input.value.length);
       input.dispatchEvent(new Event("input"));
-      const response = await fetch(`/api/mergeProject?projectId=${projectId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: doc.snapshot(),
-      });
+      const response = await fetch(
+        `/api/mergeProject.php?projectId=${projectId}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: doc.snapshot(),
+        },
+      );
       if (!response.ok) throw new Error(`Merge: ${response.status}`);
       return { id, note: doc.view().nodes[0].note };
     } finally {

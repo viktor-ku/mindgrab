@@ -14,7 +14,7 @@ async fn login(f: &Fixture, previous: &str) -> String {
     assert_eq!(started.status(), 303);
     let location = reqwest::Url::parse(started.headers()["location"].to_str().unwrap()).unwrap();
     assert_eq!(location.origin().ascii_serialization(), f.origin);
-    assert_eq!(location.path(), "/api/auth/callback");
+    assert_eq!(location.path(), "/api/auth/callback.php");
     let mut jar = cookies(started.headers());
     if !previous.is_empty() {
         jar.push(format!(
@@ -28,7 +28,11 @@ async fn login(f: &Fixture, previous: &str) -> String {
             .unwrap()
             .contains("HttpOnly")
     );
-    let callback = format!("{}/api/auth/callback?{}", f.url, location.query().unwrap());
+    let callback = format!(
+        "{}/api/auth/callback.php?{}",
+        f.url,
+        location.query().unwrap()
+    );
     let invalid = f.client.get(&callback).send().await.unwrap();
     assert!(
         invalid.headers()["location"]
@@ -71,7 +75,7 @@ async fn local_login_protects_projects_and_logout_revokes_the_session_without_a_
     assert_eq!(f.rpc("listProjects", "", json!({})).await.status(), 401);
     assert_eq!(
         f.client
-            .post(format!("{}/api/startLogin", f.url))
+            .post(format!("{}/api/startLogin.php", f.url))
             .send()
             .await
             .unwrap()
@@ -88,6 +92,10 @@ async fn local_login_protects_projects_and_logout_revokes_the_session_without_a_
         403
     );
 
+    assert_eq!(
+        f.backend.config.cookie_name(SESSION_COOKIE),
+        "PHPSESSID_local_24000"
+    );
     let browser = login(&f, "").await;
     let user: Value = f
         .rpc("getMe", &browser, json!({}))
@@ -100,7 +108,7 @@ async fn local_login_protects_projects_and_logout_revokes_the_session_without_a_
     assert_eq!(user["email"], "boba.tee@mindgrab.test");
     assert_eq!(
         f.post("getMe", &browser)
-            .header("x-mindgrab-account", "999")
+            .header("x-mindgrab-account.php", "999")
             .send()
             .await
             .unwrap()
@@ -214,7 +222,8 @@ async fn local_callbacks_reject_wrong_code_expiry_and_duplicate_parameters() {
             "duplicate_code" => args.push(("code".into(), "duplicate".into())),
             _ => unreachable!(),
         }
-        let mut callback = reqwest::Url::parse(&format!("{}/api/auth/callback", f.url)).unwrap();
+        let mut callback =
+            reqwest::Url::parse(&format!("{}/api/auth/callback.php", f.url)).unwrap();
         callback.query_pairs_mut().extend_pairs(args);
         let response = f
             .client

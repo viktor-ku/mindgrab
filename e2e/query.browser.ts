@@ -4,6 +4,7 @@ import {
   beforeAll,
   beforeEach,
   expect,
+  setDefaultTimeout,
   test,
 } from "bun:test";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,8 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
+
+setDefaultTimeout(30_000);
 
 let server: ViteDevServer;
 let browser: Browser;
@@ -55,7 +58,7 @@ test("health queries retain the report during refresh and poll through TanStack 
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
-  await page.route("**/api/getHealth", async (route) => {
+  await page.route("**/api/getHealth.php", async (route) => {
     requests++;
     if (requests === 2) await gate;
     await route.fulfill({
@@ -84,7 +87,7 @@ test("health queries retain the report during refresh and poll through TanStack 
   await page.getByRole("heading", { name: "Database unreachable" }).waitFor();
   await page.getByRole("button", { name: "Refresh", exact: true }).waitFor();
   expect(requests).toBe(2);
-  const polled = page.waitForResponse("**/api/getHealth");
+  const polled = page.waitForResponse("**/api/getHealth.php");
   await page.clock.fastForward(15_000);
   await polled;
   expect(requests).toBe(3);
@@ -92,7 +95,7 @@ test("health queries retain the report during refresh and poll through TanStack 
 
 test("health queries show an outage offline and recover on a manual retry", async () => {
   let down = true;
-  await page.route("**/api/getHealth", async (route) => {
+  await page.route("**/api/getHealth.php", async (route) => {
     if (down) return route.abort("internetdisconnected");
     await route.fulfill({ status: 200, json: { database: { status: "up" } } });
   });

@@ -69,10 +69,11 @@ class Backend {
     const request = route.request();
     const url = new URL(request.url());
     expect(request.method()).toBe("POST");
+    expect(url.pathname).toEndWith(".php");
     const owner = this.user;
     const error = (status: number, code: string) =>
       route.fulfill({ status, json: { error: { code, message: code } } });
-    if (url.pathname === "/api/startLogin") {
+    if (url.pathname === "/api/startLogin.php") {
       this.loginRequests++;
       this.user = this.nextUser;
       this.meStatus = undefined;
@@ -81,7 +82,7 @@ class Backend {
         headers: { Location: harnessPath },
       });
     }
-    if (url.pathname === "/api/logout") {
+    if (url.pathname === "/api/logout.php") {
       this.logoutRequests++;
       if (!this.leaveCookieOnLogout) this.user = undefined;
       return route.fulfill({
@@ -89,7 +90,7 @@ class Backend {
         headers: { Location: harnessPath },
       });
     }
-    if (url.pathname === "/api/getMe") {
+    if (url.pathname === "/api/getMe.php") {
       this.meStarted = true;
       const status = this.meStatus;
       await this.meGate?.promise;
@@ -102,11 +103,11 @@ class Backend {
         ? route.fulfill({ json: owner })
         : error(401, "unauthenticated");
     }
-    const expected = request.headers()["x-mindgrab-account"];
+    const expected = request.headers()["x-mindgrab-account.php"];
     if (!owner || this.meStatus === 401) return error(401, "unauthenticated");
     if (this.meStatus === 503) return error(503, "unavailable");
     if (expected !== String(owner.id)) return error(409, "account_changed");
-    if (url.pathname === "/api/createProject") {
+    if (url.pathname === "/api/createProject.php") {
       const { projectId } = request.postDataJSON();
       let record = this.projects.get(projectId);
       if (record && record.ownerId !== owner.id)
@@ -129,7 +130,7 @@ class Backend {
         },
       });
     }
-    if (url.pathname === "/api/listProjects") {
+    if (url.pathname === "/api/listProjects.php") {
       const { recent = false, limit = 100 } = request.postDataJSON();
       if (recent && this.recentFailures > 0) {
         this.recentFailures--;
@@ -158,7 +159,7 @@ class Backend {
       }
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
-    if (url.pathname === "/api/deleteProject") {
+    if (url.pathname === "/api/deleteProject.php") {
       const { projectId } = request.postDataJSON();
       if (this.projects.get(projectId)?.ownerId === owner.id)
         this.projects.delete(projectId);
@@ -166,7 +167,7 @@ class Backend {
     }
     const operation = url.pathname;
     const { projectId: id } =
-      operation === "/api/mergeProject"
+      operation === "/api/mergeProject.php"
         ? Object.fromEntries(url.searchParams)
         : request.postDataJSON();
     const record = this.projects.get(id);
@@ -179,9 +180,9 @@ class Backend {
       data: base64(record.doc.snapshot()),
       durable: true,
     });
-    if (operation === "/api/getProjectSnapshot")
+    if (operation === "/api/getProjectSnapshot.php")
       return route.fulfill({ json: response() });
-    if (operation === "/api/mergeProject") {
+    if (operation === "/api/mergeProject.php") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       const before = record.doc.version();
       record.doc.merge(bytes);

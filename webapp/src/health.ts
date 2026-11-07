@@ -65,7 +65,7 @@ export async function checkHealth(
     checkedAt: deps.clock(),
   });
   try {
-    const response = await deps.fetch(backendEndpoint("/api/getHealth"), {
+    const response = await deps.fetch(backendEndpoint("/api/getHealth.php"), {
       method: "POST",
       cache: "no-store",
       headers: { accept: "application/json" },
@@ -79,7 +79,7 @@ export async function checkHealth(
       return unreachable();
     }
     const databaseCheck = serverTimingMs(
-      response.headers.get("server-timing"),
+      response.headers.get("server-timing.php"),
       "db",
     );
     const latencyMs = Math.max(0, roundTrip - databaseCheck);

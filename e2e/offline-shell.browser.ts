@@ -67,7 +67,7 @@ beforeAll(async () => {
       const path = new URL(request.url).pathname;
       requests.push(`${request.method} ${path}`);
       const headers = { "Cache-Control": "no-store" };
-      if (path === "/api/getMe")
+      if (path === "/api/getMe.php")
         return Response.json(
           {
             id: user,
@@ -77,19 +77,19 @@ beforeAll(async () => {
           },
           { headers },
         );
-      if (path === "/api/logout" && request.method === "POST") {
+      if (path === "/api/logout.php" && request.method === "POST") {
         user = 0;
         return new Response(null, {
           status: 303,
           headers: { ...headers, Location: "/" },
         });
       }
-      if (path === "/api/startLogin")
+      if (path === "/api/startLogin.php")
         return new Response(null, {
           status: 303,
           headers: { ...headers, Location: "/" },
         });
-      if (path === "/api/auth/callback" && request.method === "GET")
+      if (path === "/api/auth/callback.php" && request.method === "GET")
         return new Response("Auth callback", { headers });
       if (path.startsWith("/api/"))
         return Response.json(
@@ -164,6 +164,12 @@ afterEach(async () => {
 
 async function load(url = origin) {
   await page.goto(url);
+  // A cold profile opens the anonymous workspace until getMe swaps in the
+  // account's, which strands edits and closes menus. The name also shows offline.
+  await page
+    .locator('[aria-label="Account"]', { hasText: `Account ${user}` })
+    .first()
+    .waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
   await page.waitForSelector("[data-node-id]");
 }
@@ -219,13 +225,15 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
   await load();
   await installed();
   const paths = [
-    "/api/getMe",
-    "/api/listProjects",
-    "/api/getHealth",
-    "/api/startLogin",
-    "/api/auth/callback",
-    "/api/logout",
-    "/sync/loro/test-project",
+    "/api/getMe.php",
+    "/api/listProjects.php",
+    "/api/getHealth.php",
+    "/api/startLogin.php",
+    "/api/auth/callback.php",
+    "/api/logout.php",
+    "/ws/project/test-project",
+    "/ws/share/test-token",
+    "/ingest.php/e/",
     "/checkhealth",
     "/?token=secret",
     "/unknown",
@@ -234,7 +242,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     const result = await page.evaluate(async (path) => {
       const response = await fetch(path, {
         method:
-          path.startsWith("/api/") && path !== "/api/auth/callback"
+          path.startsWith("/api/") && path !== "/api/auth/callback.php"
             ? "POST"
             : "GET",
       });
@@ -243,17 +251,18 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     expect(result.body).not.toContain("Ready to reopen offline");
   }
   for (const path of [
-    "/api/getMe",
-    "/api/listProjects",
-    "/api/getHealth",
-    "/api/startLogin",
-    "/api/auth/callback",
+    "/api/getMe.php",
+    "/api/listProjects.php",
+    "/api/getHealth.php",
+    "/api/startLogin.php",
+    "/api/auth/callback.php",
+    "/ingest.php/e/",
     "/checkhealth",
   ])
     expect(requests).toContain(
-      `${path.startsWith("/api/") && path !== "/api/auth/callback" ? "POST" : "GET"} ${path}`,
+      `${path.startsWith("/api/") && path !== "/api/auth/callback.php" ? "POST" : "GET"} ${path}`,
     );
-  expect(requests).toContain("POST /api/logout");
+  expect(requests).toContain("POST /api/logout.php");
   const cache = await cacheKeys();
   expect(cache.names).toHaveLength(1);
   const assets: string[] = [];
@@ -274,7 +283,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     ),
   ).toBe(true);
   await context.setOffline(true);
-  for (const path of [...paths, "https://example.invalid/api/getMe"])
+  for (const path of [...paths, "https://example.invalid/api/getMe.php"])
     expect(
       await page.evaluate(async (path) => {
         try {
@@ -287,7 +296,7 @@ test("API/auth/logout/health, token queries, foreign origins and unknown routes 
     ).toBe("network unavailable");
   const tab = await context.newPage();
   await expect(
-    tab.goto(`${origin}/api/auth/callback?code=secret`),
+    tab.goto(`${origin}/api/auth/callback.php?code=secret`),
   ).rejects.toThrow();
   await tab.close();
 });
