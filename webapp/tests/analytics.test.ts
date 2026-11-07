@@ -35,12 +35,15 @@ const posthog = {
 mock.module("posthog-js", () => ({ default: posthog }));
 const storage = new Map<string, string>();
 const originalGlobals = Object.getOwnPropertyDescriptors(globalThis);
+const backend = process.env.VITE_BACKEND_URL;
 afterAll(() => {
   for (const key of ["localStorage", "document", "location", "window"]) {
     const descriptor = originalGlobals[key];
     if (descriptor) Object.defineProperty(globalThis, key, descriptor);
     else Reflect.deleteProperty(globalThis, key);
   }
+  if (backend === undefined) delete process.env.VITE_BACKEND_URL;
+  else process.env.VITE_BACKEND_URL = backend;
 });
 Object.assign(globalThis, {
   localStorage: {
@@ -52,6 +55,7 @@ Object.assign(globalThis, {
   window: { addEventListener: () => {} },
 });
 process.env.VITE_POSTHOG_KEY = "phc_test";
+delete process.env.VITE_BACKEND_URL;
 const analytics = await import("../src/analytics");
 const names = () => calls.map(([name]) => name);
 const user = { id: 7, email: "ada@example.com", name: "Ada" };
@@ -75,7 +79,7 @@ test("accepting loads the SDK through the proxy, then identifies and sends held 
   expect(names()).toEqual(["init", "opt_in", "identify", "capture"]);
   expect(calls[0]?.[1]).toBe("phc_test");
   expect(calls[0]?.[2]).toMatchObject({
-    api_host: "https://mindgrab.example/ingest",
+    api_host: "https://mindgrab.example/ingest.php",
     cookieless_mode: "on_reject",
     autocapture: false,
   });

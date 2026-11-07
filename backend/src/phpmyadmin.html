@@ -1,0 +1,215 @@
+<!DOCTYPE HTML>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow,notranslate">
+  <meta name="google" content="notranslate">
+  <title>phpMyAdmin</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+    body {
+      margin: 0;
+      padding: 1rem;
+      background: #f5f5f5;
+      color: #444;
+      font-family: sans-serif;
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+    .container {
+      width: 100%;
+      max-width: 34rem;
+      margin: 0 auto;
+    }
+    .logo {
+      display: block;
+      width: 16rem;
+      max-width: 100%;
+      height: auto;
+      margin: 0 auto 0.5rem;
+    }
+    h1 {
+      margin: 0 0 1rem;
+      color: #444;
+      font-size: 140%;
+      font-weight: 700;
+      line-height: 1.2;
+      text-align: center;
+    }
+    .alert {
+      margin-bottom: 1rem;
+      padding: 0.75rem 1rem;
+      border: 1px solid transparent;
+      border-radius: 0.25rem;
+      overflow-wrap: anywhere;
+    }
+    .alert-danger {
+      border-color: #c00;
+      background: pink;
+      color: #000;
+    }
+    .alert-title {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-weight: 700;
+    }
+    .alert-title svg {
+      flex: none;
+    }
+    .card {
+      margin-bottom: 1rem;
+      border: 1px solid #aaa;
+      border-radius: 0.25rem;
+      background: #fff;
+      overflow: hidden;
+    }
+    .card-header {
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid #aaa;
+      background: linear-gradient(#fff, #ccc);
+      font-weight: 700;
+      text-shadow: 0 1px 0 #fff;
+    }
+    .card-body {
+      padding: 1rem;
+    }
+    .card-footer {
+      padding: 0.5rem 1rem;
+      border-top: 1px solid #aaa;
+      background: #eee;
+      text-align: right;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .row + .row {
+      margin-top: 0.75rem;
+    }
+    .row label {
+      flex: 0 0 100%;
+      padding-bottom: 0.25rem;
+    }
+    .row .field {
+      flex: 0 0 100%;
+      min-width: 0;
+    }
+    .form-control, .form-select {
+      display: block;
+      width: 100%;
+      padding: 0.375rem 0.75rem;
+      border: 1px solid #aaa;
+      border-radius: 0.25rem;
+      background: #fff;
+      color: #444;
+      font: inherit;
+      font-size: max(16px, 1em);
+    }
+    .form-select {
+      appearance: none;
+      padding-right: 2rem;
+      background-image: linear-gradient(45deg, transparent 50%, #444 50%), linear-gradient(135deg, #444 50%, transparent 50%);
+      background-position: right 15px center, right 10px center;
+      background-repeat: no-repeat;
+      background-size: 5px 5px;
+    }
+    .form-control:focus, .form-select:focus {
+      border-color: #235a81;
+      outline: 2px solid rgba(35, 90, 129, 0.25);
+    }
+    .btn {
+      display: inline-block;
+      padding: 0.375rem 1.25rem;
+      border: 1px solid #aaa;
+      border-radius: 0.85rem;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background: linear-gradient(#fff, #ccc);
+      color: #111;
+      text-shadow: 0 1px 0 #fff;
+    }
+    .btn-primary:hover {
+      background: linear-gradient(#fff, #ddd);
+    }
+    @media (min-width: 576px) {
+      body {
+        padding: 2rem 1rem;
+      }
+      .row label {
+        flex-basis: 33.3333%;
+        padding-bottom: 0;
+      }
+      .row .field {
+        flex-basis: 66.6667%;
+      }
+      .form-control, .form-select {
+        font-size: inherit;
+      }
+    }
+  </style>
+</head>
+<body id="loginform">
+  <div class="container">
+    <svg class="logo" viewBox="0 0 240 102" role="img" aria-label="phpMyAdmin">
+      <path d="M112 8 C96 24 84 42 78 60 L114 60 Z" fill="#6c78af"/>
+      <path d="M120 2 C136 18 150 40 156 60 L120 60 Z" fill="#f89c0e"/>
+      <path d="M162 22 C172 32 182 46 186 60 L162 60 Z" fill="#ccc"/>
+      <path d="M72 64 L196 64 C186 70 176 72 164 72 L100 72 C90 72 80 70 72 64 Z" fill="#888"/>
+      <text x="120" y="95" text-anchor="middle" font-family="Verdana, Geneva, sans-serif" font-size="26" font-style="italic" font-weight="700" textLength="228" lengthAdjust="spacingAndGlyphs"><tspan fill="#6c78af">php</tspan><tspan fill="#f89c0e">MyAdmin</tspan></text>
+    </svg>
+    <h1>Welcome to <bdo dir="ltr" lang="en">phpMyAdmin</bdo></h1>
+    {{alert}}
+    <div class="card">
+      <div class="card-header">Language</div>
+      <div class="card-body">
+        <form method="get" action="index.php" id="lang_form">
+          <input type="hidden" name="route" value="/">
+          <input type="hidden" name="token" value="{{token}}">
+          <select name="lang" id="languageSelect" class="form-select" lang="en" dir="ltr" aria-label="Language">
+            <option value="en" selected>English</option>
+          </select>
+        </form>
+      </div>
+    </div>
+    <form method="post" action="index.php" id="login_form" name="login_form">
+      <div class="card">
+        <div class="card-header">Log in</div>
+        <div class="card-body">
+          <div class="row">
+            <label for="input_username">Username:</label>
+            <div class="field">
+              <input class="form-control" type="text" name="pma_username" id="input_username" value="{{username}}" size="24" autocomplete="username" spellcheck="false">
+            </div>
+          </div>
+          <div class="row">
+            <label for="input_password">Password:</label>
+            <div class="field">
+              <input class="form-control" type="password" name="pma_password" id="input_password" value="" size="24" autocomplete="current-password" spellcheck="false">
+            </div>
+          </div>
+        </div>
+        <div class="card-footer">
+          <input class="btn btn-primary" type="submit" id="input_go" value="Log in">
+          <input type="hidden" name="set_session" value="{{session}}">
+          <input type="hidden" name="token" value="{{token}}">
+          <input type="hidden" name="server" value="1">
+          <input type="hidden" name="route" value="/">
+        </div>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

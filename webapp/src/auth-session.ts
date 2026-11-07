@@ -36,7 +36,7 @@ export function authStorageKey(deployment: string) {
 }
 
 // This is an account hint and logout tombstone, never a token or authorization.
-// Only /api/getMe confirms a session. A 401 retains the cached workspace for reauth.
+// Only /api/getMe.php confirms a session. A 401 retains the cached workspace for reauth.
 export class AuthSession {
   readonly key: string;
   readonly #listeners = new Set<(state: SessionState) => void>();
@@ -221,7 +221,7 @@ export class AuthSession {
     const revision = this.#record.revision;
     const alive = () => !signal.aborted;
     try {
-      const response = await fetch(backendEndpoint("/api/getMe"), {
+      const response = await fetch(backendEndpoint("/api/getMe.php"), {
         method: "POST",
         credentials: "include",
         cache: "no-store",

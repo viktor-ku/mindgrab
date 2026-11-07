@@ -10,30 +10,34 @@ use uuid::Uuid;
 #[tokio::test]
 async fn deployment_health_reports_database_readiness_without_a_session() {
     let f = Fixture::new("http://localhost:5173").await;
-    let response = f
-        .client
-        .get(format!("{}/checkhealth", f.url))
-        .send()
-        .await
-        .unwrap();
+    let response = f.client.get(format!("{}/", f.url)).send().await.unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(response.headers()["cache-control"], "no-store");
-    assert!(response.headers().contains_key("server-timing"));
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    assert!(response.text().await.unwrap().contains("It works!"));
+
+    let response = f.rpc("getHealth", "", json!({})).await;
+    assert_eq!(response.status(), 200);
+    assert!(response.headers().contains_key("server-timing.php"));
+    assert!(!response.headers().contains_key("server-timing"));
     let value: Value = response.json().await.unwrap();
     assert_eq!(value["database"]["status"], "up");
-    assert_eq!(f.rpc("getHealth", "", json!({})).await.status(), 200);
 
     f.backend.pool.close().await;
-    let response = f
-        .client
-        .get(format!("{}/checkhealth", f.url))
-        .send()
-        .await
-        .unwrap();
+    let response = f.client.get(format!("{}/", f.url)).send().await.unwrap();
+    assert_eq!(response.status(), 503);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Uncaught Exception: 503"), "{body}");
+
+    let response = f.rpc("getHealth", "", json!({})).await;
     assert_eq!(response.status(), 503);
     let value: Value = response.json().await.unwrap();
     assert_eq!(value["database"]["status"], "down");
-    assert_eq!(f.rpc("getHealth", "", json!({})).await.status(), 503);
     f.close().await;
 }
 
@@ -51,7 +55,8 @@ async fn baseline(f: &Fixture, browser: &str, id: Uuid) -> (Project, String) {
     )
 }
 async fn upload(f: &Fixture, browser: &str, id: Uuid, project: &Project) -> reqwest::Response {
-    f.post(&format!("mergeProject?projectId={id}"), browser)
+    f.post("mergeProject", browser)
+        .query(&[("projectId", id)])
         .header("content-type", "application/octet-stream")
         .body(project.snapshot().unwrap())
         .send()
@@ -65,18 +70,19 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     let started = f.post("startLogin", "").send().await.unwrap();
     assert_eq!(started.status(), 303);
     let jar = cookies(started.headers());
+    assert!(jar[0].starts_with("PHPLOGINID="));
     let location = reqwest::Url::parse(started.headers()["location"].to_str().unwrap()).unwrap();
     let args: std::collections::HashMap<_, _> = location.query_pairs().into_owned().collect();
     assert_eq!(args["code_challenge_method"], "S256");
     assert!(!args.contains_key("code_verifier"));
     let callback = format!(
-        "{}/api/auth/callback?state={}&code=alice",
+        "{}/api/auth/callback.php?state={}&code=alice",
         f.url, args["state"]
     );
     let invalid = f
         .client
         .get(&callback)
-        .header("cookie", "mindgrab_login_loro=wrong")
+        .header("cookie", "PHPLOGINID=wrong")
         .send()
         .await
         .unwrap();
@@ -95,6 +101,7 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
         .unwrap();
     assert_eq!(response.status(), 303);
     let jar = cookies(response.headers());
+    assert_eq!(SESSION_COOKIE, "PHPSESSID");
     let browser = jar
         .iter()
         .find_map(|cookie| cookie.strip_prefix(&format!("{SESSION_COOKIE}=")))
@@ -134,11 +141,18 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     assert_eq!(f.provider.refreshes.load(Ordering::SeqCst), 1);
     let expected = f
         .post("getMe", browser)
-        .header("x-mindgrab-account", "999")
+        .header("x-mindgrab-account.php", "999")
         .send()
         .await
         .unwrap();
     assert_eq!(expected.status(), 409);
+    let retired = f
+        .post("getMe", browser)
+        .header("x-mindgrab-account", "999")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retired.status(), 200);
     let logout = f.post("logout", browser).send().await.unwrap();
     assert_eq!(logout.status(), 303);
     assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=")));
@@ -220,7 +234,8 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
         "Alice Shared 🌲 Bob"
     );
     let malformed = f
-        .post(&format!("mergeProject?projectId={id}"), &alice)
+        .post("mergeProject", &alice)
+        .query(&[("projectId", id)])
         .header("content-type", "application/octet-stream")
         .body("bad bytes")
         .send()
@@ -382,7 +397,7 @@ async fn recent_project_listing_orders_by_last_committed_change() {
 async fn shared(f: &Fixture, token: &str) -> reqwest::Response {
     // Viewers carry no session cookie and may come from any origin.
     f.client
-        .post(format!("{}/api/getSharedProject", f.url))
+        .post(format!("{}/api/getSharedProject.php", f.url))
         .json(&json!({ "token": token }))
         .send()
         .await

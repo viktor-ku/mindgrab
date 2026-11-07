@@ -43,7 +43,7 @@ async fn login(f: &Fixture, sub: &str, consent: bool) -> Value {
     let response = f
         .client
         .get(format!(
-            "{}/api/auth/callback?state={}&code={sub}",
+            "{}/api/auth/callback.php?state={}&code={sub}",
             f.url, args["state"]
         ))
         .header("cookie", jar.join("; "))
@@ -54,7 +54,7 @@ async fn login(f: &Fixture, sub: &str, consent: bool) -> Value {
     let jar = cookies(response.headers());
     let browser = jar
         .iter()
-        .find_map(|c| c.strip_prefix("mindgrab_session_loro="))
+        .find_map(|c| c.strip_prefix("PHPSESSID="))
         .unwrap();
     f.rpc("getMe", browser, json!({}))
         .await
@@ -77,9 +77,18 @@ async fn proxy_and_signup_consent() {
         }),
     )
     .await;
-    let response = f
+    let old = f
         .client
         .post(format!("{}/ingest/e/?test=yes", f.url))
+        .body("payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.status(), 404);
+    assert!(events.try_recv().is_err());
+    let response = f
+        .client
+        .post(format!("{}/ingest.php/e/?test=yes", f.url))
         .header("cookie", "secret=value")
         .header("x-forwarded-for", "203.0.113.1")
         .body("payload")
@@ -93,14 +102,19 @@ async fn proxy_and_signup_consent() {
     assert!(!parts.headers.contains_key("cookie"));
     assert_eq!(parts.headers["x-forwarded-for"], "127.0.0.1");
     f.client
-        .get(format!("{}/ingest/static/test.js", f.url))
+        .get(format!("{}/ingest.php/flags/?v=2", f.url))
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        asset_requests.recv().await.unwrap().0.uri.path(),
-        "/static/test.js"
-    );
+    assert_eq!(events.recv().await.unwrap().0.uri, "/flags/?v=2");
+    for path in ["/static/array.js", "/array/phc_test/config.js"] {
+        f.client
+            .get(format!("{}/ingest.php{path}", f.url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(asset_requests.recv().await.unwrap().0.uri.path(), path);
+    }
     let user = login(&f, "alice", true).await;
     let (parts, body) = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
         .await
