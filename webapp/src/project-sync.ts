@@ -384,18 +384,27 @@ export async function discoverProjects(
   const knownProjects = new Map(
     (await repository.list()).map((entry) => [entry.id, entry]),
   );
+  // One map that cannot be stored or read must not hold back the others. The
+  // first such failure is handed back for the caller to report afterwards.
+  let unreadable: unknown;
   for (const project of projects) {
     signal.throwIfAborted();
     const known = knownProjects.get(project.projectId);
     if (known?.saving?.cloud === false) continue;
-    const handle = await importCloudProject(
-      repository,
-      api,
-      project.projectId,
-      signal,
-    );
-    await handle.close();
+    try {
+      const handle = await importCloudProject(
+        repository,
+        api,
+        project.projectId,
+        signal,
+      );
+      await handle.close();
+    } catch (error) {
+      if (signal.aborted || error instanceof SyncError) throw error;
+      unreadable ??= error;
+    }
   }
+  return unreadable;
 }
 
 // Stores one cloud project locally, marks it registered and leaves it open.
@@ -546,15 +555,25 @@ export class CloudWorkspace {
     if (this.#abort.signal.aborted || this.#authPaused) return null;
     const signal = this.#abort.signal;
     try {
-      await discoverProjects(this.repository, this.api, signal);
+      // One unreadable map must not hold back the uploads of the others; it
+      // still fails the pass afterwards, so the pass is retried.
+      let unreadable = await discoverProjects(
+        this.repository,
+        this.api,
+        signal,
+      );
       signal.throwIfAborted();
       this.#onCatalog();
       for (const entry of await this.repository.list()) {
         signal.throwIfAborted();
         if (entry.id === this.#active?.handle.id) continue;
-        const handle = await this.repository.open(entry.id, {
-          remember: false,
-        });
+        let handle: ProjectHandle;
+        try {
+          handle = await this.repository.open(entry.id, { remember: false });
+        } catch (error) {
+          unreadable ??= error;
+          continue;
+        }
         try {
           signal.throwIfAborted();
           const sync = new ProjectSync(handle, this.repository, {
@@ -574,6 +593,7 @@ export class CloudWorkspace {
           await handle.close();
         }
       }
+      if (unreadable) throw unreadable;
     } catch (error) {
       if (signal.aborted) return null;
       if (error instanceof SyncError && error.kind === "auth") {

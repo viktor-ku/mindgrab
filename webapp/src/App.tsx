@@ -57,7 +57,7 @@ import {
   translateSubtree,
 } from "./project-document";
 import { createProjectView } from "./project-view";
-import { bindTextarea, composing, trackComposition } from "./text-binding";
+import { bindTextarea, composing } from "./text-binding";
 import {
   ProjectRepository,
   accountNamespace,
@@ -768,14 +768,33 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } = {},
   ): Promise<boolean> {
     const request = ++activation;
-    if (composing()) await until(() => !composing());
-    if (disposed || request !== activation || !owned(owner)) {
+    if (disposed || !owned(owner)) {
       await handle.close();
       return false;
     }
     cloud?.detach();
     const previous = activeHandle;
     const previousOwner = handleRepository;
+    // Set when this map is not going on screen after all. Checked before the
+    // project name is touched, so a map that is turned away interrupts nothing.
+    const declined = () => {
+      if (unless?.()) {
+        if (previous && previousOwner === repository) cloud?.activate(previous);
+        return handle.close().then(() => false);
+      }
+      // An edited placeholder is the user's map: it is kept, and the map that
+      // was about to open stays in the Load list. The adopted handle shares
+      // the placeholder's UUID, which ends the recursion.
+      if (
+        !adopted &&
+        !activeHandle &&
+        doc().version() !== draftVersion &&
+        handle.id !== doc().id
+      )
+        return handle.close().then(() => adoptDraft(repository));
+    };
+    const early = declined();
+    if (early) return early;
     if (!keepView) finishProjectName();
     let unsaved = false;
     try {
@@ -798,23 +817,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // A name typed during the flush commits into the current map and counts
     // as an edit.
     if (!keepView) finishProjectName();
-    if (unless?.()) {
-      if (previous && previousOwner === repository) cloud?.activate(previous);
-      await handle.close();
-      return false;
-    }
-    // An edited placeholder is the user's map: it is kept, and the map that
-    // was about to open stays in the Load list. The adopted handle shares the
-    // placeholder's UUID, which ends the recursion.
-    if (
-      !adopted &&
-      !activeHandle &&
-      doc().version() !== draftVersion &&
-      handle.id !== doc().id
-    ) {
-      await handle.close();
-      return adoptDraft(repository);
-    }
+    const late = declined();
+    if (late) return late;
     if (merge) handle.doc.merge(merge(), ORIGIN.import);
     // The session memo decides ownership of the new doc inside setDoc, so the
     // handle must already be the active one.
@@ -936,13 +940,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         failure = error;
       }
     }
-    if (failure) throw failure;
+    if (failure && owned(owner) && !disposed) throw failure;
   }
 
   // The map that opens first replaces the whole screen, so it waits while the
   // user is busy on the placeholder. An edit ends the wait: the placeholder is
   // then the map, whether or not the user has left the editor.
   function untilFree() {
+    // The session does not wait for the user any more than they wait for it.
+    auth.start();
     const placeholder = untrack(doc);
     return until(() => {
       historyRevision();
@@ -992,9 +998,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ...new Set([...(latest ? [latest] : []), ...local.map(({ id }) => id)]),
     ];
     if (stored.length) {
-      const handle = await openFirstReadable(target, stored);
-      if (handle) await arrive(handle, target);
-      return;
+      // None readable: the cases below still give the user a map to work in.
+      const handle = await openFirstReadable(target, stored).catch(
+        () => undefined,
+      );
+      if (handle) {
+        await arrive(handle, target);
+        return;
+      }
+      if (target !== repository || disposed) return;
     }
     const source = anonymousRepo();
     const userId = activeUserId;
@@ -1051,13 +1063,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function performInitializeWorkspace() {
     await auth.hydrate();
     if (disposed) return;
-    // The session never waits for a map to open, or for one that cannot.
-    auth.start();
-    if (auth.state.user?.id !== activeUserId) await accountChanged(auth.state);
-    else {
-      setAccount(auth.state);
-      watchCatalog(repository);
-      await openLatestOrCreate(repository);
+    try {
+      if (auth.state.user?.id !== activeUserId)
+        await accountChanged(auth.state);
+      else {
+        setAccount(auth.state);
+        watchCatalog(repository);
+        await openLatestOrCreate(repository);
+      }
+    } finally {
+      // After the first open, so a sign-in finds the map it has to keep; but
+      // a map that cannot open must not stop the session check.
+      if (!disposed) auth.start();
     }
   }
 
@@ -1102,21 +1119,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function settleSignIn(target: ProjectRepository) {
     if (!openPristine()) return;
     const localLatest = await target.latestProject();
-    const [newest] = (await target.list()).sort(newestFirst);
+    const local = (await target.list()).sort(newestFirst);
     if (target !== repository || disposed || !openPristine()) return;
-    const id = localLatest ?? newest?.id;
-    if (!id) {
+    const ids = [
+      ...new Set([
+        ...(localLatest ? [localLatest] : []),
+        ...local.map(({ id }) => id),
+      ]),
+    ];
+    if (!ids.length) {
       setLookupArmed(true);
       return;
     }
     // The commit waits for a pause in typing; cloud discovery need not.
-    if (!switchMutation.isPending)
-      void switchMutation.mutateAsync(id).catch(() => {
-        if (target === repository && !disposed)
-          setStorageMessage(
-            "Could not open this account’s local maps. Retry local saving.",
-          );
-      });
+    if (!switchMutation.isPending) switchMutation.mutate(ids);
   }
 
   async function performAccountChanged(state: SessionState) {
@@ -1308,7 +1324,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Opens the account's latest map in place of an untouched anonymous one,
   // between two keystrokes rather than never: a refusal while the user is
   // typing is retried at the next pause, as the swap does.
-  async function performSwitch(id: string) {
+  async function performSwitch(ids: string[]) {
     const owner = repository;
     const source = anonymousRepo();
     const seed = activeHandle;
@@ -1321,11 +1337,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     while (unchanged()) {
       await until(() => !occupied());
       if (!unchanged()) return;
-      // activate closes the handle itself when it refuses.
-      if (
-        await activate(await owner.open(id), owner, { unless: pristineUnless })
-      )
+      const handle = await openFirstReadable(owner, ids).catch(() => undefined);
+      // Nothing readable here: the seed stays, and only the cloud can decide.
+      if (!handle) {
+        setLookupArmed(true);
         return;
+      }
+      // activate closes the handle itself when it refuses.
+      if (await activate(handle, owner, { unless: pristineUnless })) return;
     }
   }
 
@@ -1703,7 +1722,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         const result = latestLookup.data;
         if (result === undefined) return;
         if (result === null) setLookupNull(true);
-        else if (!switchMutation.isPending) switchMutation.mutate(result.id);
+        else if (!switchMutation.isPending) switchMutation.mutate([result.id]);
       },
       { defer: true },
     ),
@@ -3566,8 +3585,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   onMount(() => {
     const stopAuth = auth.subscribe((state) => void accountChanged(state));
+    const first = repository;
     void initializeWorkspace().catch((error) => {
-      if (disposed) return;
+      if (disposed || repository !== first) return;
       setStorageMessage(
         error instanceof Error
           ? error.message
@@ -4073,7 +4093,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   };
   const ProjectNameInput = () => (
     <input
-      ref={(input) => onCleanup(trackComposition(input))}
       type="text"
       required
       aria-label="Project name"

@@ -6,26 +6,6 @@ import type { ProjectDocument } from "./project-document";
 const [compositions, setCompositions] = createSignal(0);
 export const composing = () => compositions() > 0;
 
-// For a field that is not bound to a document, such as the project name.
-export function trackComposition(input: HTMLElement) {
-  let active = false;
-  const start = () => {
-    if (!active) setCompositions((count) => count + 1);
-    active = true;
-  };
-  const end = () => {
-    if (active) setCompositions((count) => count - 1);
-    active = false;
-  };
-  input.addEventListener("compositionstart", start);
-  input.addEventListener("compositionend", end);
-  return () => {
-    end();
-    input.removeEventListener("compositionstart", start);
-    input.removeEventListener("compositionend", end);
-  };
-}
-
 // The DOM adapter keeps composition local. Rust computes the text delta and
 // resolves Loro cursors, including edits received while an IME draft is open.
 export function bindTextarea(

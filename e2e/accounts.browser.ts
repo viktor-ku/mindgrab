@@ -1732,13 +1732,18 @@ test("an open editor on the placeholder is left alone when the stored map arrive
   expect(await call("id")).toBe(draft);
 });
 
-test("a name being composed survives storage opening under it", async () => {
+test("a name being typed or composed survives a stored map being turned away", async () => {
+  await rename("Stored map");
   await call("openGate", true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="false"]');
   await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  await edit("Edited first");
   const name = page.getByRole("textbox", { name: "Project name" });
-  await name.fill("Plan ");
+  await name.click();
+  await name.fill("");
+  await page.keyboard.type("My ");
   const cdp = await context.newCDPSession(page);
   await cdp.send("Input.imeSetComposition", {
     text: "にほん",
@@ -1746,11 +1751,143 @@ test("a name being composed survives storage opening under it", async () => {
     selectionEnd: 3,
   });
   await call("openGate", false);
-  await Bun.sleep(300);
-  await cdp.send("Input.insertText", { text: "日本" });
-  await name.press("Enter");
   await ready();
-  expect(await name.inputValue()).toBe("Plan 日本");
+  expect(await call("id")).toBe(draft);
+  await cdp.send("Input.insertText", { text: "日本" });
+  await page.keyboard.type(" plan");
+  await page.keyboard.press("Enter");
+  expect(await name.inputValue()).toBe("My 日本 plan");
+});
+
+test("an account's damaged latest map gives way to its other maps on a reload", async () => {
+  await login();
+  await rename("Healthy map");
+  const healthy = await call("id");
+  await newMap();
+  await rename("Damaged map");
+  const damaged = await call("id");
+  await call("corrupt", "account-1", damaged);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(healthy);
+  await expectSilence();
+});
+
+test("an account's damaged latest map gives way to its other maps at sign-in", async () => {
+  await login();
+  await rename("Healthy map");
+  const healthy = await call("id");
+  await cloudSaved();
+  await newMap();
+  await rename("Damaged map");
+  const damaged = await call("id");
+  await cloudSaved();
+  await signOut();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await ready();
+  await call("corrupt", "account-1", damaged);
+  // Another tab's sign-in reaches this one in place, over its untouched map.
+  const other = await context.newPage();
+  await other.goto(appUrl);
+  await ready(other);
+  backend.nextUser = A;
+  await other.getByRole("button", { name: /Sign in/ }).click();
+  await other.getByText(A.name, { exact: true }).waitFor();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await eventually(async () => (await call("id")) === healthy, "the switch");
+  await expectSilence();
+  await other.close();
+});
+
+test("with every stored map damaged, a new map keeps what is typed without a Save", async () => {
+  await rename("Damaged map");
+  const damaged = await call("id");
+  await call("corrupt", "anonymous", damaged);
+  await page.reload();
+  await ready();
+  const id = await call("id");
+  expect(id).not.toBe(damaged);
+  await edit("Kept without a save");
+  await eventually(
+    async () =>
+      (await call("texts", "anonymous", id)).includes("Kept without a save"),
+    "the edit to be stored",
+  );
+  await expectSilence();
+});
+
+test("the account check does not wait for a map that cannot open", async () => {
+  await login();
+  await call("failOpen", true);
+  backend.meStarted = false;
+  await page.reload();
+  await page.getByRole("button", { name: "Retry local saving" }).waitFor();
+  await eventually(async () => backend.meStarted, "the account check");
+});
+
+test("the account check does not wait for the user to leave search", async () => {
+  await login();
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByRole("searchbox", { name: "Search ideas" }).waitFor();
+  backend.meStarted = false;
+  await call("openGate", false);
+  await eventually(async () => backend.meStarted, "the account check");
+  expect(
+    await page
+      .locator("[data-storage-ready]")
+      .getAttribute("data-storage-ready"),
+  ).toBe("false");
+});
+
+test("a sign-in returning before the anonymous map opens keeps that map", async () => {
+  await login();
+  await rename("Account map");
+  await cloudSaved();
+  await signOut();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await ready();
+  await rename("My work");
+  await edit("Anonymous work");
+  await rename("My work");
+  const anon = await call("id");
+  await call("openGate", true, anon);
+  backend.nextUser = A;
+  await page.getByRole("button", { name: /Sign in/ }).click();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  // Long enough for the account check to answer, were it not held for this open.
+  await Bun.sleep(500);
+  await call("openGate", false);
+  await ready();
+  await page.getByText("Anonymous work", { exact: true }).waitFor();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await expectSilence();
+});
+
+test("a damaged account map holds back no other map's upload", async () => {
+  await login();
+  await rename("Aaa damaged first by name");
+  await cloudSaved();
+  const damaged = await call("id");
+  await signOut();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await ready();
+  await rename("Zzz migrating");
+  await edit("Anonymous text");
+  await rename("Zzz migrating");
+  const anon = await call("id");
+  await newMap();
+  await rename("Mmm open one");
+  await call("corrupt", "account-1", damaged);
+  await login();
+  await claimed(anon);
+  await eventually(
+    async () => backend.uploads.some((upload) => upload.projectId === anon),
+    "the migrated map to upload",
+  );
 });
 
 test("saving during a slow first visit leaves one map", async () => {
