@@ -25,8 +25,8 @@ pub async fn apply(request: Request, next: Next) -> Response {
     response
 }
 
-/// The webapp reads JSON errors, so those pass through. Anything else that failed
-/// came from axum, as an empty or plain-text body that may echo the request.
+/// The webapp reads JSON errors, so those pass through. Empty and plain-text errors
+/// come from axum, and may echo the request, or from the analytics proxy.
 fn is_framework_error(response: &Response) -> bool {
     let status = response.status();
     (status.is_client_error() || status.is_server_error())
@@ -49,6 +49,41 @@ fn php_error(response: Response) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=UTF-8"),
     );
+    // Both describe the replaced body. The analytics proxy forwards upstream encodings.
     parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::CONTENT_ENCODING);
     Response::from_parts(parts, Body::from(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, http::StatusCode, middleware, routing::get};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn a_replaced_error_drops_the_encoding_of_the_body_it_replaced() {
+        let upstream = || async {
+            (
+                StatusCode::BAD_GATEWAY,
+                [
+                    (header::CONTENT_TYPE, "text/plain"),
+                    (header::CONTENT_ENCODING, "gzip"),
+                ],
+                vec![0x1f, 0x8b],
+            )
+        };
+        let response = Router::new()
+            .route("/", get(upstream))
+            .layer(middleware::from_fn(apply))
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("502 Bad Gateway"));
+    }
 }

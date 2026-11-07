@@ -243,6 +243,20 @@ fn a_saved_callback_moves_to_the_php_route_and_nothing_else_changes() -> Result<
 }
 
 #[test]
+fn moving_a_saved_callback_keeps_comments_and_table_order() -> Result<()> {
+    let root = repository()?;
+    let target = worktree(root.path(), "target")?;
+    bootstrap_worktree(&root, &target)?;
+    let path = target.join(CONFIG);
+    let current = fs::read_to_string(&path)?;
+    let wrapped = |text: &str| format!("[tools]\nnode = \"24\"\n\n# Keep this note.\n{text}");
+    fs::write(&path, wrapped(&current.replace(CALLBACK, OLD_CALLBACK)))?;
+    bootstrap_worktree(&root, &target)?;
+    assert_eq!(fs::read_to_string(&path)?, wrapped(&current));
+    Ok(())
+}
+
+#[test]
 fn a_custom_callback_is_left_alone() -> Result<()> {
     let root = repository()?;
     let target = worktree(root.path(), "target")?;

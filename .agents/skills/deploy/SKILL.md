@@ -108,6 +108,7 @@ When it exits with `SUCCESS`, verify production:
 ```sh
 curl -fsS -o /dev/null -w '%{http_code}\n' https://api.mindgrab.app/   # 200 (503 = database unreachable)
 curl -sS -o /dev/null -D - https://api.mindgrab.app/ | grep -i '^x-powered-by\.php: PHP/8\.3\.14'
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'x-mindgrab-account.php: probe' https://api.mindgrab.app/api/getMe.php   # 400 (401 = account fence is off)
 curl -fsS https://mindgrab.app/ | grep -q '<div id="root"\|<script' && echo webapp ok
 curl -fsS -o /dev/null -w '%{http_code}\n' https://mindgrab.app/s/deploy-check       # 200 from web
 railway logs "${R[@]}" --since 10m --filter '@level:error'
@@ -116,6 +117,10 @@ railway logs "${R[@]}" --http --since 10m --filter '@httpStatus:>=500'
 
 Check `x-powered-by.php`, not `server`: Cloudflare replaces `server` with
 `cloudflare`, so `Apache/2.4.62` never reaches a client on this domain.
+
+The account fence fails open: if an edge drops `x-mindgrab-account.php`, a stale tab
+can write into another account with no error. A 400 above proves the header reached
+the backend. Treat a 401 as a failed deploy and tell the user.
 
 Then wait about 5 minutes and check again. The restart policy is `ON_FAILURE` with 10
 retries, so a crash loop only becomes visible after startup. A deployment that turns

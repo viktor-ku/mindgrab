@@ -383,6 +383,12 @@ async fn share_sockets_need_no_session_and_close_when_the_link_is_revoked() {
     upload(&f, &alice, id, &snapshot).await;
     let token = share_token(&f, &alice, id, true).await;
     let path = format!("/ws/share/{}", token.as_str().unwrap());
+    let foreign = websocket(&f, "https://evil.example", &path)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 403);
+    assert_disguised(foreign.headers());
 
     let response = websocket(&f, &f.origin, &path).send().await.unwrap();
     assert_eq!(response.status(), 101);

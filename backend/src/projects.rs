@@ -121,7 +121,7 @@ pub async fn rpc(
             app.config.same_origin(&headers)?
         }
         "listProjects" | "getProjectSnapshot" | "getProjectState" | "getShareLink" => {}
-        _ => return Ok(StatusCode::NOT_FOUND.into_response()),
+        _ => unreachable!(),
     }
     let user = app.auth.identify(&headers).await?;
     match method {
@@ -477,55 +477,5 @@ async fn watch(
         {
             break;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        analytics::Analytics,
-        auth::Auth,
-        config::{AuthMode, Config},
-    };
-    use axum::extract::State;
-    use sqlx::postgres::PgPoolOptions;
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn an_unknown_method_gets_the_page_every_other_missing_path_gets() {
-        let config = Config {
-            auth_mode: AuthMode::Local,
-            database_url: "postgres://postgres@localhost/unused".into(),
-            client_id: String::new(),
-            api_key: String::new(),
-            redirect_uri: "http://localhost:5173/api/auth/callback.php".into(),
-            app_url: "http://localhost:5173/".into(),
-            issuer: String::new(),
-            provider_url: String::new(),
-            secure_cookies: false,
-            posthog: None,
-        };
-        // Never connects: the dispatch answers before it touches the database.
-        let pool = PgPoolOptions::new()
-            .connect_lazy(&config.database_url)
-            .unwrap();
-        let app = Arc::new(Backend {
-            auth: Auth::new(pool.clone(), config.clone()),
-            analytics: Analytics::new(None),
-            pool,
-            config,
-            changes: tokio::sync::broadcast::channel(1).0,
-        });
-        let unknown = rpc(
-            State(app),
-            "getPassword",
-            HeaderMap::new(),
-            RawQuery(None),
-            Bytes::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
     }
 }

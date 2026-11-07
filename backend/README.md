@@ -148,7 +148,8 @@ use `{error: {code}}`; snapshots are capped at 10 MiB.
 ## Apache and PHP disguise
 
 The backend presents itself as Apache and PHP. It is a joke built to production
-quality, so no page, header or error may give it away. `src/disguise.rs` is the
+quality, so no page or error may give it away. The CORS layer's constant
+`access-control-allow-origin` stays, since a PHP API could send one too. `src/disguise.rs` is the
 outermost layer, outside CORS, so every response from the router carries these
 headers, including 404s, 405s, preflights and WebSocket 101s:
 
@@ -161,9 +162,9 @@ x-powered-by.php: PHP/8.3.14
 Cloudflare replaces `server` with its own value, so clients of the public domains
 never see the Apache one; check `x-powered-by.php` there instead.
 
-The same layer turns every error axum generates, meaning an empty or plain-text
-body, into PHP's uncaught-exception output with the same status: 404s, 405s, 413s
-and extractor rejections. It is built from the status alone, so it reflects nothing
+The same layer turns every error with an empty or plain-text body into PHP's
+uncaught-exception output with the same status: axum's 404s, 405s, 413s and extractor
+rejections, and the same kinds of error from the analytics proxy. It is built from the status alone, so it reflects nothing
 from the request. JSON errors pass through, because the webapp reads their codes.
 hyper answers requests it cannot parse (400, 414, 431) before any layer runs, so
 those stay undisguised.
@@ -200,11 +201,12 @@ returns, with MySQL's access-denied error on the login page. A malformed or
 oversized body (the route's limit is 8 KiB) counts as empty fields, never a 4xx.
 Up to 64 MiB of an oversized body is read and discarded first: closing a connection
 with bytes unread resets it, and a browser still sending would never see the page.
+Reading stops after 15 seconds. Because the backend has no rate limit, at most 1,024
+attempts read or wait at once, and any others are denied immediately without one.
 
-- **Credentials.** The password is only tested with `is_empty()`; invalid UTF-8 is
-  caught in the raw body, before the field is decoded. Nothing submitted is logged,
-  stored, traced, sent to analytics or forwarded, and the form struct must not
-  derive `Debug`.
+- **Credentials.** The password is only tested with `is_empty()`. Nothing submitted
+  is logged, stored, traced, sent to analytics or forwarded, and the form struct must
+  not derive `Debug`.
 - **Reflected XSS.** The page shares the API origin, where a same-origin script
   could use the session cookie. The reflected username is escaped and truncated to
   32 characters, and placeholders in it render literally. Keep the page free of

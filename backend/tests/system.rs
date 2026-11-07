@@ -41,6 +41,21 @@ async fn deployment_health_reports_database_readiness_without_a_session() {
     f.close().await;
 }
 
+#[tokio::test]
+async fn the_account_header_is_validated_before_the_session_so_deploys_can_probe_it() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let anonymous = f.post("getMe", "").send().await.unwrap();
+    assert_eq!(anonymous.status(), 401);
+    let probe = f
+        .post("getMe", "")
+        .header("x-mindgrab-account.php", "probe")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(probe.status(), 400);
+    f.close().await;
+}
+
 async fn baseline(f: &Fixture, browser: &str, id: Uuid) -> (Project, String) {
     let response = f
         .rpc("getProjectSnapshot", browser, json!({"projectId":id}))

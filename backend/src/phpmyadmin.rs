@@ -11,11 +11,14 @@ use axum::{
 use futures_util::StreamExt;
 use rand::Rng;
 use serde::Deserialize;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, time::timeout};
 
 const TEMPLATE: &str = include_str!("phpmyadmin.html");
 const MAX_FORM_BYTES: usize = 8 * 1024;
 const MAX_DISCARDED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_READ_TIME: Duration = Duration::from_secs(15);
+const MAX_ACTIVE_LOGINS: usize = 1024;
 const MAX_USERNAME_CHARS: usize = 32;
 const MIN_THINKING_MS: u64 = 100;
 const MAX_THINKING_MS: u64 = 10_000;
@@ -34,13 +37,14 @@ pub fn routes<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    let permits = Arc::new(Semaphore::new(MAX_ACTIVE_LOGINS));
     Router::new()
         .route("/phpmyadmin", get(directory_index))
         .route("/phpmyadmin/", get(directory_index))
         .route(
             "/phpmyadmin/index.php",
             get(login_form)
-                .post(log_in)
+                .post(move |request| log_in(permits.clone(), request))
                 .layer(DefaultBodyLimit::max(MAX_FORM_BYTES)),
         )
 }
@@ -56,27 +60,32 @@ async fn login_form() -> Response {
     page(None)
 }
 
-async fn log_in(request: Request) -> Response {
-    let Login {
-        pma_username: username,
-        pma_password: password,
-    } = submitted(request).await;
-    let used_password = !password.is_empty();
-    drop(password);
+/// A permit covers reading and thinking, so a flood cannot pile up in the process
+/// that also serves the API. Without one, the attempt is denied at once.
+async fn log_in(permits: Arc<Semaphore>, request: Request) -> Response {
+    let Ok(_permit) = permits.try_acquire() else {
+        return page(Some(("", false)));
+    };
+    // Only the truncated username outlives this, so little is held while thinking.
+    let (username, used_password) =
+        timeout(MAX_READ_TIME, submitted(request))
+            .await
+            .map_or((String::new(), false), |login| {
+                (
+                    truncated(&login.pma_username),
+                    !login.pma_password.is_empty(),
+                )
+            });
     // A separate statement: ThreadRng is not Send and must not live across the await.
     let delay = thinking_time(&mut rand::thread_rng());
     tokio::time::sleep(delay).await;
     page(Some((&username, used_password)))
 }
 
-/// Any unusable body counts as empty fields. `Form` decodes lossily, so invalid
-/// UTF-8 is caught in the raw body, before any field exists to look at.
+/// Any unusable body counts as empty fields.
 async fn submitted(request: Request) -> Login {
     let (parts, body) = request.into_parts();
     let form = read_form(body).await;
-    if !is_utf8(&form) {
-        return Login::default();
-    }
     // The route's DefaultBodyLimit still applies here and rejects an oversized form.
     Form::from_request(Request::from_parts(parts, form.into()), &())
         .await
@@ -98,25 +107,6 @@ async fn read_form(body: Body) -> Vec<u8> {
         }
     }
     form
-}
-
-/// Whether a urlencoded body decodes to UTF-8, whichever way its bytes were sent.
-fn is_utf8(body: &[u8]) -> bool {
-    let hex = |byte: u8| char::from(byte).to_digit(16);
-    let mut decoded = Vec::with_capacity(body.len());
-    let mut rest = body;
-    while let [byte, tail @ ..] = rest {
-        rest = tail;
-        if let (b'%', [high, low, after @ ..]) = (*byte, tail)
-            && let (Some(high), Some(low)) = (hex(*high), hex(*low))
-        {
-            decoded.push((high * 16 + low) as u8);
-            rest = after;
-        } else {
-            decoded.push(*byte);
-        }
-    }
-    std::str::from_utf8(&decoded).is_ok()
 }
 
 fn thinking_time(rng: &mut impl Rng) -> Duration {
@@ -178,11 +168,11 @@ fn render(username: &str, alert: &str, token: &str, session: &str) -> String {
     html
 }
 
-/// The only path from a submitted username to the page.
+/// The only path from a submitted username, already truncated, to the page.
 fn page(failed_login: Option<(&str, bool)>) -> Response {
     let (username, alert) = match failed_login {
         Some((username, used_password)) => {
-            let username = escape(&truncated(username));
+            let username = escape(username);
             let alert = access_denied(&username, used_password);
             (username, alert)
         }
@@ -484,26 +474,6 @@ mod tests {
                 Some(FORM),
                 b"pma_username=a&pma_username=b".to_vec(),
             ),
-            (
-                "raw invalid UTF-8",
-                Some(FORM),
-                b"pma_username=\xff\xfe&pma_password=x".to_vec(),
-            ),
-            (
-                "escaped invalid UTF-8",
-                Some(FORM),
-                b"pma_username=%ff&pma_password=x".to_vec(),
-            ),
-            (
-                "invalid password",
-                Some(FORM),
-                b"pma_username=root&pma_password=%c0".to_vec(),
-            ),
-            (
-                "invalid unknown field",
-                Some(FORM),
-                b"pma_username=root&pma_password=x&server=%ff".to_vec(),
-            ),
         ];
         for (name, content_type, body) in cases {
             let (response, html) = send(routes(), post(content_type, body)).await;
@@ -514,8 +484,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn valid_utf8_survives_the_body_check() {
+    async fn fields_decode_as_a_form_and_invalid_utf8_is_replaced() {
         for (body, username) in [
+            ("pma_username=%ff&pma_password=%c0", "\u{FFFD}"),
             ("pma_username=%EF%BF%BD&pma_password=x", "\u{FFFD}"),
             ("pma_username=caf\u{e9}&pma_password=x", "caf\u{e9}"),
             ("pma_username=caf%C3%A9&pma_password=x", "caf\u{e9}"),
@@ -549,7 +520,8 @@ mod tests {
         assert!(html.contains(&denied("", "NO")), "{html}");
     }
 
-    #[tokio::test(start_paused = true)]
+    // Real time: a paused clock jumps to the read timeout whenever the socket goes idle.
+    #[tokio::test]
     async fn a_client_still_sending_an_oversized_form_can_read_the_page() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -585,6 +557,45 @@ mod tests {
             chunks.load(Ordering::Relaxed),
             MAX_DISCARDED_BYTES / CHUNK_BYTES + 1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_body_is_abandoned_and_denied() {
+        let start =
+            stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"pma_username=root")) });
+        let stalled = Body::from_stream(start.chain(stream::pending()));
+        let started = Instant::now();
+        let (response, html) = send(routes(), post(Some(FORM), stalled)).await;
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), 200);
+        assert!(html.contains(&denied("", "NO")), "{html}");
+        assert!(
+            (MAX_READ_TIME..=MAX_READ_TIME + Duration::from_secs(10)).contains(&elapsed),
+            "{elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn logins_past_the_limit_are_denied_at_once_and_unread() {
+        async fn html(response: Response) -> String {
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+        let credentials = "pma_username=root&pma_password=root";
+        let permits = Arc::new(Semaphore::new(1));
+        let held = permits.clone().try_acquire_owned().unwrap();
+        let started = Instant::now();
+        let response = log_in(permits.clone(), post(Some(FORM), credentials)).await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert!(html(response).await.contains(&denied("", "NO")));
+
+        drop(held);
+        let response = log_in(permits.clone(), post(Some(FORM), credentials)).await;
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(html(response).await.contains(&denied("root", "YES")));
+        assert_eq!(permits.available_permits(), 1);
     }
 
     #[tokio::test(start_paused = true)]
