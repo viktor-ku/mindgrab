@@ -1,4 +1,10 @@
+import { createSignal } from "solid-js";
 import type { ProjectDocument } from "./project-document";
+
+// Text being composed belongs to the browser until the composition ends, so a
+// document swap has to wait for it: it can neither be read reliably nor moved.
+const [compositions, setCompositions] = createSignal(0);
+export const composing = () => compositions() > 0;
 
 // The DOM adapter keeps composition local. Rust computes the text delta and
 // resolves Loro cursors, including edits received while an IME draft is open.
@@ -19,7 +25,7 @@ export function bindTextarea(
       : doc.native().resolveCursor(id, bytes);
   let base = doc.snapshot();
   let synced = doc.view().nodes.find((node) => node.id === id)?.[field] ?? "";
-  let composing = false;
+  let active = false;
   let applying = false;
   let selection:
     | {
@@ -31,7 +37,7 @@ export function bindTextarea(
   input.value = synced;
   onValue(synced);
   const capture = () => {
-    if (composing || input.value !== synced) return;
+    if (active || input.value !== synced) return;
     try {
       selection = {
         start: cursor(
@@ -93,18 +99,26 @@ export function bindTextarea(
     render(caret);
   }
   const observe = () => {
-    if (!composing && !applying) render();
+    if (!active && !applying) render();
   };
   const onInput = (event: Event) => {
-    if (!composing && !(event as InputEvent).isComposing) commit();
+    if (!active && !(event as InputEvent).isComposing) commit();
     onValue(input.value);
   };
   const onStart = () => {
-    composing = true;
+    if (!active) setCompositions((count) => count + 1);
+    active = true;
+  };
+  const finish = () => {
+    if (active) setCompositions((count) => count - 1);
+    active = false;
   };
   const onEnd = () => {
-    composing = false;
+    const ended = active;
+    active = false;
     commit();
+    // Only now: whoever waits for the composition must see the committed text.
+    if (ended) setCompositions((count) => count - 1);
   };
   doc.on("beforeChange", capture);
   doc.on("snapshot", observe);
@@ -112,6 +126,7 @@ export function bindTextarea(
   input.addEventListener("compositionstart", onStart);
   input.addEventListener("compositionend", onEnd);
   return () => {
+    finish();
     if (input.value !== synced && doc.ready) commit();
     doc.off("beforeChange", capture);
     doc.off("snapshot", observe);

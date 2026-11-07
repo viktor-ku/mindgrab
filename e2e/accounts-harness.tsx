@@ -94,7 +94,10 @@ Storage.prototype.setItem = function (key: string, value: string) {
 // the mode survives a reload in sessionStorage, so a cold load shows the
 // placeholder for as long as the test wants.
 const OPEN_MODE_KEY = "accountHarness/open";
+const OPEN_ONLY_KEY = "accountHarness/open-only";
 let openMode = sessionStorage.getItem(OPEN_MODE_KEY);
+// With an id, only that project's database is held.
+let openOnly = sessionStorage.getItem(OPEN_ONLY_KEY) ?? "";
 const heldOpens: (() => void)[] = [];
 class GatedOpenRequest {
   onsuccess: ((event: Event) => void) | null = null;
@@ -118,7 +121,11 @@ class GatedOpenRequest {
 }
 const openDatabase = IDBFactory.prototype.open;
 IDBFactory.prototype.open = function (name: string, version?: number) {
-  if (!openMode || !name.includes("/project/"))
+  if (
+    !openMode ||
+    !name.includes("/project/") ||
+    (openOnly && !name.endsWith(`/project/${openOnly}`))
+  )
     return openDatabase.call(this, name, version);
   const proxy = new GatedOpenRequest();
   const start = () => {
@@ -138,10 +145,13 @@ IDBFactory.prototype.open = function (name: string, version?: number) {
   else start();
   return proxy as unknown as IDBOpenDBRequest;
 };
-function setOpenMode(mode: "hold" | "fail" | null) {
+function setOpenMode(mode: "hold" | "fail" | null, only = "") {
   openMode = mode;
+  openOnly = only;
   if (mode) sessionStorage.setItem(OPEN_MODE_KEY, mode);
   else sessionStorage.removeItem(OPEN_MODE_KEY);
+  if (only) sessionStorage.setItem(OPEN_ONLY_KEY, only);
+  else sessionStorage.removeItem(OPEN_ONLY_KEY);
   if (mode === "hold") return;
   for (const start of heldOpens.splice(0)) start();
 }
@@ -180,8 +190,8 @@ const accountHarness = {
   failAuthDatabase(value: boolean) {
     authDatabaseFail = value;
   },
-  openGate(value: boolean) {
-    setOpenMode(value ? "hold" : null);
+  openGate(value: boolean, only = "") {
+    setOpenMode(value ? "hold" : null, only);
   },
   failOpen(value: boolean) {
     setOpenMode(value ? "fail" : null);
@@ -192,6 +202,51 @@ const accountHarness = {
     const root = doc.view().roots[0];
     project.replaceNodeText(doc, root, "Late old account update");
     return doc.observerCount;
+  },
+  // Every later read of this map fails, as it would with a damaged database.
+  async corrupt(namespace: string, id: string) {
+    const repo = await repository(namespace);
+    const name = repo.names.project(id);
+    await repo.close();
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = indexedDB.open(name);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(["snapshots"], "readwrite");
+      tx.objectStore("snapshots").add(new Uint8Array([1, 2, 3, 4, 5]));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  },
+  // A complete marker over an edit it never heard of: a tab killed between
+  // saving a keystroke and flagging it.
+  async killedAfterEdit(id: string, ownerId: number, text: string) {
+    const repo = await repository("anonymous");
+    const entry = (await repo.list({ includeClaims: true })).find(
+      (entry) => entry.id === id,
+    );
+    const claim = entry?.claim;
+    if (!claim?.version) throw new Error("No complete claim");
+    const handle = await repo.open(id, { remember: false });
+    project.replaceNodeText(handle.doc, handle.doc.view().roots[0], text);
+    await handle.flush();
+    await handle.refreshMetadata();
+    await handle.close();
+    await repo.completeClaim(id, ownerId, claim.targetId, claim.version);
+    await repo.close();
+  },
+  async texts(namespace: string, id: string) {
+    const repo = await repository(namespace);
+    const handle = await repo.open(id, { remember: false });
+    try {
+      return handle.doc.view().nodes.map((node) => node.text);
+    } finally {
+      await handle.close();
+      await repo.close();
+    }
   },
   async catalog(namespace: string, includeClaims = false) {
     const repo = await repository(namespace);

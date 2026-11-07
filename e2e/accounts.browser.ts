@@ -251,6 +251,8 @@ afterAll(async () => {
 // A fresh browser context has no local projects, account hints or cookies.
 async function openFreshBrowser() {
   context = await browser.newContext();
+  // Shorter than a test's own timeout, which would take the browser with it.
+  context.setDefaultTimeout(15_000);
   context.on("page", (page) =>
     page.on("pageerror", (error) => errors.push(error)),
   );
@@ -360,20 +362,25 @@ const claimPhase = (id: string, target = page) =>
       )?.claim?.phase,
     id,
   );
+// Playwright's waitForFunction takes an async predicate's promise for a truthy
+// answer and returns at once, so anything read from IndexedDB polls here.
+async function eventually(check: () => Promise<boolean>, what: string) {
+  const deadline = Date.now() + 10_000;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`Timed out: ${what}`);
+    await Bun.sleep(20);
+  }
+}
 async function claimed(id: string, target = page) {
-  await target.waitForFunction(
-    async (id) =>
-      (await window.accountHarness.catalog("anonymous", true)).find(
-        (entry) => entry.id === id,
-      )?.claim?.phase === "complete",
-    id,
+  await eventually(
+    async () => (await claimPhase(id, target)) === "complete",
+    `claim of ${id} to complete`,
   );
 }
 async function accountCatalogSize(size: number) {
-  await page.waitForFunction(
-    async (size) =>
-      (await window.accountHarness.catalog("account-1")).length === size,
-    size,
+  await eventually(
+    async () => (await call("catalog", "account-1")).length === size,
+    `account catalog of ${size}`,
   );
 }
 async function untilRegistrationRequested(count = 1, id?: string) {
@@ -395,12 +402,9 @@ test("lost registration and repeated/concurrent claims reuse one target and reta
   await login();
   // The map stays on screen and the copy begins behind it, without a word.
   expect(await call("id")).toBe(id);
-  await page.waitForFunction(
-    async (id) =>
-      (await window.accountHarness.catalog("anonymous", true)).find(
-        (entry) => entry.id === id,
-      )?.claim?.phase === "pending",
-    id,
+  await eventually(
+    async () => (await claimPhase(id)) === "pending",
+    "claim to begin",
   );
   await untilRegistrationRequested();
   expect(
@@ -1072,12 +1076,18 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
     .getByRole("switch", { name: "Save locally", exact: true })
     .click();
   await dialog.getByText("This map lives only in memory.").waitFor();
-  await page.waitForFunction(
-    async (id) =>
-      !(await indexedDB.databases()).some((db) =>
-        db.name?.endsWith(`/project/${id}`),
+  await eventually(
+    () =>
+      page.evaluate(
+        async (id) =>
+          !(await indexedDB.databases()).some(
+            (db) =>
+              db.name?.includes("account-1") &&
+              db.name.endsWith(`/project/${id}`),
+          ),
+        id,
       ),
-    id,
+    "the local database to go",
   );
   await dialog
     .getByRole("button", { name: "Close project preferences" })
@@ -1354,4 +1364,291 @@ test("retrying a failed storage change from the keyboard keeps focus in the dial
   expect(await local.evaluate((el) => el === document.activeElement)).toBe(
     true,
   );
+});
+
+async function newMap() {
+  const previous = await call("id");
+  await projectMenu("New map");
+  await eventually(async () => (await call("id")) !== previous, "a new map");
+}
+
+// Holds registration so a second map is still being copied once it is opened
+// from Load. Its copy then completes while the user is typing in the original.
+async function typingAcrossCompletion() {
+  await rename("Waiting map");
+  const waiting = await call("id");
+  await newMap();
+  await rename("Open map");
+  backend.registerGate = deferred();
+  await login();
+  await untilRegistrationRequested();
+  await projectMenu("Open map…");
+  await page.getByRole("menuitem", { name: /Waiting map/ }).click();
+  await eventually(async () => (await call("id")) === waiting, "Load to open");
+  await page.locator("[data-node-id]").first().dblclick();
+  await page.getByRole("textbox", { name: "Node text" }).waitFor();
+  await page.keyboard.type("Early");
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
+  await claimed(waiting);
+  await page.keyboard.type(" LATE");
+  return waiting;
+}
+
+test("text typed after the copy completed reaches the account copy", async () => {
+  const waiting = await typingAcrossCompletion();
+  await page.keyboard.press("Enter");
+  await eventually(
+    async () =>
+      (await call("texts", "account-1", waiting)).includes("Early LATE"),
+    "late text to reach the copy",
+  );
+  await page.reload();
+  await ready();
+  expect(await call("texts", "account-1", waiting)).toContain("Early LATE");
+});
+
+test("text typed right before a reload reaches the account copy after it", async () => {
+  const waiting = await typingAcrossCompletion();
+  await eventually(
+    async () =>
+      (await call("texts", "anonymous", waiting)).includes("Early LATE"),
+    "the keystrokes to be stored",
+  );
+  await page.reload();
+  await ready();
+  await eventually(
+    async () =>
+      (await call("texts", "account-1", waiting)).includes("Early LATE"),
+    "late text to reach the copy after the reload",
+  );
+  const [entry] = (await call("catalog", "anonymous", true)).filter(
+    (entry) => entry.id === waiting,
+  );
+  expect(entry?.claim?.stale).toBeUndefined();
+});
+
+test("an edit stored by a tab killed before it could flag it reaches the account copy", async () => {
+  await rename("Killed tab");
+  const id = await call("id");
+  await login();
+  await claimed(id);
+  await eventually(
+    async () => (await call("catalog", "account-1")).length > 0,
+    "the copy to arrive",
+  );
+  await newMap();
+  await call("killedAfterEdit", id, A.id, "Stored before the kill");
+  await page.reload();
+  await ready();
+  await eventually(
+    async () =>
+      (await call("texts", "account-1", id)).includes("Stored before the kill"),
+    "the stored edit to reach the copy",
+  );
+});
+
+test("a second tab's edits after the copy completed reach the account copy", async () => {
+  await rename("Two tabs");
+  const id = await call("id");
+  const other = await context.newPage();
+  await other.goto(appUrl);
+  await ready(other);
+  expect(await call("id")).toBe(id);
+  await login();
+  await claimed(id);
+  await eventually(
+    async () =>
+      (await call("catalog", "account-1")).some((entry) => entry.id === id),
+    "the copy to arrive",
+  );
+  await addChild("Typed in the other tab", other);
+  await eventually(
+    async () =>
+      (await call("texts", "account-1", id)).includes("Typed in the other tab"),
+    "the other tab's edit to reach the copy",
+  );
+  await other.close();
+});
+
+test("a map that cannot be read holds back neither the others nor the Load list", async () => {
+  await rename("A damaged map");
+  const damaged = await call("id");
+  await newMap();
+  await rename("B healthy map");
+  const healthy = await call("id");
+  await newMap();
+  await rename("C open map");
+  await call("corrupt", "anonymous", damaged);
+  await login();
+  await claimed(healthy);
+  expect(await claimPhase(damaged)).not.toBe("complete");
+  await eventually(
+    async () =>
+      (await call("catalog", "account-1")).some(
+        (entry) => entry.id === healthy,
+      ),
+    "the healthy map to arrive",
+  );
+  await projectMenu("Open map…");
+  await page.getByRole("menuitem", { name: /A damaged map/ }).waitFor();
+  await page.getByRole("menuitem", { name: /B healthy map/ }).waitFor();
+  await page.keyboard.press("Escape");
+  await expectSilence();
+});
+
+for (const [title, typed, composed] of [
+  ["beside typed text", "Draft ", "Draft 日本"],
+  ["as the only input", "", "日本"],
+] as const)
+  test(`text being composed ${title} survives storage opening under it`, async () => {
+    await call("openGate", true);
+    await page.reload();
+    await page.waitForSelector('[data-storage-ready="false"]');
+    await page.waitForSelector("[data-node-id]");
+    const draft = await call("id");
+    await page.locator("[data-node-id]").first().dblclick();
+    const input = page.getByRole("textbox", { name: "Node text" });
+    await input.waitFor();
+    if (typed) await page.keyboard.type(typed);
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Input.imeSetComposition", {
+      text: "にほん",
+      selectionStart: 3,
+      selectionEnd: 3,
+    });
+    await call("openGate", false);
+    // The stored map has opened by now; it waits for the composition to end.
+    await Bun.sleep(300);
+    expect(await input.inputValue()).toBe(`${typed}にほん`);
+    await page.waitForSelector('[data-storage-ready="false"]');
+    await cdp.send("Input.insertText", { text: "日本" });
+    await ready();
+    expect(await call("id")).toBe(draft);
+    await page.keyboard.press("Enter");
+    await page.getByText(composed, { exact: true }).waitFor();
+    await page.reload();
+    await ready();
+    expect(await call("id")).toBe(draft);
+    await page.getByText(composed, { exact: true }).waitFor();
+  });
+
+test("a draft left behind by a change of account stays with its own account", async () => {
+  await login();
+  await call("failOpen", true);
+  backend.user = B;
+  await refreshAccount();
+  await page.getByText(B.name, { exact: true }).waitFor();
+  const retry = page.getByRole("button", { name: "Retry local saving" });
+  await retry.waitFor();
+  const draft = await call("id");
+  await edit("Written as B");
+  backend.user = A;
+  await refreshAccount();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  expect(await call("id")).not.toBe(draft);
+  await page.getByText("Written as B", { exact: true }).waitFor({
+    state: "detached",
+  });
+  await call("failOpen", false);
+  await retry.click();
+  await ready();
+  await eventually(
+    async () =>
+      (await call("catalog", "account-2")).some((entry) => entry.id === draft),
+    "the draft to be stored under its own account",
+  );
+  expect(await call("texts", "account-2", draft)).toContain("Written as B");
+  expect(
+    (await call("catalog", "account-1")).some((entry) => entry.id === draft),
+  ).toBe(false);
+  expect(backend.registrations).not.toContain(draft);
+  expect(backend.projects.has(draft)).toBe(false);
+});
+
+test("a map saved while the first map opens is not replaced by it", async () => {
+  const stored = await call("id");
+  await call("openGate", true, stored);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  await edit("Saved first");
+  await projectMenu("Save now");
+  await page
+    .locator(".notice")
+    .getByText("Saved locally", { exact: true })
+    .waitFor();
+  await ready();
+  await page.locator("[data-node-id]").first().dblclick();
+  const input = page.getByRole("textbox", { name: "Node text" });
+  await input.waitFor();
+  await call("openGate", false);
+  await Bun.sleep(300);
+  await page.keyboard.type("!");
+  expect(await input.inputValue()).toBe("!");
+  await page.keyboard.press("Enter");
+  expect(await call("id")).toBe(draft);
+});
+
+test("a background switch to the account's map waits for search to close", async () => {
+  await cloudAccountWithTwoMaps();
+  await freshBrowser();
+  backend.recentGate = deferred();
+  const seed = await call("id");
+  await login();
+  await page.keyboard.press("ControlOrMeta+f");
+  const search = page.getByRole("searchbox", { name: "Search ideas" });
+  await search.waitFor();
+  await page.keyboard.type("ne");
+  backend.recentGate.resolve();
+  backend.recentGate = undefined;
+  await accountCatalogSize(2);
+  await Bun.sleep(300);
+  await page.keyboard.type("w");
+  expect(await search.inputValue()).toBe("new");
+  expect(await call("id")).toBe(seed);
+  await page.keyboard.press("Escape");
+  await eventually(async () => (await call("id")) !== seed, "the switch");
+});
+
+test("a saving switch flipped while a map opens applies to the map that opens", async () => {
+  const stored = await call("id");
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  await projectMenu("Project preferences…");
+  const dialog = page.getByRole("dialog", { name: "Project preferences" });
+  await dialog
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await call("openGate", false);
+  await dialog.getByText("This map lives only in memory.").waitFor();
+  expect(await call("id")).toBe(stored);
+});
+
+test("a memory-only anonymous map stays reachable after New map under an account", async () => {
+  await edit("Only in memory");
+  const id = await call("id");
+  await projectMenu("Project preferences…");
+  const dialog = page.getByRole("dialog", { name: "Project preferences" });
+  await dialog
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await dialog.getByText("This map lives only in memory.").waitFor();
+  await dialog
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  const name = await page.getByLabel("Project name").inputValue();
+  // Signing in here would navigate and end the map; another tab's sign-in
+  // reaches this one in place.
+  backend.user = A;
+  await refreshAccount();
+  await page.getByText(A.name, { exact: true }).waitFor();
+  await newMap();
+  await projectMenu("Open map…");
+  await page.getByRole("menuitem", { name }).click();
+  await eventually(async () => (await call("id")) === id, "the map to reopen");
+  await page.getByText("Only in memory", { exact: true }).waitFor();
 });

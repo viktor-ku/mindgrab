@@ -257,7 +257,16 @@ export interface CatalogEntry {
   // Whether the backend has acknowledged this project's UUID.
   registration: "pending" | "registered";
   // Anonymous source markers bind a one-time claim to one account.
-  claim?: { ownerId: number; targetId: string; phase: "pending" | "complete" };
+  claim?: {
+    ownerId: number;
+    targetId: string;
+    phase: "pending" | "complete";
+    // The source version the copy holds. An edit that lands on the source
+    // afterwards (a second tab, a map waiting for a pause in typing) sets
+    // `stale`, and the next migration run copies it across.
+    version?: string;
+    stale?: boolean;
+  };
   // A copied target cannot sync or appear in Load before registration succeeds.
   claimPending?: boolean;
   claimSource?: string;
@@ -1022,9 +1031,11 @@ export class ProjectRepository {
       .sort(byName);
   }
 
+  // Nothing uploads an anonymous map, whatever its cloud switch says.
   hasMemoryOnlyProjects() {
+    const anonymous = this.scope.namespace === ANONYMOUS_NAMESPACE;
     return [...this.#memoryEntries.values()].some(
-      (entry) => entry.saving?.cloud === false,
+      (entry) => anonymous || entry.saving?.cloud === false,
     );
   }
 
@@ -1183,11 +1194,19 @@ export class ProjectRepository {
     if (written) this.#announce();
   }
 
-  async completeClaim(id: string, ownerId: number, targetId: string) {
+  async completeClaim(
+    id: string,
+    ownerId: number,
+    targetId: string,
+    version: string,
+  ) {
     this.#assertOpen();
     const { written } = await this.#catalog.update(id, (entry) =>
       entry?.claim?.ownerId === ownerId && entry.claim.targetId === targetId
-        ? { ...entry, claim: { ...entry.claim, phase: "complete" } }
+        ? {
+            ...entry,
+            claim: { ownerId, targetId, phase: "complete", version },
+          }
         : entry,
     );
     if (written) this.#announce();
@@ -1333,12 +1352,20 @@ export class ProjectRepository {
     const { entry, written } = await this.#catalog.update(
       session.id,
       (entry) => {
-        if (entry)
+        if (entry) {
+          const claim = entry.claim;
+          const stale =
+            claim?.phase === "complete" &&
+            claim.version !== undefined &&
+            claim.version !== session.doc.version() &&
+            !claim.stale;
+          if (stale) entry = { ...entry, claim: { ...claim, stale } };
           return entry.name === name &&
             entry.saving?.local === saving.local &&
             entry.saving?.cloud === saving.cloud
             ? entry
             : { ...entry, name, saving };
+        }
         if (!ready) return;
         return {
           id: session.id,

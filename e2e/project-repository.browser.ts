@@ -566,13 +566,21 @@ describe("project saving preferences", () => {
           await mg.repo.setPreference(`project/${id}/view`, { left: 20 });
         }, id);
         for (const page of [first, second]) {
-          await page.waitForFunction(
-            async (id) =>
-              !(await indexedDB.databases()).some((db) =>
-                db.name?.endsWith(`/project/${id}`),
-              ),
-            id,
-          );
+          // waitForFunction would take this async predicate's promise for a
+          // truthy answer and return at once.
+          const deadline = Date.now() + 10_000;
+          while (
+            await page.evaluate(
+              async (id) =>
+                (await indexedDB.databases()).some((db) =>
+                  db.name?.endsWith(`/project/${id}`),
+                ),
+              id,
+            )
+          ) {
+            if (Date.now() > deadline) throw new Error("Database still there");
+            await Bun.sleep(20);
+          }
           const state = await page.evaluate(async (id) => {
             const handle = await mg.repo.open(id);
             await handle.flush();
