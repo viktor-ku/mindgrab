@@ -1,4 +1,5 @@
 import { createEffect, For, Show } from "solid-js";
+import { closeOnEscape } from "./escape-key";
 import { ChevronRightIcon, CloseIcon } from "./icons";
 import { ALT_LABEL } from "./ShortcutsDialog";
 import type { MindMapNode } from "./mind-map";
@@ -16,6 +17,8 @@ export function Outline(props: {
   onToggle: (id: string) => void;
   onEdit: (id: string) => void;
   onClose: () => void;
+  // False where Alt+O does nothing: the read-only shared view.
+  shortcut?: boolean;
 }) {
   let tree!: HTMLDivElement;
   // Items in display order, honoring folds, for keyboard movement.
@@ -84,9 +87,6 @@ export function Outline(props: {
       case "Enter":
       case "F2":
         if (item) props.onEdit(item.id);
-        break;
-      case "Escape":
-        props.onClose();
         break;
       default:
         return;
@@ -173,7 +173,11 @@ export function Outline(props: {
       data-no-pan
       data-toolbar
       aria-label="Outline"
-      class="map-toolbar outline-panel pointer-events-auto flex flex-col cursor-default"
+      // Focusable, so a press on the header keeps focus in the panel, where
+      // Esc closes it, instead of handing it to the map.
+      tabIndex={-1}
+      class="map-toolbar outline-panel pointer-events-auto flex flex-col cursor-default outline-none"
+      ref={(el) => closeOnEscape(el, () => props.onClose())}
     >
       <header class="flex items-center justify-between border-b border-stone-100 py-1.5 pr-1.5 pl-3.5">
         <h2 class="panel-title">Outline</h2>
@@ -181,7 +185,11 @@ export function Outline(props: {
           type="button"
           class="icon-button size-8!"
           aria-label="Close outline"
-          title={`Close outline (${ALT_LABEL}O)`}
+          title={
+            props.shortcut === false
+              ? "Close outline"
+              : `Close outline (${ALT_LABEL}O)`
+          }
           onClick={props.onClose}
         >
           <CloseIcon class="size-4" />

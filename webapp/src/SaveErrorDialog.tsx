@@ -41,8 +41,18 @@ export function SaveErrorDialog(props: {
             </Show>
             <Show when={props.onRetryCloud}>
               {(retry) => (
-                <button type="button" class="primary-button" onClick={retry()}>
-                  Retry
+                // One primary action: beside the local retry this one steps
+                // back and says what it retries.
+                <button
+                  type="button"
+                  class={
+                    props.onRetryLocal
+                      ? "map-control outlined"
+                      : "primary-button"
+                  }
+                  onClick={retry()}
+                >
+                  {props.onRetryLocal ? "Retry cloud saving" : "Retry"}
                 </button>
               )}
             </Show>

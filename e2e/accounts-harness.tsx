@@ -59,6 +59,18 @@ class Socket {
 }
 window.WebSocket = Socket as unknown as typeof WebSocket;
 
+// Everything this page has told the user, including what cleared itself again
+// before a test could look.
+const messages = new Set<string>();
+new MutationObserver(() => {
+  for (const element of document.querySelectorAll(
+    '[data-storage-message], .notice, [role="alert"]',
+  )) {
+    const text = element.textContent?.trim();
+    if (text) messages.add(text);
+  }
+}).observe(document, { subtree: true, childList: true, characterData: true });
+
 let writesFail = false;
 let failedProject = "";
 let authWritesFail = false;
@@ -90,6 +102,72 @@ Storage.prototype.setItem = function (key: string, value: string) {
   store.call(this, key, value);
 };
 
+// Project database opens can be held or failed from the page's first open:
+// the mode survives a reload in sessionStorage, so a cold load shows the
+// placeholder for as long as the test wants.
+const OPEN_MODE_KEY = "accountHarness/open";
+const OPEN_ONLY_KEY = "accountHarness/open-only";
+let openMode = sessionStorage.getItem(OPEN_MODE_KEY);
+// With an id, only that project's database is held.
+let openOnly = sessionStorage.getItem(OPEN_ONLY_KEY) ?? "";
+const heldOpens: (() => void)[] = [];
+class GatedOpenRequest {
+  onsuccess: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onblocked: ((event: Event) => void) | null = null;
+  onupgradeneeded: ((event: IDBVersionChangeEvent) => void) | null = null;
+  real?: IDBOpenDBRequest;
+  failure?: DOMException;
+  get result() {
+    return this.real?.result;
+  }
+  get error() {
+    return this.real?.error ?? this.failure ?? null;
+  }
+  get transaction() {
+    return this.real?.transaction ?? null;
+  }
+  get readyState() {
+    return this.real?.readyState ?? "pending";
+  }
+}
+const openDatabase = IDBFactory.prototype.open;
+IDBFactory.prototype.open = function (name: string, version?: number) {
+  if (
+    !openMode ||
+    !name.includes("/project/") ||
+    (openOnly && !name.endsWith(`/project/${openOnly}`))
+  )
+    return openDatabase.call(this, name, version);
+  const proxy = new GatedOpenRequest();
+  const start = () => {
+    if (openMode === "fail") {
+      proxy.failure = new DOMException("Storage is gated.", "UnknownError");
+      queueMicrotask(() => proxy.onerror?.(new Event("error")));
+      return;
+    }
+    const real = openDatabase.call(this, name, version);
+    proxy.real = real;
+    real.onsuccess = (event) => proxy.onsuccess?.(event);
+    real.onerror = (event) => proxy.onerror?.(event);
+    real.onblocked = (event) => proxy.onblocked?.(event);
+    real.onupgradeneeded = (event) => proxy.onupgradeneeded?.(event);
+  };
+  if (openMode === "hold") heldOpens.push(start);
+  else start();
+  return proxy as unknown as IDBOpenDBRequest;
+};
+function setOpenMode(mode: "hold" | "fail" | null, only = "") {
+  openMode = mode;
+  openOnly = only;
+  if (mode) sessionStorage.setItem(OPEN_MODE_KEY, mode);
+  else sessionStorage.removeItem(OPEN_MODE_KEY);
+  if (only) sessionStorage.setItem(OPEN_ONLY_KEY, only);
+  else sessionStorage.removeItem(OPEN_ONLY_KEY);
+  if (mode === "hold") return;
+  for (const start of heldOpens.splice(0)) start();
+}
+
 async function repository(namespace: string) {
   return new ProjectRepository({ deployment: location.origin, namespace });
 }
@@ -118,11 +196,20 @@ const accountHarness = {
       namespace,
     }).project(id);
   },
+  messages() {
+    return [...messages];
+  },
   failAuthWrites(value: boolean) {
     authWritesFail = value;
   },
   failAuthDatabase(value: boolean) {
     authDatabaseFail = value;
+  },
+  openGate(value: boolean, only = "") {
+    setOpenMode(value ? "hold" : null, only);
+  },
+  failOpen(value: boolean, only = "") {
+    setOpenMode(value ? "fail" : null, only);
   },
   editRetired(id: string) {
     const doc = retired.find((doc) => doc.id === id);
@@ -130,6 +217,51 @@ const accountHarness = {
     const root = doc.view().roots[0];
     project.replaceNodeText(doc, root, "Late old account update");
     return doc.observerCount;
+  },
+  // Every later read of this map fails, as it would with a damaged database.
+  async corrupt(namespace: string, id: string) {
+    const repo = await repository(namespace);
+    const name = repo.names.project(id);
+    await repo.close();
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = indexedDB.open(name);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(["snapshots"], "readwrite");
+      tx.objectStore("snapshots").add(new Uint8Array([1, 2, 3, 4, 5]));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  },
+  // A complete marker over an edit it never heard of: a tab killed between
+  // saving a keystroke and flagging it.
+  async killedAfterEdit(id: string, ownerId: number, text: string) {
+    const repo = await repository("anonymous");
+    const entry = (await repo.list({ includeClaims: true })).find(
+      (entry) => entry.id === id,
+    );
+    const claim = entry?.claim;
+    if (!claim?.version) throw new Error("No complete claim");
+    const handle = await repo.open(id, { remember: false });
+    project.replaceNodeText(handle.doc, handle.doc.view().roots[0], text);
+    await handle.flush();
+    await handle.refreshMetadata();
+    await handle.close();
+    await repo.completeClaim(id, ownerId, claim.targetId, claim.version);
+    await repo.close();
+  },
+  async texts(namespace: string, id: string) {
+    const repo = await repository(namespace);
+    const handle = await repo.open(id, { remember: false });
+    try {
+      return handle.doc.view().nodes.map((node) => node.text);
+    } finally {
+      await handle.close();
+      await repo.close();
+    }
   },
   async catalog(namespace: string, includeClaims = false) {
     const repo = await repository(namespace);
@@ -150,28 +282,42 @@ const accountHarness = {
     }
   },
   // Claims preserve the complete Loro history under the destination account.
+  // The signed-in app claims anonymous maps on its own as soon as it sees
+  // them, so the edits are made under the claim lock, before anyone can copy.
   async historyClaim(ownerId: number) {
     const source = await repository("anonymous");
     const destination = await repository(`account-${ownerId}`);
-    const handle = await source.create({
-      name: "Loro history",
-      root: { text: "Root" },
-    });
-    const id = handle.id;
-    const root = handle.doc.view().roots[0];
-    const replica = project.openProjectDocument(id, [handle.doc.snapshot()]);
-    project.editNodeText(replica, root, 0, 0, "Missing ");
-    project.editNodeText(replica, root, 3, 0, "dependent ");
-    handle.doc.merge(replica.snapshot());
-    await handle.flush();
+    const id = crypto.randomUUID();
+    let handle!: Awaited<ReturnType<ProjectRepository["create"]>>;
+    let replica!: ProjectDocument;
+    await navigator.locks.request(
+      `${source.names.catalog}/claim/${id}`,
+      async () => {
+        handle = await source.create({
+          id,
+          name: "Loro history",
+          root: { text: "Root" },
+        });
+        const root = handle.doc.view().roots[0];
+        replica = project.openProjectDocument(id, [handle.doc.snapshot()]);
+        project.editNodeText(replica, root, 0, 0, "Missing ");
+        project.editNodeText(replica, root, 3, 0, "dependent ");
+        handle.doc.merge(replica.snapshot());
+        await handle.flush();
+      },
+    );
     const before = [...handle.doc.snapshot()];
-    const ids = await claimAnonymousProjects(
+    await claimAnonymousProjects(
       source,
       destination,
       ownerId,
       new AbortController().signal,
     );
-    if (!ids.includes(id)) throw new Error("Claim did not preserve its UUID");
+    const marker = (await source.list({ includeClaims: true })).find(
+      (entry) => entry.id === id,
+    )?.claim;
+    if (marker?.phase !== "complete" || marker.targetId !== id)
+      throw new Error("Claim did not preserve its UUID");
     const target = await destination.open(id, { remember: false });
     const after = [...target.doc.snapshot()];
     const equal = target.doc.version() === handle.doc.version();

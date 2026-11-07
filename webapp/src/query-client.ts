@@ -36,6 +36,8 @@ export function createQueryClient() {
 
 export const queryClient = createQueryClient();
 
+// Retries before a saving query settles into a slow poll and focus refetch.
+export const QUICK_RETRIES = 3;
 // Backoff shared by the queries that keep saving until a save succeeds.
 export const saveRetryDelay = (attempt: number) =>
   Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));

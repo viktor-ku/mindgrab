@@ -460,6 +460,7 @@ interface State {
   redoDisabled?: boolean;
   focus: string;
   contextMenu: boolean;
+  projectMenu: boolean;
   dialog: boolean;
   searchOpen: boolean;
   focusMode: boolean;
@@ -534,6 +535,9 @@ function readState(page: Page): Promise<State> {
       redoDisabled: redoButton?.disabled,
       focus,
       contextMenu: !!document.querySelector("[data-context-menu]"),
+      projectMenu: !!document.querySelector(
+        '[role="menu"][aria-label="Project menu"]',
+      ),
       dialog: !!document.querySelector("dialog[open]"),
       searchOpen: !!document.querySelector('input[aria-label="Search ideas"]'),
       focusMode: !!document.querySelector('[aria-label="Branch focus"]'),
@@ -664,7 +668,7 @@ const BUTTONS = [
   '[aria-label="Selected idea"] button[title^="Add a sibling"]',
   '[aria-label="Selected idea"] button[aria-label="Notes"]',
   'button[aria-label="Collapse children"], button[aria-label="Expand children"]',
-  'button[aria-label="Focus branch"], button[aria-label="Leave focus"]',
+  'button[aria-label="Focus on this branch"], button[aria-label="Leave focus"]',
   'button[aria-label="Undo"]',
   'button[aria-label="Undo"]',
   'button[aria-label="Redo"]',
@@ -701,7 +705,8 @@ const isField = (focus: string) =>
 // menu is open, and while writing with focus elsewhere.
 function undoBlocked(state: State) {
   // A modal dialog (shortcuts, preferences) owns the keyboard.
-  if (!state.ready || state.contextMenu || state.dialog) return true;
+  if (!state.ready || state.contextMenu || state.projectMenu || state.dialog)
+    return true;
   if (state.focus.startsWith("input:")) return true;
   if (state.editors.length && !state.editors.some((e) => e.focused))
     return true;
@@ -838,6 +843,7 @@ class Runner {
         isField(state.focus) ||
         state.focus.startsWith("input:") ||
         state.contextMenu ||
+        state.projectMenu ||
         state.dialog ||
         state.searchOpen
       )
@@ -978,7 +984,8 @@ class Runner {
             state.rendered.some((node) => node.selected) &&
             !state.searchOpen &&
             !state.dialog &&
-            !state.contextMenu
+            !state.contextMenu &&
+            !state.projectMenu
           )
         )
           return "skip";

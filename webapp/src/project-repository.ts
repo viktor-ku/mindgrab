@@ -257,7 +257,16 @@ export interface CatalogEntry {
   // Whether the backend has acknowledged this project's UUID.
   registration: "pending" | "registered";
   // Anonymous source markers bind a one-time claim to one account.
-  claim?: { ownerId: number; targetId: string; phase: "pending" | "complete" };
+  claim?: {
+    ownerId: number;
+    targetId: string;
+    phase: "pending" | "complete";
+    // The source version the copy holds. An edit that lands on the source
+    // afterwards (a second tab, a map waiting for a pause in typing) sets
+    // `stale`, and the next migration run copies it across.
+    version?: string;
+    stale?: boolean;
+  };
   // A copied target cannot sync or appear in Load before registration succeeds.
   claimPending?: boolean;
   claimSource?: string;
@@ -853,6 +862,11 @@ export interface NewProject {
   saving?: SavingPreferences;
 }
 
+// A pending source marker is intent, not hiding: the map stays reachable until
+// its copy is complete. A reserved target stays hidden until it is released.
+const hiddenByClaim = (entry: CatalogEntry) =>
+  entry.claim?.phase === "complete" || !!entry.claimPending;
+
 const byName = (a: CatalogEntry, b: CatalogEntry) =>
   a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
@@ -1013,13 +1027,15 @@ export class ProjectRepository {
           this.#memoryEntries.has(entry.id) ||
           (!this.#volatile.has(entry.id) && (!stored || stored.has(entry.id))),
       )
-      .filter((entry) => includeClaims || (!entry.claim && !entry.claimPending))
+      .filter((entry) => includeClaims || !hiddenByClaim(entry))
       .sort(byName);
   }
 
+  // Nothing uploads an anonymous map, whatever its cloud switch says.
   hasMemoryOnlyProjects() {
+    const anonymous = this.scope.namespace === ANONYMOUS_NAMESPACE;
     return [...this.#memoryEntries.values()].some(
-      (entry) => entry.saving?.cloud === false,
+      (entry) => anonymous || entry.saving?.cloud === false,
     );
   }
 
@@ -1029,7 +1045,7 @@ export class ProjectRepository {
     const id = await this.#catalog.preference(LATEST_PROJECT);
     if (typeof id !== "string" || !isProjectId(id)) return;
     const entry = await this.#catalog.get(id);
-    if (entry) return !entry.claim && !entry.claimPending ? id : undefined;
+    if (entry) return hiddenByClaim(entry) ? undefined : id;
     return (await this.#recover(id))?.id;
   }
 
@@ -1128,6 +1144,19 @@ export class ProjectRepository {
     return entry?.claim;
   }
 
+  // A pending marker left by an account that could not register the copy
+  // (offline, 5xx) must not bind the map to that account forever.
+  async rebindClaim(id: string, ownerId: number) {
+    this.#assertOpen();
+    const { entry, written } = await this.#catalog.update(id, (entry) =>
+      entry?.claim?.phase === "pending" && entry.claim.ownerId !== ownerId
+        ? { ...entry, claim: { ownerId, targetId: id, phase: "pending" } }
+        : entry,
+    );
+    if (written) this.#announce();
+    return entry?.claim;
+  }
+
   async rerouteClaim(id: string, ownerId: number, targetId: string) {
     this.#assertOpen();
     const { entry, written } = await this.#catalog.update(id, (entry) =>
@@ -1165,11 +1194,19 @@ export class ProjectRepository {
     if (written) this.#announce();
   }
 
-  async completeClaim(id: string, ownerId: number, targetId: string) {
+  async completeClaim(
+    id: string,
+    ownerId: number,
+    targetId: string,
+    version: string,
+  ) {
     this.#assertOpen();
     const { written } = await this.#catalog.update(id, (entry) =>
       entry?.claim?.ownerId === ownerId && entry.claim.targetId === targetId
-        ? { ...entry, claim: { ...entry.claim, phase: "complete" } }
+        ? {
+            ...entry,
+            claim: { ownerId, targetId, phase: "complete", version },
+          }
         : entry,
     );
     if (written) this.#announce();
@@ -1315,12 +1352,20 @@ export class ProjectRepository {
     const { entry, written } = await this.#catalog.update(
       session.id,
       (entry) => {
-        if (entry)
+        if (entry) {
+          const claim = entry.claim;
+          const stale =
+            claim?.phase === "complete" &&
+            claim.version !== undefined &&
+            claim.version !== session.doc.version() &&
+            !claim.stale;
+          if (stale) entry = { ...entry, claim: { ...claim, stale } };
           return entry.name === name &&
             entry.saving?.local === saving.local &&
             entry.saving?.cloud === saving.cloud
             ? entry
             : { ...entry, name, saving };
+        }
         if (!ready) return;
         return {
           id: session.id,

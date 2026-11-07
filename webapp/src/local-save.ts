@@ -2,9 +2,8 @@ import { createQuery } from "@tanstack/solid-query";
 import type { Accessor } from "solid-js";
 import { createEffect, createMemo, onCleanup } from "solid-js";
 import type { ProjectHandle } from "./project-repository";
-import { saveRetryDelay } from "./query-client";
+import { QUICK_RETRIES, saveRetryDelay } from "./query-client";
 
-const QUICK_RETRIES = 3;
 const FAILED_RETRY_INTERVAL_MS = 30_000;
 
 // Browser saving as one query per open project. Each run settles every pending

@@ -100,7 +100,7 @@ function ComponentRow(props: {
 function StatusLayout(props: { children: JSX.Element }) {
   onMount(() => {
     const previous = document.title;
-    document.title = "Status · mindgrab";
+    document.title = "Status · Mindgrab";
     onCleanup(() => {
       document.title = previous;
     });
@@ -191,7 +191,7 @@ export function CheckHealth() {
         </span>
         <button
           type="button"
-          class="map-control border border-stone-200 bg-white text-stone-700"
+          class="map-control outlined"
           disabled={refreshing()}
           onClick={() => void refresh()}
         >

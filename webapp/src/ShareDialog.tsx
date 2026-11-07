@@ -19,9 +19,12 @@ export function ShareDialog(props: {
   ownerId?: number;
   cloud: boolean;
   onOpenPreferences: () => void;
+  // Starts sign-in; absent while signed in or while the account is checked.
+  onSignIn?: () => void;
   onShared?: (enabled: boolean) => void;
 }) {
   let linkField: HTMLInputElement | undefined;
+  let linkSwitch: HTMLButtonElement | undefined;
   const queryClient = useQueryClient();
   // The link is selected before the clipboard write, so it can always be
   // copied by hand, even when the browser denies or holds the write.
@@ -78,7 +81,7 @@ export function ShareDialog(props: {
     if (failure instanceof SyncError && failure.kind === "auth")
       return "Sign in again to manage this link.";
     if (failure instanceof SyncError && failure.code === "project_not_found")
-      return "This project hasn’t reached Mindgrab Cloud yet. Wait for the green save dot, then retry.";
+      return "This map hasn’t reached Mindgrab Cloud yet. Wait for the green save dot, then retry.";
     return "Could not reach Mindgrab Cloud. Retry in a moment.";
   };
 
@@ -97,19 +100,30 @@ export function ShareDialog(props: {
             <Show
               when={props.ownerId}
               fallback={
-                <p>
-                  Sign in to share this project. Shared projects live in
-                  Mindgrab Cloud.
-                </p>
+                <>
+                  <p>
+                    Sign in to share this map. Shared maps live in Mindgrab
+                    Cloud.
+                  </p>
+                  <Show when={props.onSignIn}>
+                    <button
+                      type="button"
+                      class="map-control outlined mt-2"
+                      onClick={() => props.onSignIn?.()}
+                    >
+                      Sign in
+                    </button>
+                  </Show>
+                </>
               }
             >
               <p>
-                Turn on “Save in Mindgrab Cloud” to share this project. Shared
-                projects live in Mindgrab Cloud.
+                Turn on “Save in Mindgrab Cloud” to share this map. Shared maps
+                live in Mindgrab Cloud.
               </p>
               <button
                 type="button"
-                class="map-control mt-2 -ml-2.5 text-accent-deep"
+                class="map-control outlined mt-2"
                 onClick={props.onOpenPreferences}
               >
                 Open project preferences
@@ -139,8 +153,12 @@ export function ShareDialog(props: {
             aria-labelledby="share-link-label"
             aria-describedby="share-link-description"
             class="saving-switch"
-            disabled={busy() || link.isError}
-            onClick={() => toggle.mutate(!token())}
+            ref={linkSwitch}
+            aria-disabled={busy() || link.isError}
+            data-busy={busy() ? "" : undefined}
+            onClick={() => {
+              if (!busy() && !link.isError) toggle.mutate(!token());
+            }}
           >
             <span>{token() ? "On" : "Off"}</span>
           </button>
@@ -158,7 +176,7 @@ export function ShareDialog(props: {
             />
             <button
               type="button"
-              class="map-control bg-accent-soft text-accent-deep"
+              class="primary-button compact shrink-0"
               onClick={() => copy.mutate(url())}
             >
               {copy.isSuccess ? "Copied" : "Copy link"}
@@ -188,11 +206,13 @@ export function ShareDialog(props: {
           </p>
           <button
             type="button"
-            class="map-control mt-2 -ml-2.5"
+            class="map-control outlined mt-2"
             disabled={busy()}
             onClick={() => {
               toggle.reset();
               void link.refetch();
+              // This button disables itself and then goes away.
+              linkSwitch?.focus();
             }}
           >
             Retry

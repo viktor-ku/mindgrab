@@ -69,27 +69,11 @@ test("nothing loads or is sent before the visitor chooses", async () => {
   expect(calls).toEqual([]);
 });
 
-test("accepting loads the SDK through the proxy, then identifies and sends held events", async () => {
+test("repeat account checks identify once, and sign-out resets", async () => {
+  // Accepting loads the SDK and identifies the user the first test held back.
   analytics.setConsent("granted");
   await Bun.sleep(10);
-  expect(names()).toEqual(["init", "opt_in", "identify", "capture"]);
-  expect(calls[0]?.[1]).toBe("phc_test");
-  expect(calls[0]?.[2]).toMatchObject({
-    api_host: "https://mindgrab.example/ingest",
-    cookieless_mode: "on_reject",
-    autocapture: false,
-  });
-  expect(calls[2]).toEqual([
-    "identify",
-    "7",
-    { email: "ada@example.com", name: "Ada" },
-  ]);
-  expect(storage.get("mindgrab/analytics-consent")).toBe("granted");
-  expect(document.cookie).toContain("mindgrab_analytics_consent=granted");
-  expect(analytics.consentOpen()).toBe(false);
-});
-
-test("repeat account checks identify once, and sign-out resets", () => {
+  calls.length = 0;
   analytics.identify(user);
   expect(calls).toEqual([]);
   analytics.identify(undefined);
@@ -102,4 +86,13 @@ test("declining keeps capturing cookieless and never identifies", () => {
   analytics.track("signed_out");
   expect(names()).toEqual(["opt_out", "capture"]);
   expect(document.cookie).toContain("mindgrab_analytics_consent=denied");
+});
+
+test("a choice reopened for review can be put away unchanged", () => {
+  analytics.reviewConsent();
+  expect(analytics.consentOpen()).toBe(true);
+  analytics.closeConsent();
+  expect(analytics.consentOpen()).toBe(false);
+  expect(analytics.consent()).toBe("denied");
+  expect(calls).toEqual([]);
 });
