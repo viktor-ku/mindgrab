@@ -8,8 +8,6 @@ export function AccountControls(props: {
   state: SessionState;
   beforeNavigate: (action: "login" | "logout") => boolean | Promise<boolean>;
   onRetry: () => void;
-  claiming: boolean;
-  claimMessage: string;
   // In the phone panel: a flat footer instead of a floating island.
   inline?: boolean;
   // A message already on screen elsewhere, which this section need not repeat.
@@ -38,9 +36,7 @@ export function AccountControls(props: {
   const navigate = (action: "login" | "logout") => {
     if (!navigating()) navigation.mutate(action);
   };
-  props.signInRef?.(() => {
-    if (!props.claiming) navigate("login");
-  });
+  props.signInRef?.(() => navigate("login"));
   onMount(() => {
     const url = new URL(window.location.href);
     if (!url.searchParams.has("auth_error")) return;
@@ -74,8 +70,7 @@ export function AccountControls(props: {
     props.state.status !== "unavailable" &&
     props.state.status !== "expired" &&
     !message() &&
-    !props.state.message &&
-    !props.claimMessage;
+    !props.state.message;
   return (
     <section
       data-no-pan
@@ -123,7 +118,7 @@ export function AccountControls(props: {
                     <button
                       type="button"
                       class="map-control"
-                      disabled={navigating() || props.claiming}
+                      disabled={navigating()}
                       onClick={() => navigate("logout")}
                     >
                       Sign out
@@ -181,7 +176,7 @@ export function AccountControls(props: {
                       type="button"
                       role="menuitem"
                       class="menu-item"
-                      disabled={navigating() || props.claiming}
+                      disabled={navigating()}
                       onClick={() => {
                         setMenuOpen(false);
                         navigate("logout");
@@ -215,7 +210,7 @@ export function AccountControls(props: {
                   ? "primary-button account-signin"
                   : "primary-button compact"
             }
-            disabled={navigating() || props.claiming}
+            disabled={navigating()}
             onClick={() => void navigate("login")}
           >
             {props.state.user ? "Sign in again" : "Sign in"}
@@ -224,9 +219,6 @@ export function AccountControls(props: {
       </div>
       <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
         {accountMessage()}
-      </p>
-      <p role="alert" class="px-2 text-xs text-stone-600 empty:hidden">
-        {props.claimMessage}
       </p>
       <Show
         when={

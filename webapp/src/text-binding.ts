@@ -72,6 +72,9 @@ export function bindTextarea(
     onValue(next);
   }
   function commit() {
+    // The doc under an open editor can be replaced (an adopted placeholder);
+    // the owner rebinds, and a late event on the old doc has nowhere to go.
+    if (!doc.ready) return;
     applying = true;
     let caret: number | undefined;
     try {
@@ -109,7 +112,7 @@ export function bindTextarea(
   input.addEventListener("compositionstart", onStart);
   input.addEventListener("compositionend", onEnd);
   return () => {
-    if (input.value !== synced) commit();
+    if (input.value !== synced && doc.ready) commit();
     doc.off("beforeChange", capture);
     doc.off("snapshot", observe);
     input.removeEventListener("input", onInput);

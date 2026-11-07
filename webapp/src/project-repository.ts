@@ -853,6 +853,11 @@ export interface NewProject {
   saving?: SavingPreferences;
 }
 
+// A pending source marker is intent, not hiding: the map stays reachable until
+// its copy is complete. A reserved target stays hidden until it is released.
+const hiddenByClaim = (entry: CatalogEntry) =>
+  entry.claim?.phase === "complete" || !!entry.claimPending;
+
 const byName = (a: CatalogEntry, b: CatalogEntry) =>
   a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 
@@ -1013,7 +1018,7 @@ export class ProjectRepository {
           this.#memoryEntries.has(entry.id) ||
           (!this.#volatile.has(entry.id) && (!stored || stored.has(entry.id))),
       )
-      .filter((entry) => includeClaims || (!entry.claim && !entry.claimPending))
+      .filter((entry) => includeClaims || !hiddenByClaim(entry))
       .sort(byName);
   }
 
@@ -1029,7 +1034,7 @@ export class ProjectRepository {
     const id = await this.#catalog.preference(LATEST_PROJECT);
     if (typeof id !== "string" || !isProjectId(id)) return;
     const entry = await this.#catalog.get(id);
-    if (entry) return !entry.claim && !entry.claimPending ? id : undefined;
+    if (entry) return hiddenByClaim(entry) ? undefined : id;
     return (await this.#recover(id))?.id;
   }
 
@@ -1121,6 +1126,19 @@ export class ProjectRepository {
     this.#assertOpen();
     const { entry, written } = await this.#catalog.update(id, (entry) =>
       entry && !entry.claim
+        ? { ...entry, claim: { ownerId, targetId: id, phase: "pending" } }
+        : entry,
+    );
+    if (written) this.#announce();
+    return entry?.claim;
+  }
+
+  // A pending marker left by an account that could not register the copy
+  // (offline, 5xx) must not bind the map to that account forever.
+  async rebindClaim(id: string, ownerId: number) {
+    this.#assertOpen();
+    const { entry, written } = await this.#catalog.update(id, (entry) =>
+      entry?.claim?.phase === "pending" && entry.claim.ownerId !== ownerId
         ? { ...entry, claim: { ownerId, targetId: id, phase: "pending" } }
         : entry,
     );

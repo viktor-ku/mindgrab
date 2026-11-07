@@ -8,11 +8,12 @@ import {
   createQuery,
   useQueryClient,
 } from "@tanstack/solid-query";
-import { catalogKey } from "./query-client";
+import { catalogKey, QUICK_RETRIES, saveRetryDelay } from "./query-client";
 import {
   batch,
   createEffect,
   createMemo,
+  createRoot as createReactiveRoot,
   createSignal,
   For,
   on,
@@ -42,7 +43,9 @@ import {
   createProjectDocument,
   createRoot,
   createSibling,
+  DEFAULT_NODE_COLOR,
   deleteSubtree,
+  isPristineSeed,
   LIMITS,
   moveNode,
   ORIGIN,
@@ -59,7 +62,7 @@ import {
   accountNamespace,
   ANONYMOUS_NAMESPACE,
 } from "./project-repository";
-import type { ProjectHandle } from "./project-repository";
+import type { CatalogEntry, ProjectHandle } from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
@@ -172,6 +175,11 @@ const ZOOM_MAX = 2.5;
 // back to this device's own projects.
 const CLOUD_CATALOG_TIMEOUT_MS = 10_000;
 const CLOUD_LOOKUP_KEY = ["latest-cloud-project"] as const;
+// How long a failed migration waits between the slow retries that follow
+// its quick ones.
+const MIGRATION_RETRY_INTERVAL_MS = 30_000;
+const newestFirst = (a: CatalogEntry, b: CatalogEntry) =>
+  b.createdAt.localeCompare(a.createdAt);
 // A device-wide input preference: what a plain scroll wheel does on the canvas.
 type WheelMode = "pan" | "zoom";
 const WHEEL_MODE_KEY = "mindgrab:wheel-mode";
@@ -225,8 +233,23 @@ function NodeEditor(props: {
       writing: true,
     });
   const [value, setValue] = createSignal("");
+  // The doc changes under an open editor when the placeholder is adopted;
+  // the merged doc holds everything typed so far, so only the binding moves.
+  createEffect(
+    on(
+      () => props.doc,
+      (doc) => {
+        const { selectionStart, selectionEnd, selectionDirection } = input;
+        onCleanup(bindTextarea(input, doc, props.id, setValue));
+        input.setSelectionRange(
+          selectionStart,
+          selectionEnd,
+          selectionDirection,
+        );
+      },
+    ),
+  );
   onMount(() => {
-    onCleanup(bindTextarea(input, props.doc, props.id, setValue));
     const canvas = input.closest<HTMLElement>("[aria-label='Mind map canvas']");
     const scrollLeft = canvas?.scrollLeft ?? 0;
     const scrollTop = canvas?.scrollTop ?? 0;
@@ -495,59 +518,67 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       : ANONYMOUS_NAMESPACE,
   });
   const [workspace, setWorkspace] = createSignal(repository);
+  // While an account is signed in, this tab's one anonymous repository: it
+  // owns the maps made before sign-in until each has migrated.
+  const [anonymousRepo, setAnonymousRepo] = createSignal<ProjectRepository>();
+  // Which repository owns the open map; everything owner-sensitive follows it.
+  const [activeOwner, setActiveOwner] = createSignal(repository);
+  // A query whose key changes while it has no data suspends the route and
+  // detaches the canvas, which ends an edit in progress; the previous list
+  // stands in until the new one arrives.
+  const keepList = (previous: CatalogEntry[] | undefined) => previous ?? [];
   const catalog = createQuery(() => {
     const owner = workspace();
     return {
       queryKey: catalogKey(owner.names.catalog),
       queryFn: () => owner.list(),
+      placeholderData: keepList,
       structuralSharing: false,
     };
   });
-  const savedProjects = () => catalog.data ?? [];
-  const claims = createQuery(() => ({
-    queryKey: ["anonymous-claims", deployment, account().user?.id ?? null],
-    enabled: account().status === "authenticated",
-    queryFn: async () => {
-      const userId = account().user?.id;
-      if (!userId) return [];
-      const source = new ProjectRepository({
-        deployment,
-        namespace: ANONYMOUS_NAMESPACE,
-      });
-      try {
-        return await claimCandidates(source, userId);
-      } finally {
-        await source.close();
-      }
-    },
-  }));
-  const claimCount = () =>
-    account().status === "authenticated" ? (claims.data?.length ?? 0) : 0;
-  // "Not now" lasts until the account changes.
   // Nothing durable keeps this project: local saving is off and cloud saving
-  // is off or cannot run without an account.
+  // is off or cannot run without an account. An anonymous map kept open under
+  // an account never attaches to that account's cloud.
   const memoryOnly = () =>
     !view().saving().local &&
-    (!view().saving().cloud || account().status !== "authenticated");
-  const [claimDismissed, setClaimDismissed] = createSignal(false);
-  // Every account check emits a new state object; only a different account
-  // may bring the dismissed prompt back, so compare the id itself.
-  const accountId = createMemo(() => account().user?.id);
-  createEffect(on(accountId, () => setClaimDismissed(false)));
+    (!view().saving().cloud ||
+      account().status !== "authenticated" ||
+      activeOwner() !== workspace());
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopCatalog: (() => void) | undefined;
+  let stopAnonymousCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
-  let authNavigationPending = false;
+  const [authNavigationPending, setAuthNavigationPending] = createSignal(false);
   let disposed = false;
   let activation = 0;
-  let claimAbort: AbortController | undefined;
+  // The placeholder's version when it was made; any other version is an edit.
+  let draftVersion = "";
   const parked = new Set<{
     repository: ProjectRepository;
     handle: ProjectHandle;
   }>();
   const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
   const [recoveryPending, setRecoveryPending] = createSignal(false);
+  const owned = (owner: ProjectRepository) =>
+    owner === repository || owner === anonymousRepo();
+  const migrationKey = ["anonymous-migration", deployment] as const;
+  // The anonymous repository lives as long as the signed-in session. Its
+  // catalog channel brings other tabs' claim markers, which drive the
+  // candidates.
+  function keepAnonymous(source: ProjectRepository) {
+    stopAnonymousCatalog?.();
+    stopAnonymousCatalog = source.onCatalogChange(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ["anonymous-claims", deployment],
+      });
+    });
+    setAnonymousRepo(source);
+  }
+  if (activeUserId)
+    keepAnonymous(
+      new ProjectRepository({ deployment, namespace: ANONYMOUS_NAMESPACE }),
+    );
 
   const initializeMutation = createMutation(() => ({
     mutationKey: ["workspace", "initialize"],
@@ -563,23 +594,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       identify(state.user);
     return accountMutation.mutateAsync(state);
   };
-  const claimMutation = createMutation(() => ({
-    mutationKey: ["workspace", "claim"],
-    mutationFn: performAddAnonymousProjects,
+  const swapMutation = createMutation(() => ({
+    mutationKey: ["workspace", "swap"],
+    mutationFn: performSwap,
   }));
-  const claiming = () => claimMutation.isPending;
-  const claimMessage = () =>
-    claimMutation.isError
-      ? "Could not finish adding your maps. Your local work is retained; retry to continue."
-      : "";
-  const addAnonymousProjects = () => {
-    if (!claiming()) claimMutation.mutate();
-  };
+  const switchMutation = createMutation(() => ({
+    mutationKey: ["workspace", "switch"],
+    mutationFn: performSwitch,
+  }));
   const openMutation = createMutation(() => ({
     mutationKey: ["project", "open"],
     mutationFn: performOpenProject,
   }));
-  const openProject = (id: string) => openMutation.mutateAsync(id);
   const createMutationState = createMutation(() => ({
     mutationKey: ["project", "create"],
     mutationFn: performCreateNewProject,
@@ -649,7 +675,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       auth.state.status !== "authenticated" ||
       cloud ||
       disposed ||
-      authNavigationPending
+      authNavigationPending()
     )
       return;
     const owner = repository;
@@ -678,38 +704,104 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function ephemeralDocument() {
-    return createProjectDocument(crypto.randomUUID(), generateProjectName([]), {
-      text: "New idea",
-    });
+    const draft = createProjectDocument(
+      crypto.randomUUID(),
+      generateProjectName([]),
+      { text: "New idea" },
+    );
+    draftVersion = draft.version();
+    return draft;
   }
 
-  async function activate(handle: ProjectHandle, owner = repository) {
+  // The one commit point for putting a map on screen. Nothing async runs
+  // between the `unless` check, the merge and setDoc, so what the user sees
+  // is never a moment behind what is saved. Returns whether it committed.
+  async function activate(
+    handle: ProjectHandle,
+    owner = repository,
+    {
+      keepView = false,
+      merge,
+      unless,
+      adopted = false,
+    }: {
+      // Keep selection, folds and viewport: the map on screen stays the same.
+      keepView?: boolean;
+      merge?: () => Uint8Array;
+      unless?: () => boolean;
+      adopted?: boolean;
+    } = {},
+  ): Promise<boolean> {
     const request = ++activation;
-    if (disposed || owner !== repository) {
+    if (disposed || !owned(owner)) {
       await handle.close();
-      return;
+      return false;
     }
     cloud?.detach();
     const previous = activeHandle;
+    const previousOwner = handleRepository;
+    if (!keepView) finishProjectName();
+    let unsaved = false;
     try {
       if (previous && previous !== handle) await previous.flush();
     } catch (error) {
-      await handle.close();
-      if (owner === repository && previous) cloud?.activate(previous);
-      throw error;
+      // A swap carries the edits through the merge below, so the old handle
+      // is parked for recovery instead of giving up.
+      if (!keepView) {
+        await handle.close();
+        if (previous && previousOwner === repository) cloud?.activate(previous);
+        throw error;
+      }
+      unsaved = true;
     }
-    if (disposed || request !== activation || owner !== repository) {
+    if (disposed || request !== activation || !owned(owner)) {
       await handle.close();
-      return;
+      return false;
     }
+    // A name typed during the flush commits into the current map and counts
+    // as an edit.
+    if (!keepView) finishProjectName();
+    if (unless?.()) {
+      if (previous && previousOwner === repository) cloud?.activate(previous);
+      await handle.close();
+      return false;
+    }
+    // An edited placeholder is the user's map: it is kept, and the map that
+    // was about to open stays in the Load list. The adopted handle shares the
+    // placeholder's UUID, which ends the recursion.
+    if (
+      !adopted &&
+      !activeHandle &&
+      doc().version() !== draftVersion &&
+      handle.id !== doc().id
+    ) {
+      await handle.close();
+      return adoptDraft(owner);
+    }
+    if (merge) handle.doc.merge(merge(), ORIGIN.import);
+    // The session memo decides ownership of the new doc inside setDoc, so the
+    // handle must already be the active one.
     handleRepository = owner;
     activeHandle = handle;
-    resetProjectUi();
-    setDoc(handle.doc);
-    setStorageReady(true);
-    cloud?.activate(handle);
-    setSavingHandle(handle);
-    if (previous && previous !== handle) await previous.close();
+    batch(() => {
+      setActiveOwner(owner);
+      if (!keepView) resetProjectUi();
+      setDoc(handle.doc);
+      setStorageReady(true);
+      if (owner === repository) cloud?.activate(handle);
+      setSavingHandle(handle);
+    });
+    if (previous && previous !== handle) {
+      if (unsaved) {
+        parked.add({ repository: previousOwner, handle: previous });
+        setRecoveryPending(true);
+      } else await previous.close();
+    }
+    if (adopted) {
+      await handle.flush();
+      await handle.refreshMetadata();
+    }
+    if (keepView) return true;
     try {
       const preference = await queryClient.fetchQuery({
         queryKey: ["project-view", owner.names.catalog, handle.id],
@@ -717,7 +809,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           (await owner.preference(`project/${handle.id}/view`)) ?? null,
         gcTime: 0,
       });
-      if (request !== activation || disposed || owner !== repository) return;
+      if (request !== activation || disposed || !owned(owner)) return true;
       if (preference && typeof preference === "object") {
         const view = preference as ViewportPreference;
         setLayoutAnchor(view.anchor);
@@ -732,6 +824,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch {
       // A missing local viewport preference does not prevent opening content.
     }
+    return true;
+  }
+
+  // Persists the placeholder under its own UUID and keeps it on screen. The
+  // snapshot is taken at the commit point, so keystrokes typed while the
+  // project opened are included.
+  async function adoptDraft(owner: ProjectRepository) {
+    const current = doc();
+    const handle = await owner.open(current.id);
+    return activate(handle, owner, {
+      adopted: true,
+      keepView: true,
+      merge: () => current.snapshot(),
+    });
   }
 
   // A new map opens with its first idea selected, ready for typing or Tab.
@@ -740,15 +846,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (root) setSelectedId(root);
   }
 
-  // Without a remembered project, open an existing one before seeding a map:
-  // this device's newest, else the account's most recently changed cloud map.
   // A new browser has no local projects for an account, so its cloud catalog
-  // decides; otherwise every sign-in on a new device added an empty map.
-  async function openExisting(target: ProjectRepository) {
-    const [local] = (await target.list()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
-    );
-    if (local) return target.open(local.id);
+  // decides which map opens; otherwise every sign-in on a new device added an
+  // empty map. Null means the account has no cloud maps; undefined, that the
+  // lookup could not run.
+  async function openLatestCloud(target: ProjectRepository) {
     const ownerId = activeUserId;
     if (
       target !== repository ||
@@ -760,7 +862,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     const deadline = AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS);
     try {
-      const handle = await queryClient.fetchQuery({
+      return await queryClient.fetchQuery({
         queryKey: [...CLOUD_LOOKUP_KEY, target.names.catalog],
         queryFn: ({ signal }) =>
           openLatestCloudProject(
@@ -775,11 +877,28 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         retryDelay: (attempt) => 500 * 2 ** attempt,
         gcTime: 0,
       });
-      return handle ?? undefined;
     } catch {
-      // Unavailable: a first map is still better than no editor.
       return;
     }
+  }
+
+  // Opens one of this browser's anonymous maps under the account: the
+  // remembered one when it is among them, else the first. The migration
+  // swaps it to its account copy later.
+  async function openAnonymous(
+    source: ProjectRepository,
+    entries: CatalogEntry[],
+  ) {
+    const [first] = entries;
+    if (!first) return false;
+    const remembered = await source.latestProject();
+    const id = entries.some((entry) => entry.id === remembered)
+      ? (remembered ?? first.id)
+      : first.id;
+    if (!owned(source) || disposed) return false;
+    setLookupArmed(true);
+    await activate(await source.open(id), source);
+    return true;
   }
 
   async function openLatestOrCreate(target = repository) {
@@ -789,12 +908,53 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await activate(await target.open(latest), target);
       return;
     }
-    const existing = await openExisting(target);
-    if (existing) {
-      await activate(existing, target);
+    const [local] = (await target.list()).sort(newestFirst);
+    if (target !== repository || disposed) return;
+    if (local) {
+      await activate(await target.open(local.id), target);
       return;
     }
-    if (target !== repository || disposed) return;
+    const source = anonymousRepo();
+    const userId = activeUserId;
+    if (source && userId) {
+      // Pending anonymous work opens before anything is created: a reload
+      // after sign-in lands here while the copy into the account is still
+      // hidden.
+      const candidates = await claimCandidates(source, userId);
+      if (target !== repository || disposed || activeHandle) return;
+      if (await openAnonymous(source, candidates)) return;
+      const existing = await openLatestCloud(target);
+      // A placeholder adopted during the lookup is the user's map now.
+      if (target !== repository || disposed || activeHandle) {
+        await existing?.close();
+        return;
+      }
+      if (existing) {
+        await activate(existing, target);
+        return;
+      }
+      // Without an answer from the cloud, an untouched anonymous map is a
+      // better first map than another empty one: it can still be swapped for
+      // the account's latest once the lookup gets through.
+      if (
+        existing === undefined &&
+        (await openAnonymous(
+          source,
+          (
+            await source.list()
+          ).filter((entry) => entry.saving?.local !== false),
+        ))
+      )
+        return;
+      if (target !== repository || disposed) return;
+    }
+    // An edited placeholder is the first map; adopting it creates nothing.
+    if (!activeHandle && doc().version() !== draftVersion) {
+      await adoptDraft(target);
+      if (target === repository && !disposed)
+        track("project_created", { trigger: "first_open" });
+      return;
+    }
     await activate(
       await target.create({
         name: generateProjectName([]),
@@ -849,11 +1009,35 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     await owner.close();
   }
 
-  function refreshClaims(owner = repository) {
-    if (owner !== repository || disposed) return Promise.resolve();
+  function refreshClaims() {
+    if (disposed) return Promise.resolve();
     return queryClient.invalidateQueries({
       queryKey: ["anonymous-claims", deployment],
     });
+  }
+
+  // Signing in from an untouched map opens the account's own latest map
+  // instead of copying the seed: this device's newest, else the cloud's,
+  // looked up in the background. Local state is read before discovery can
+  // fill the catalog with imports, which would hide the most recent map.
+  async function settleSignIn(target: ProjectRepository) {
+    if (!openPristine()) return;
+    const localLatest = await target.latestProject();
+    const [newest] = (await target.list()).sort(newestFirst);
+    if (target !== repository || disposed || !openPristine()) return;
+    const id = localLatest ?? newest?.id;
+    if (!id) {
+      setLookupArmed(true);
+      return;
+    }
+    // The commit waits for a pause in typing; cloud discovery need not.
+    if (!switchMutation.isPending)
+      void switchMutation.mutateAsync(id).catch(() => {
+        if (target === repository && !disposed)
+          setStorageMessage(
+            "Could not open this account’s local maps. Retry local saving.",
+          );
+      });
   }
 
   async function performAccountChanged(state: SessionState) {
@@ -863,8 +1047,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (state.status !== "authenticated" || nextUserId !== activeUserId) {
       cloud?.destroy();
       cloud = undefined;
-      claimAbort?.abort();
-      claimAbort = undefined;
       setCloudStatus(
         state.status === "expired"
           ? { status: "auth", message: state.message ?? "Sign in again." }
@@ -877,14 +1059,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     activation++;
-    // Ends a new browser's cloud lookup when its account leaves.
+    // Ends a new browser's cloud lookup and a running migration when their
+    // account leaves; a key change alone would not stop them.
     void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
+    void queryClient.cancelQueries({ queryKey: migrationKey });
     saveView.clear();
     stopCatalog?.();
-    finishWriting();
-    finishProjectName();
     const previousRepository = repository;
     const previousHandle = activeHandle;
+    const previousOwner = handleRepository;
+    const previousAnonymous = anonymousRepo();
     activeUserId = nextUserId;
     const nextRepository = new ProjectRepository({
       deployment,
@@ -900,16 +1084,57 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     });
     repository = nextRepository;
     setWorkspace(nextRepository);
+    setStorageMessage("");
+    setLookupNull(false);
+    setLookupArmed(false);
+    if (
+      nextUserId &&
+      previousHandle &&
+      previousOwner.scope.namespace === ANONYMOUS_NAMESPACE
+    ) {
+      // Signing in keeps the map the user is looking at: it stays open and
+      // saving locally while its copy into the account is made behind the
+      // scenes, and the swap to that copy waits for a pause in typing.
+      if (previousRepository !== previousOwner)
+        void retireWorkspace(previousRepository);
+      keepAnonymous(previousOwner);
+      watchCatalog(nextRepository);
+      await settleSignIn(nextRepository);
+      if (repository === nextRepository && !disposed) {
+        startCloud();
+        void refreshClaims();
+      }
+      return;
+    }
+    finishWriting();
+    finishProjectName();
     handleRepository = nextRepository;
     activeHandle = undefined;
+    setActiveOwner(nextRepository);
     setSavingHandle(undefined);
-    resetProjectUi();
-    setDoc(ephemeralDocument());
+    // An edited placeholder is kept for the next workspace to adopt.
+    if (previousHandle || doc().version() === draftVersion) {
+      resetProjectUi();
+      setDoc(ephemeralDocument());
+    }
     setStorageReady(false);
-    setStorageMessage("");
-    claimMutation.reset();
+    stopAnonymousCatalog?.();
+    stopAnonymousCatalog = undefined;
+    setAnonymousRepo(undefined);
+    void retireWorkspace(
+      previousRepository,
+      previousOwner === previousRepository ? previousHandle : undefined,
+    );
+    if (previousAnonymous && previousAnonymous !== previousRepository)
+      void retireWorkspace(
+        previousAnonymous,
+        previousOwner === previousAnonymous ? previousHandle : undefined,
+      );
+    if (nextUserId)
+      keepAnonymous(
+        new ProjectRepository({ deployment, namespace: ANONYMOUS_NAMESPACE }),
+      );
     watchCatalog(nextRepository);
-    void retireWorkspace(previousRepository, previousHandle);
     try {
       await openLatestOrCreate(nextRepository);
     } catch {
@@ -920,49 +1145,90 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
     if (repository === nextRepository && !disposed) {
       startCloud();
-      void refreshClaims(nextRepository);
+      void refreshClaims();
     }
   }
 
-  async function performAddAnonymousProjects() {
-    if (auth.state.status !== "authenticated" || !activeUserId) return;
-    const owner = repository;
-    const userId = activeUserId;
-    const abort = new AbortController();
-    claimAbort = abort;
-    const source = new ProjectRepository({
-      deployment,
-      namespace: ANONYMOUS_NAMESPACE,
-    });
-    try {
-      const ids = await claimAnonymousProjects(
-        source,
-        owner,
-        userId,
-        abort.signal,
-        new LoroApi(undefined, undefined, userId, queryClient),
-      );
-      if (owner !== repository || disposed || abort.signal.aborted) return;
-      track("anonymous_maps_claimed", { count: ids.length });
-      showNotice({
-        message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
+  // Resolves once no idea or project name is being typed: the swap waits for
+  // a pause rather than interrupting the user.
+  function untilIdle() {
+    return new Promise<void>((resolve) => {
+      createReactiveRoot((dispose) => {
+        createEffect(() => {
+          if (writing() || projectNameDraft() !== undefined) return;
+          dispose();
+          resolve();
+        });
       });
-      await refreshClaims(owner);
-      cloud?.retry();
-      if (ids[0]) await openProject(ids[0]);
-    } catch (error) {
-      if (owner !== repository || disposed || abort.signal.aborted) return;
-      await refreshClaims(owner);
-      if (error instanceof SyncError && error.kind === "auth") {
-        auth.expire();
-        void auth.check();
-      }
-      throw error;
-    } finally {
-      await source.close();
-      if (claimAbort === abort) {
-        claimAbort = undefined;
-      }
+    });
+  }
+
+  // Moves the screen from the anonymous map to its account copy without the
+  // user noticing: between two keystrokes, keeping selection and viewport.
+  // Edits made since the copy travel with the merge.
+  async function performSwap({
+    sourceId,
+    targetId,
+  }: {
+    sourceId: string;
+    targetId: string;
+  }) {
+    const source = anonymousRepo();
+    const owner = repository;
+    const anonymousHandle = activeHandle;
+    if (
+      !source ||
+      !anonymousHandle ||
+      anonymousHandle.id !== sourceId ||
+      handleRepository !== source
+    )
+      return;
+    // A sign-out being saved must not find the screen changed under it.
+    const unchanged = () =>
+      !disposed &&
+      !authNavigationPending() &&
+      repository === owner &&
+      activeHandle === anonymousHandle &&
+      handleRepository === source;
+    while (unchanged()) {
+      await untilIdle();
+      if (!unchanged()) return;
+      const target = await owner.open(targetId);
+      if (
+        await activate(target, owner, {
+          keepView: true,
+          merge: () => anonymousHandle.doc.snapshot(),
+          unless: () =>
+            authNavigationPending() ||
+            writing() ||
+            projectNameDraft() !== undefined,
+        })
+      )
+        return;
+    }
+  }
+
+  // Opens the account's latest map in place of an untouched anonymous one,
+  // between two keystrokes rather than never: a refusal while the user is
+  // typing is retried at the next pause, as the swap does.
+  async function performSwitch(id: string) {
+    const owner = repository;
+    const source = anonymousRepo();
+    const seed = activeHandle;
+    const unchanged = () =>
+      !disposed &&
+      repository === owner &&
+      activeHandle === seed &&
+      handleRepository === source &&
+      openPristine();
+    while (unchanged()) {
+      await untilIdle();
+      if (!unchanged()) return;
+      // activate closes the handle itself when it refuses.
+      if (
+        await activate(await owner.open(id), owner, { unless: pristineUnless })
+      )
+        return;
     }
   }
 
@@ -973,8 +1239,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Read synchronously, even inside a batch, to tie notices to history.
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
-  // Until a map opens, the canvas shows a placeholder document that is replaced
-  // without being saved, so nothing may select or edit its ideas.
+  // Whether a stored map is on screen. Until then the canvas shows a
+  // placeholder that is a real draft: its first edit makes it the map.
   const [storageReady, setStorageReady] = createSignal(false);
   const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
   const localSave = createLocalSave(savingHandle);
@@ -1078,6 +1344,255 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const view = () => session().view;
   const forest = () => view().forest();
 
+  // The map on screen while it is still the seed every map starts from. Node
+  // edits change no catalog entry, so this memo on the live doc, not a catalog
+  // event, is what re-evaluates the migration candidates.
+  const openPristine = createMemo(() => {
+    const source = anonymousRepo();
+    if (!source || activeOwner() !== source) return false;
+    const roots = forest();
+    const [root] = roots;
+    if (roots.length !== 1 || !root || root.next?.length) return false;
+    return isPristineSeed(
+      [
+        {
+          id: root.id,
+          text: view().text(root.id),
+          note: view().note(root.id),
+          color: root.color ?? DEFAULT_NODE_COLOR,
+          ...(root.position && { position: root.position }),
+          children: [],
+        },
+      ],
+      view().name(),
+    );
+  });
+  // Set once the cloud lookup has said the account has no maps at all: the
+  // seed then migrates to become its first one.
+  const [lookupNull, setLookupNull] = createSignal(false);
+  // Set when the account has no local maps, so only the cloud can decide.
+  const [lookupArmed, setLookupArmed] = createSignal(false);
+  const pristineUnless = () =>
+    !openPristine() || writing() || projectNameDraft() !== undefined;
+  // The open map, when it is one of the anonymous maps.
+  const openId = createMemo(() => {
+    const source = anonymousRepo();
+    return source && activeOwner() === source
+      ? (savingHandle()?.id ?? null)
+      : null;
+  });
+  const openInclude = () => !openPristine() || lookupNull();
+  const claims = createQuery(() => {
+    const userId = account().user?.id ?? null;
+    const source = anonymousRepo();
+    const id = openId();
+    const include = openInclude();
+    return {
+      queryKey: ["anonymous-claims", deployment, userId, id, include],
+      enabled: account().status === "authenticated" && !!source,
+      placeholderData: keepList,
+      queryFn: () =>
+        userId && source
+          ? claimCandidates(source, userId, id ? { open: { id, include } } : {})
+          : [],
+    };
+  });
+  const candidateCount = () =>
+    claims.data?.filter(
+      (entry) => !entry.claim || entry.claim.phase === "pending",
+    ).length ?? 0;
+  // While signed in, Load also lists the maps still waiting to migrate.
+  const savedProjects = createMemo(() => {
+    const own = catalog.data ?? [];
+    const waiting =
+      claims.data?.filter(
+        (entry) =>
+          entry.claim?.phase !== "complete" &&
+          !own.some((project) => project.id === entry.id),
+      ) ?? [];
+    return waiting.length ? [...own, ...waiting] : own;
+  });
+  // Copies every anonymous map into the account, silently. The open map's
+  // claim pauses before completing so this tab can swap to the copy; a
+  // run repeats until it claims nothing, so a candidate that appeared mid-run
+  // is not left for the next trigger.
+  const migration = createQuery(() => {
+    const userId = account().user?.id;
+    const source = anonymousRepo();
+    const destination = workspace();
+    return {
+      queryKey: [...migrationKey, userId ?? null],
+      enabled:
+        account().status === "authenticated" &&
+        !!source &&
+        !authNavigationPending() &&
+        candidateCount() > 0,
+      queryFn: async ({ signal }) => {
+        if (!userId || !source) return 0;
+        const api = new LoroApi(undefined, undefined, userId, queryClient);
+        let total = 0;
+        for (;;) {
+          const open = untrack(() => {
+            const id = openId();
+            return id ? { id, include: openInclude() } : undefined;
+          });
+          const ids = await claimAnonymousProjects(
+            source,
+            destination,
+            userId,
+            signal,
+            api,
+            open
+              ? {
+                  open: {
+                    ...open,
+                    beforeComplete: (sourceId, targetId) =>
+                      swapMutation.mutateAsync({ sourceId, targetId }),
+                  },
+                }
+              : {},
+          );
+          total += ids.length;
+          if (!ids.length) break;
+        }
+        return total;
+      },
+      // Quick retries, then the slow poll and focus refetch below take over.
+      retry: (count, error) =>
+        count < QUICK_RETRIES &&
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
+      refetchInterval: (state) =>
+        state.state.status === "error" ? MIGRATION_RETRY_INTERVAL_MS : false,
+      refetchOnWindowFocus: (state) => state.state.status === "error",
+      refetchOnReconnect: true,
+      gcTime: 0,
+    };
+  });
+  // Candidates that appear later (another tab, an edit to the seed) start a
+  // new run; a copy in progress is never cut short for them.
+  createEffect(
+    on(
+      () => claims.data,
+      (entries) => {
+        if (
+          !entries?.some(
+            (entry) => !entry.claim || entry.claim.phase === "pending",
+          )
+        )
+          return;
+        void queryClient.invalidateQueries(
+          { queryKey: migrationKey },
+          { cancelRefetch: false },
+        );
+      },
+      { defer: true },
+    ),
+  );
+  // A tab that did not run the claim (it lost the lock, or signed in through
+  // another tab) swaps once the marker says its open map is done.
+  createEffect(
+    on(
+      () => [claims.data, authNavigationPending()] as const,
+      ([entries, pending]) => {
+        // A sign-out being saved leaves the screen alone; the swap follows
+        // once that is abandoned.
+        if (pending) return;
+        const source = anonymousRepo();
+        const userId = account().user?.id;
+        const done = entries?.find(
+          (entry) =>
+            entry.id === activeHandle?.id &&
+            handleRepository === source &&
+            entry.claim?.phase === "complete" &&
+            entry.claim.ownerId === userId,
+        );
+        const targetId = done?.claim?.targetId;
+        if (done && targetId && !swapMutation.isPending)
+          swapMutation.mutate({ sourceId: done.id, targetId });
+      },
+    ),
+  );
+  createEffect(
+    on(
+      () => migration.dataUpdatedAt,
+      () => {
+        const total = migration.data;
+        if (!total) return;
+        track("anonymous_maps_claimed", { count: total });
+        void refreshClaims();
+        cloud?.retry();
+      },
+      { defer: true },
+    ),
+  );
+  createEffect(
+    on(
+      () => migration.errorUpdatedAt,
+      () => {
+        const error = migration.error;
+        if (!error) return;
+        void refreshClaims();
+        if (error instanceof SyncError && error.kind === "auth") {
+          auth.expire();
+          void auth.check();
+        }
+      },
+      { defer: true },
+    ),
+  );
+  // A new browser's cloud lookup, retried on reconnect: the account's most
+  // recently changed map replaces the untouched seed, and a definite "none"
+  // lets the seed become the account's first map.
+  const latestLookup = createQuery(() => {
+    const owner = workspace();
+    const userId = account().user?.id;
+    const source = anonymousRepo();
+    return {
+      queryKey: [...CLOUD_LOOKUP_KEY, owner.names.catalog, userId ?? null],
+      enabled:
+        account().status === "authenticated" &&
+        !!userId &&
+        !!source &&
+        lookupArmed() &&
+        activeOwner() === source &&
+        openPristine() &&
+        !lookupNull(),
+      queryFn: async ({ signal }) => {
+        if (!userId) return null;
+        const handle = await openLatestCloudProject(
+          owner,
+          new LoroApi(undefined, undefined, userId, queryClient),
+          AbortSignal.any([
+            signal,
+            AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
+          ]),
+        );
+        if (!handle) return null;
+        await handle.close();
+        return { id: handle.id };
+      },
+      networkMode: "online" as const,
+      retry: (_count, error) =>
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
+      refetchOnReconnect: true,
+      gcTime: 0,
+    };
+  });
+  createEffect(
+    on(
+      () => latestLookup.dataUpdatedAt,
+      () => {
+        const result = latestLookup.data;
+        if (result === undefined) return;
+        if (result === null) setLookupNull(true);
+        else if (!switchMutation.isPending) switchMutation.mutate(result.id);
+      },
+      { defer: true },
+    ),
+  );
+
   // Each command is its own undo step, never merged with typing around it.
   function command<T>(action: (doc: ProjectDocument) => T): T {
     const { doc, undo } = session();
@@ -1154,7 +1669,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     value: import("./project-document").SavingPreferences,
   ) {
     const handle = activeHandle;
-    const owner = repository;
+    const owner = handleRepository;
     if (!handle) return;
     try {
       await owner.updateSaving(handle, value);
@@ -1606,7 +2121,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Reveals the result inside the folds the search started from, so moving
   // between results never accumulates unfolded branches.
   function previewResult(id: string) {
-    if (!storageReady()) return;
     const next = new Set(searchReturn?.collapsed ?? collapsedIds());
     for (
       let parent = details().get(id)?.parent;
@@ -1746,7 +2260,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         colorOpen(),
         !!returnView(),
         focusId(),
-        claimCount() > 0 && !claimDismissed(),
         consentOpen(),
         // "Check account again" goes away once the check succeeds.
         account().status === "unavailable" || account().status === "expired",
@@ -2021,7 +2534,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       handle: ProjectHandle,
       value: ViewportPreference,
     ) => {
-      if (repository !== owner || activeHandle !== handle) return;
+      if (handleRepository !== owner || activeHandle !== handle) return;
       viewportMutation.mutate({ owner, id: handle.id, value });
     },
     200,
@@ -2111,13 +2624,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     (banner ?? canvas).focus({ preventScroll: true });
   }
 
-  async function performOpenProject(id: string) {
-    const target = repository;
+  async function performOpenProject({
+    id,
+    owner,
+  }: {
+    id: string;
+    owner: ProjectRepository;
+  }) {
+    const target = owner;
     try {
       await activeHandle?.flush();
       const handle = await target.open(id);
       await activate(handle, target);
-      if (target !== repository || disposed) return;
+      if (!owned(target) || disposed) return;
+      // An edited placeholder was adopted instead; the chosen map stays in
+      // the Load list.
+      if (activeHandle !== handle) return;
       const state = handle.state();
       if (state.status === "ready") {
         track("project_opened", { idea_count: details().size });
@@ -2125,7 +2647,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
       } else setStorageMessage("Map is still loading.");
     } catch (error) {
-      if (target !== repository || disposed) return;
+      if (!owned(target) || disposed) return;
       setStorageMessage(
         error instanceof Error ? error.message : "Could not open this map.",
       );
@@ -2133,10 +2655,31 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
   }
 
+  // Puts a map the user just made on screen. A placeholder edited while it
+  // was made is adopted at that commit, and the new map opens with a second
+  // one. Returns whether the new map is on screen.
+  async function activateCreated(
+    handle: ProjectHandle,
+    owner: ProjectRepository,
+  ) {
+    const committed = await activate(handle, owner);
+    if (!committed || activeHandle === handle) return committed;
+    if (!owned(owner) || disposed) return false;
+    const again = await owner.open(handle.id);
+    await activate(again, owner);
+    return activeHandle === again;
+  }
+
   async function performCreateNewProject() {
     const target = repository;
     try {
       await activeHandle?.flush();
+      // An edited placeholder is saved first, so the new map opens beside it
+      // instead of being adopted away.
+      if (!activeHandle && doc().version() !== draftVersion) {
+        await adoptDraft(target);
+        if (target !== repository || disposed) return;
+      }
       const projects = await queryClient.fetchQuery({
         queryKey: catalogKey(target.names.catalog),
         queryFn: () => target.list(),
@@ -2147,7 +2690,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         root: { text: "New idea" },
         saving: view().saving(),
       });
-      await activate(handle, target);
+      if (!(await activateCreated(handle, target))) return;
       if (target !== repository || disposed) return;
       setStorageMessage("");
       selectFirstIdea();
@@ -2178,16 +2721,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function performSave() {
     finishWriting();
     finishProjectName();
-    if (!activeHandle) {
-      setStorageMessage("Map storage is still opening.");
-      return;
-    }
-    const owner = repository;
+    if (!activeHandle) await adoptDraft(repository);
+    const owner = handleRepository;
     const handle = activeHandle;
+    if (!handle) return;
     setShowLoad(false);
     try {
       await localSave.save();
-      if (repository !== owner || activeHandle !== handle || disposed) return;
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
+        return;
       track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
@@ -2197,7 +2739,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           "Local saving is off. Export a backup to keep your work.",
         );
     } catch (error) {
-      if (repository !== owner || activeHandle !== handle || disposed) return;
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
+        return;
       throw error;
     }
   }
@@ -2207,39 +2750,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     for (const recovery of [...parked]) {
       await recovery.handle.flush();
       await recovery.handle.close();
-      await recovery.repository.close();
+      // A repository still in use (a swap parked its handle) stays open.
+      if (!owned(recovery.repository)) await recovery.repository.close();
       parked.delete(recovery);
     }
     setRecoveryPending(parked.size > 0);
     if (activeHandle) await localSave.save();
-    else {
-      const owner = repository;
-      const current = doc();
-      const handle = await owner.open(current.id);
-      handle.doc.merge(current.snapshot(), ORIGIN.import);
-      await handle.flush();
-      await handle.refreshMetadata();
-      await activate(handle, owner);
-    }
+    else await adoptDraft(repository);
   }
 
   async function saveBeforeAuth(action: "login" | "logout") {
     finishWriting();
     finishProjectName();
-    const owner = repository;
+    // An edited placeholder leaves as a saved map; only broken storage stops it.
+    if (!activeHandle)
+      try {
+        await adoptDraft(repository);
+      } catch {
+        setStorageMessage("Wait for local map storage before leaving.");
+        return false;
+      }
+    const owner = handleRepository;
     const handle = activeHandle;
-    if (!handle || claiming()) {
+    if (!handle) {
       setStorageMessage("Wait for local map storage before leaving.");
       return false;
     }
-    authNavigationPending = true;
+    setAuthNavigationPending(true);
     cloud?.destroy();
     cloud = undefined;
+    // A copy in progress must not race the navigation.
+    await queryClient.cancelQueries({ queryKey: migrationKey });
     owner.setRelaysPaused(true);
     let leaving = false;
     try {
       await retryLocalSaving();
-      if (repository !== owner || activeHandle !== handle || disposed)
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
         return false;
       await handle.refreshMetadata();
       await owner.setLatestProject(handle.id);
@@ -2251,7 +2797,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         collapsed: [...collapsedIds()],
       });
       await handle.flush();
-      if (repository !== owner || activeHandle !== handle || disposed)
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
         return false;
       await auth.prepareNavigation(action);
       leaving = true;
@@ -2260,14 +2806,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       else track("signed_out");
       return true;
     } catch {
-      if (repository !== owner || disposed) return false;
+      if (handleRepository !== owner || disposed) return false;
       setStorageMessage(
         "Could not save your map before leaving. Free up browser storage and retry.",
       );
       return false;
     } finally {
       if (!leaving) {
-        authNavigationPending = false;
+        setAuthNavigationPending(false);
         owner.setRelaysPaused(false);
         startCloud();
       }
@@ -2295,7 +2841,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function load(id: string) {
-    openMutation.mutate(id);
+    const source = anonymousRepo();
+    const waiting =
+      source &&
+      !catalog.data?.some((project) => project.id === id) &&
+      claims.data?.some((entry) => entry.id === id);
+    openMutation.mutate({ id, owner: waiting ? source : repository });
   }
 
   async function performExportCurrentProject() {
@@ -2335,6 +2886,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const { content, preferences } = prepareProjectImport(imported);
       await activeHandle?.flush();
       if (owner !== repository || disposed) return;
+      if (!activeHandle && doc().version() !== draftVersion) {
+        await adoptDraft(owner);
+        if (owner !== repository || disposed) return;
+      }
       const handle = await owner.importContent({
         ...content,
         saving: preferences?.saving ?? view().saving(),
@@ -2359,7 +2914,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               }),
           })
           .catch(() => {});
-      await activate(handle, owner);
+      if (!(await activateCreated(handle, owner))) return;
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
       showNotice({ message: `Imported “${truncate(content.name, 40)}”` });
@@ -2437,7 +2992,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function select(id: string) {
-    if (suppressClick || !storageReady()) return;
+    if (suppressClick) return;
     if (selectedId() !== id) {
       finishWriting();
       setColorScope("node");
@@ -2480,7 +3035,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function write(id: string) {
-    if (!storageReady() || (writing() && selectedId() === id)) return;
+    if (writing() && selectedId() === id) return;
     finishWriting();
     revealNode(id);
     if (selectedId() !== id) setColorScope("node");
@@ -2498,10 +3053,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const nodeElement = target?.closest<HTMLElement>("[data-node-id]");
     if (toolbar) {
       setContextMenu(undefined);
-      return;
-    }
-    if (!storageReady()) {
-      e.preventDefault();
       return;
     }
     // Working on the map ends an open search, as a left press does.
@@ -2792,7 +3343,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   function startPointer(e: PointerEvent, nodeId?: string) {
     if (
-      !storageReady() ||
       !e.isPrimary ||
       e.button !== 0 ||
       pointer ||
@@ -2897,12 +3447,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     onCleanup(() => {
       disposed = true;
       activation++;
-      claimAbort?.abort();
       void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
+      void queryClient.cancelQueries({ queryKey: migrationKey });
       stopAuth();
       auth.destroy();
       cloud?.destroy();
       stopCatalog?.();
+      stopAnonymousCatalog?.();
       void queryClient.cancelQueries({
         queryKey: catalogKey(repository.names.catalog),
       });
@@ -2913,13 +3464,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queryKey: ["anonymous-claims", deployment],
       });
       queryClient.removeQueries({ queryKey: ["anonymous-claims", deployment] });
+      const source = anonymousRepo();
+      void activeHandle?.close();
       void repository.close();
+      if (source && source !== repository) void source.close();
       for (const recovery of parked) void recovery.repository.close();
     });
 
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (
         repository.hasMemoryOnlyProjects() ||
+        anonymousRepo()?.hasMemoryOnlyProjects() ||
         (!view().saving().local &&
           (!view().saving().cloud || cloudStatus()?.status !== "saved"))
       ) {
@@ -2933,7 +3488,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         contextKeyAt = performance.now();
       if (overlayOpen()) return;
       if (
-        !storageReady() ||
         e.isComposing ||
         writing() ||
         (e.target instanceof Element &&
@@ -3179,7 +3733,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (
         !event ||
         event.isComposing ||
-        !storageReady() ||
         contextMenu() ||
         menuOpen() ||
         inOpenMenu(event.target) ||
@@ -3236,7 +3789,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
       if (!mod) return;
       if (matchesLetter(event, "f") && !event.shiftKey) {
-        if (!storageReady() || showPreferences()) return;
+        if (showPreferences()) return;
         event.preventDefault();
         openSearch();
         return;
@@ -3251,7 +3804,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     makeEventListener(window, "pointerup", (e) => stopPointer(e, true));
     makeEventListener(canvas, "wheel", wheel, { passive: false });
     const canvasClipboard = (e: ClipboardEvent) =>
-      storageReady() &&
       !writing() &&
       !overlayOpen() &&
       !searchOpen() &&
@@ -3393,7 +3945,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       required
       aria-label="Project name"
       class="project-name"
-      readOnly={!storageReady()}
       style={
         isPhone()
           ? undefined
@@ -3419,7 +3970,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         class="menu-item"
         aria-expanded={showLoad()}
         aria-controls="saved-projects"
-        disabled={!storageReady()}
         onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
       >
         Open map…
@@ -3657,7 +4207,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   createNewProject();
@@ -3670,7 +4219,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   importProjectFromFile();
@@ -3683,7 +4231,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   save();
@@ -3719,7 +4266,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 aria-haspopup="dialog"
                 onClick={() => {
                   setMenuOpen(false);
@@ -3734,7 +4280,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 aria-haspopup="dialog"
                 onClick={() => {
                   setMenuOpen(false);
@@ -3835,7 +4380,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   class="icon-button"
                   aria-label="Undo"
                   title={`Undo (${MOD_LABEL}Z)`}
-                  disabled={!storageReady() || !canUndo()}
+                  disabled={!canUndo()}
                   onClick={undo}
                 >
                   <UndoIcon />
@@ -3845,7 +4390,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   class="icon-button"
                   aria-label="Redo"
                   title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
-                  disabled={!storageReady() || !canRedo()}
+                  disabled={!canRedo()}
                   onClick={redo}
                 >
                   <RedoIcon />
@@ -3858,7 +4403,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label="Search"
                 title={`Search (${MOD_LABEL}F)`}
                 aria-expanded={searchOpen()}
-                disabled={!storageReady()}
                 onClick={() =>
                   searchOpen() ? closeSearch(false) : openSearch()
                 }
@@ -3871,7 +4415,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label="Outline"
                 title={`Outline (${ALT_LABEL}O)`}
                 aria-expanded={outlineOpen()}
-                disabled={!storageReady()}
                 onClick={(e) => {
                   setOutlineOpen((open) => !open);
                   backToCanvas(e);
@@ -3884,8 +4427,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               state={account()}
               beforeNavigate={saveBeforeAuth}
               onRetry={() => void auth.check()}
-              claiming={claiming()}
-              claimMessage={claimMessage()}
               signInRef={(start) => {
                 signIn = start;
               }}
@@ -4049,7 +4590,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             selectedId={selectedId()}
             collapsed={collapsedIds()}
             onSelect={(id, via) => {
-              if (!storageReady()) return;
               finishWriting();
               setColorScope("node");
               setSelectedId(id);
@@ -4073,49 +4613,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
         style={stripStyle(panelStrip())}
       >
-        <Show when={claimCount() > 0 && !claimDismissed()}>
-          <section
-            data-no-pan
-            data-toolbar
-            aria-label="Maps from before sign-in"
-            // Between two open panels in a small window it turns tall and
-            // narrow rather than cover their headers.
-            class="map-toolbar pointer-events-auto w-[28rem] max-w-full min-w-36 p-3! cursor-default"
-          >
-            <p class="text-sm font-semibold text-stone-800">
-              Your earlier work is safe
-            </p>
-            <p class="mt-0.5 text-xs leading-5 text-stone-600">
-              {claimCount() === 1
-                ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
-                : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
-            </p>
-            <div class="mt-2.5 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                class="primary-button compact"
-                disabled={claiming()}
-                onClick={() => void addAnonymousProjects()}
-              >
-                {claiming() ? "Adding maps…" : "Add maps to this account"}
-              </button>
-              <button
-                type="button"
-                // As small as the primary action beside it.
-                class="map-control py-1.5! text-xs!"
-                disabled={claiming()}
-                onClick={() => {
-                  track("anonymous_maps_claim_dismissed", {
-                    count: claimCount(),
-                  });
-                  setClaimDismissed(true);
-                }}
-              >
-                Not now
-              </button>
-            </div>
-          </section>
-        </Show>
         <Show when={focusId()}>
           <nav
             data-no-pan
@@ -4608,7 +5105,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="primary-button"
-            disabled={!storageReady()}
             onClick={() => add("root")}
           >
             Create an idea
@@ -4919,7 +5415,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <button
                 type="button"
                 class="panel-pair"
-                disabled={!storageReady() || !canUndo()}
+                disabled={!canUndo()}
                 onClick={fromPanel(undo)}
               >
                 <UndoIcon />
@@ -4928,7 +5424,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <button
                 type="button"
                 class="panel-pair"
-                disabled={!storageReady() || !canRedo()}
+                disabled={!canRedo()}
                 onClick={fromPanel(redo)}
               >
                 <RedoIcon />
@@ -4939,7 +5435,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            disabled={!storageReady()}
             onClick={fromPanel(openSearch)}
           >
             <SearchIcon />
@@ -4948,7 +5443,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            disabled={!storageReady()}
             onClick={fromPanel(() => setOutlineOpen(true))}
           >
             <OutlineIcon />
@@ -4968,7 +5462,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               onClick={fromPanel(createNewProject)}
             >
               New map
@@ -4977,7 +5470,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               aria-haspopup="dialog"
               onClick={fromPanel(() => setShowShare(true))}
             >
@@ -4999,7 +5491,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <button
                   type="button"
                   class="menu-item"
-                  disabled={!storageReady()}
                   onClick={fromPanel(importProjectFromFile)}
                 >
                   Import backup…
@@ -5023,7 +5514,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               aria-haspopup="dialog"
               onClick={fromPanel(() => {
                 returnToShare = false;
@@ -5046,8 +5536,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             state={account()}
             beforeNavigate={saveBeforeAuth}
             onRetry={() => void auth.check()}
-            claiming={claiming()}
-            claimMessage={claimMessage()}
             onAuthError={() => setMenuOpen(true)}
             shownElsewhere={saveDot().label}
           />

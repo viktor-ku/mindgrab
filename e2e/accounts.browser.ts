@@ -55,6 +55,8 @@ class Backend {
   // Fails this many "recent projects" requests with a transient 503.
   recentFailures = 0;
   meStarted = false;
+  // Holds registrations, which keeps a migration at its pending marker.
+  registerGate?: ReturnType<typeof deferred>;
   lostRegistration = false;
   leaveCookieOnLogout = false;
   loginRequests = 0;
@@ -137,6 +139,7 @@ class Backend {
         this.projects.set(projectId, record);
       }
       this.registrations.push(projectId);
+      await this.registerGate?.promise;
       if (this.lostRegistration) {
         this.lostRegistration = false;
         return route.abort("failed");
@@ -266,6 +269,7 @@ afterEach(async () => {
   backend.meGate?.resolve();
   backend.catalogGate?.resolve();
   backend.recentGate?.resolve();
+  backend.registerGate?.resolve();
   await context.close();
   for (const record of backend.projects.values()) record.doc.destroy();
   expect(errors).toEqual([]);
@@ -326,100 +330,320 @@ async function edit(text: string) {
 async function refreshAccount() {
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
 }
-const claim = () =>
-  page.getByRole("button", { name: "Add maps to this account" });
-async function cloudSaved() {
-  await page.getByText(/^Saved to cloud/).waitFor();
+async function cloudSaved(target = page) {
+  await target.getByText(/^Saved to cloud/).waitFor();
+}
+// Adds a child to the first idea from the keyboard, as a user types on.
+async function addChild(text: string, target = page) {
+  await target.locator("[data-node-id]").first().click();
+  await target.keyboard.press("Tab");
+  await target.getByRole("textbox", { name: "Node text" }).waitFor();
+  await target.keyboard.type(text);
+  await target.keyboard.press("Enter");
+  await target.getByText(text, { exact: true }).waitFor();
+}
+// The migration never asks or tells: no banner, no alert, no notice.
+async function expectSilence(target = page) {
+  expect(await target.getByRole("alert").count()).toBe(0);
+  expect(
+    await target
+      .getByRole("button", { name: "Add maps to this account" })
+      .count(),
+  ).toBe(0);
+  expect(await target.getByText(/Added \d+ maps?/).count()).toBe(0);
+}
+const claimPhase = (id: string, target = page) =>
+  target.evaluate(
+    async (id) =>
+      (await window.accountHarness.catalog("anonymous", true)).find(
+        (entry) => entry.id === id,
+      )?.claim?.phase,
+    id,
+  );
+async function claimed(id: string, target = page) {
+  await target.waitForFunction(
+    async (id) =>
+      (await window.accountHarness.catalog("anonymous", true)).find(
+        (entry) => entry.id === id,
+      )?.claim?.phase === "complete",
+    id,
+  );
+}
+async function accountCatalogSize(size: number) {
+  await page.waitForFunction(
+    async (size) =>
+      (await window.accountHarness.catalog("account-1")).length === size,
+    size,
+  );
+}
+async function untilRegistrationRequested(count = 1, id?: string) {
+  const deadline = Date.now() + 10_000;
+  const requested = () =>
+    backend.registrations.filter((entry) => id === undefined || entry === id)
+      .length;
+  while (requested() < count) {
+    if (Date.now() > deadline) throw new Error("No registration request");
+    await Bun.sleep(10);
+  }
 }
 
 test("lost registration and repeated/concurrent claims reuse one target and retain Loro history", async () => {
   await rename("Interrupted anonymous claim");
   const id = await call("id");
-  await login();
-  await cloudSaved();
-  await claim().waitFor();
+  backend.registerGate = deferred();
   backend.lostRegistration = true;
-  await claim().click();
-  // A failure interrupts a screen reader; it does not wait for a pause.
-  await page
-    .getByRole("alert")
-    .filter({ hasText: /Could not finish adding your maps/ })
-    .waitFor();
-  const marker = (await call("catalog", "anonymous", true)).find(
-    (entry) => entry.id === id,
-  )?.claim;
-  expect(marker).toEqual({ ownerId: A.id, targetId: id, phase: "pending" });
+  await login();
+  // The map stays on screen and the copy begins behind it, without a word.
+  expect(await call("id")).toBe(id);
+  await page.waitForFunction(
+    async (id) =>
+      (await window.accountHarness.catalog("anonymous", true)).find(
+        (entry) => entry.id === id,
+      )?.claim?.phase === "pending",
+    id,
+  );
+  await untilRegistrationRequested();
+  expect(
+    (await call("catalog", "anonymous", true)).find((entry) => entry.id === id)
+      ?.claim,
+  ).toEqual({ ownerId: A.id, targetId: id, phase: "pending" });
   expect(
     (await call("catalog", "account-1")).some((entry) => entry.id === id),
   ).toBe(false);
-  await page.reload();
-  await ready();
+  await expectSilence();
+  await edit("Edited while the claim waits");
+  expect(await call("id")).toBe(id);
+  // The lost response fails this registration; the query retries after a
+  // second, and the retry is held so the failed state can be observed.
+  const first = backend.registerGate;
+  backend.registerGate = deferred();
+  first.resolve();
+  await untilRegistrationRequested(2, id);
+  // After the failure: same map, still pending, still silent, still editable.
+  expect(await call("id")).toBe(id);
+  expect(await claimPhase(id)).toBe("pending");
+  await expectSilence();
+  await addChild("Edited after the failure");
+  expect(await call("id")).toBe(id);
+  // A second tab opens the pending map too and waits for the claim lock the
+  // first tab holds, so both contend for one target.
   const concurrent = await context.newPage();
   await concurrent.goto(appUrl);
   await ready(concurrent);
-  await Promise.all([
-    claim().click(),
-    concurrent
-      .getByRole("button", { name: "Add maps to this account" })
-      .click(),
-  ]);
-  await page.getByRole("textbox", { name: "Project name" }).waitFor();
+  expect(await concurrent.evaluate(() => window.accountHarness.id())).toBe(id);
+  expect(await claimPhase(id, concurrent)).toBe("pending");
+  await expectSilence(concurrent);
+  expect(
+    (await call("catalog", "account-1")).some((entry) => entry.id === id),
+  ).toBe(false);
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
+  await cloudSaved();
+  await cloudSaved(concurrent);
+  await claimed(id);
+  // A reload lands on the finished account copy, with every edit.
+  await page.reload();
+  await ready();
+  await page
+    .getByText("Edited while the claim waits", { exact: true })
+    .waitFor();
+  await page.getByText("Edited after the failure", { exact: true }).waitFor();
   await page.waitForFunction((id) => window.accountHarness.id() === id, id);
   await cloudSaved();
+  await cloudSaved(concurrent);
+  await expectSilence();
+  await expectSilence(concurrent);
   expect(
     (await call("catalog", "account-1")).filter((entry) => entry.id === id),
   ).toHaveLength(1);
-  expect(
-    (await call("catalog", "anonymous", true)).find((entry) => entry.id === id)
-      ?.claim?.phase,
-  ).toBe("complete");
+  expect(await claimPhase(id)).toBe("complete");
+  expect(backend.registrations.filter((entry) => entry === id).length).toBe(2);
   const pending = await call("historyClaim", A.id);
   expect(pending.equal).toBe(true);
   expect(pending.after).toEqual(pending.before);
 });
 
-test("the placeholder map takes no edits while the account's maps open", async () => {
+test("signing in keeps the open map editable and keeps the edit made during migration", async () => {
+  await edit("Before sign-in");
+  const id = await call("id");
+  backend.registerGate = deferred();
+  await login();
+  await page.getByText("Before sign-in", { exact: true }).waitFor();
+  expect(await call("id")).toBe(id);
+  await untilRegistrationRequested();
+  expect(await claimPhase(id)).toBe("pending");
+  await addChild("Typed during migration");
+  expect(await call("id")).toBe(id);
   await page.keyboard.press("Alt+o");
-  backend.recentGate = deferred();
-  backend.nextUser = A;
-  await page.getByRole("button", { name: /Sign in/ }).click();
-  await page.getByText(A.name, { exact: true }).waitFor();
-  await page.waitForSelector('[data-storage-ready="false"]');
-
-  // Each of these used to reach a document that opening the map then replaced.
-  const idea = page.locator("[data-node-id]").first();
-  await idea.dblclick();
-  expect(await page.getByLabel("Node text").count()).toBe(0);
-  await idea.click();
-  await idea.click({ button: "right" });
-  expect(await page.getByRole("menu").count()).toBe(0);
-  const row = page.getByRole("treeitem").first();
-  await row.locator(".outline-row").click();
-  await row.locator(".outline-row").dblclick();
-  expect(await page.getByLabel("Node text").count()).toBe(0);
-  expect(
-    await page.getByRole("region", { name: "Selected idea" }).count(),
-  ).toBe(0);
-  const name = page.getByRole("textbox", { name: "Project name" });
-  const before = await name.inputValue();
-  await name.click();
-  await page.keyboard.type("Typed too early");
-  await page.keyboard.press("Enter");
-  expect(await name.inputValue()).toBe(before);
-
-  backend.recentGate.resolve();
-  backend.recentGate = undefined;
-  await ready();
-  await edit("Written once it opened");
+  const outline = page.getByRole("complementary", { name: "Outline" });
+  await outline.waitFor();
+  expect(await outline.getByRole("treeitem").count()).toBe(2);
+  await outline.locator(".outline-row").first().click();
+  await page
+    .locator("[data-node-id][data-selected=true]")
+    .filter({ hasText: "Before sign-in" })
+    .waitFor();
+  await page.getByRole("button", { name: "Close outline" }).click();
+  await outline.waitFor({ state: "detached" });
+  await page.locator("[data-node-id]").first().click({ button: "right" });
+  await page.getByRole("menu").waitFor();
+  await page.keyboard.press("Escape");
+  await page.getByRole("menu").waitFor({ state: "detached" });
+  await expectSilence();
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
   await cloudSaved();
+  await claimed(id);
+  expect(await call("id")).toBe(id);
   await page.reload();
   await ready();
-  expect(await idea.innerText()).toBe("Written once it opened");
+  await page.getByText("Before sign-in", { exact: true }).waitFor();
+  await page.getByText("Typed during migration", { exact: true }).waitFor();
+  expect(await call("id")).toBe(id);
+  expect(await call("catalog", "account-1")).toHaveLength(1);
+  await expectSilence();
 });
 
-test("signing in from fresh browsers opens the latest cloud map instead of adding an empty one", async () => {
-  const accountMaps = () =>
-    [...backend.projects.values()].filter((entry) => entry.ownerId === A.id);
+test("a second tab signed in through the first tab's login swaps too and keeps its edits", async () => {
+  await edit("Shared before sign-in");
+  const id = await call("id");
+  const other = await context.newPage();
+  await other.goto(appUrl);
+  await ready(other);
+  expect(await other.evaluate(() => window.accountHarness.id())).toBe(id);
+  backend.registerGate = deferred();
+  await login();
+  await other.getByText(A.name, { exact: true }).waitFor();
+  await untilRegistrationRequested();
+  // The other tab keeps its map open and editable while the copy is made.
+  expect(await other.evaluate(() => window.accountHarness.id())).toBe(id);
+  await addChild("Second tab edit", other);
+  await expectSilence(other);
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
+  await cloudSaved();
+  await cloudSaved(other);
+  await claimed(id);
+  expect(await call("id")).toBe(id);
+  expect(await other.evaluate(() => window.accountHarness.id())).toBe(id);
+  await other.getByText("Second tab edit", { exact: true }).waitFor();
+  await page.getByText("Second tab edit", { exact: true }).waitFor();
+  const texts = () =>
+    backend.projects
+      .get(id)
+      ?.doc.view()
+      .nodes.map((node) => node.text) ?? [];
+  const deadline = Date.now() + 10_000;
+  while (
+    !texts().includes("Shared before sign-in") ||
+    !texts().includes("Second tab edit")
+  ) {
+    if (Date.now() > deadline) throw new Error("Edits never reached the cloud");
+    await Bun.sleep(10);
+  }
+  expect(
+    (await call("catalog", "account-1")).filter((entry) => entry.id === id),
+  ).toHaveLength(1);
+});
+
+test("editing the placeholder before storage opens keeps the edit", async () => {
+  const stored = await call("id");
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  expect(draft).not.toBe(stored);
+  await edit("Typed before storage opened");
+  const name = page.getByRole("textbox", { name: "Project name" });
+  await name.fill("Named before storage opened");
+  await name.press("Enter");
+  await call("openGate", false);
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await page
+    .getByText("Typed before storage opened", { exact: true })
+    .waitFor();
+  expect(await name.inputValue()).toBe("Named before storage opened");
+  expect(
+    (await call("catalog", "anonymous")).filter((entry) => entry.id === draft),
+  ).toHaveLength(1);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await page
+    .getByText("Typed before storage opened", { exact: true })
+    .waitFor();
+  expect(await name.inputValue()).toBe("Named before storage opened");
+});
+
+test("typing on while storage opens under the placeholder loses nothing", async () => {
+  const stored = await call("id");
+  await call("openGate", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const draft = await call("id");
+  expect(draft).not.toBe(stored);
+  await page.locator("[data-node-id]").first().dblclick();
+  await page.getByRole("textbox", { name: "Node text" }).waitFor();
+  await page.keyboard.type("Typed before ");
+  // The stored map opens, the edited placeholder is adopted under the open
+  // editor, and typing simply goes on.
+  await call("openGate", false);
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await page.keyboard.type("and after storage opened");
+  await page.keyboard.press("Enter");
+  await page
+    .getByText("Typed before and after storage opened", { exact: true })
+    .waitFor();
+  expect(await call("id")).toBe(draft);
+  expect(
+    (await call("catalog", "anonymous")).filter((entry) => entry.id === draft),
+  ).toHaveLength(1);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await page
+    .getByText("Typed before and after storage opened", { exact: true })
+    .waitFor();
+});
+
+test("editing the placeholder while storage fails keeps the edit through Retry local saving", async () => {
+  const stored = await call("id");
+  await call("failOpen", true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="false"]');
+  await page.waitForSelector("[data-node-id]");
+  const retry = page.getByRole("button", { name: "Retry local saving" });
+  await retry.waitFor();
+  const draft = await call("id");
+  expect(draft).not.toBe(stored);
+  await edit("Typed while storage failed");
+  const name = page.getByRole("textbox", { name: "Project name" });
+  await name.fill("Named while storage failed");
+  await name.press("Enter");
+  await call("failOpen", false);
+  await retry.click();
+  await ready();
+  await retry.waitFor({ state: "detached" });
+  expect(await call("id")).toBe(draft);
+  await page.getByText("Typed while storage failed", { exact: true }).waitFor();
+  expect(await name.inputValue()).toBe("Named while storage failed");
+  expect(
+    (await call("catalog", "anonymous")).filter((entry) => entry.id === draft),
+  ).toHaveLength(1);
+  await page.reload();
+  await ready();
+  expect(await call("id")).toBe(draft);
+  await page.getByText("Typed while storage failed", { exact: true }).waitFor();
+  expect(await name.inputValue()).toBe("Named while storage failed");
+});
+
+// Two cloud maps under account A, "Podcast plan" changed last; the browser
+// forgets everything local and signs out before each case.
+async function cloudAccountWithTwoMaps() {
   const renameInCloud = async (name: string) => {
     await rename(name);
     const id = await call("id");
@@ -440,58 +664,96 @@ test("signing in from fresh browsers opens the latest cloud map instead of addin
   await page.waitForFunction((id) => window.accountHarness.id() !== id, older);
   const latest = await renameInCloud("Podcast plan");
   expect(accountMaps()).toHaveLength(2);
+  return latest;
+}
+const accountMaps = () =>
+  [...backend.projects.values()].filter((entry) => entry.ownerId === A.id);
+async function freshBrowser() {
+  await context.close();
+  backend.user = undefined;
+  await openFreshBrowser();
+}
+
+test("signing in from a fresh browser opens the latest cloud map instead of adding an empty one", async () => {
+  const latest = await cloudAccountWithTwoMaps();
   const registrations = backend.registrations.length;
-  for (const [draft, failures] of [
-    ["First browser draft", 0],
-    // A transient catalog failure is retried rather than seeding a map.
-    ["Second browser draft", 1],
-  ] as const) {
-    await context.close();
-    backend.user = undefined;
+  // A transient catalog failure is retried rather than seeding a map.
+  for (const failures of [0, 1]) {
+    await freshBrowser();
     backend.recentFailures = failures;
-    await openFreshBrowser();
-    await edit(draft);
+    const seed = await call("id");
     await login();
     // The most recently changed map opens, not an empty new one.
-    expect(await call("id")).toBe(latest);
+    await page.waitForFunction(
+      (id) => window.accountHarness.id() === id,
+      latest,
+    );
     expect(backend.recentFailures).toBe(0);
     expect(await page.getByLabel("Project name").inputValue()).toBe(
       "Podcast plan",
     );
     await cloudSaved();
-    // Signed-out work is still offered, not replaced by an empty map.
-    await claim().waitFor();
     // Background discovery brings the older map to this browser as well.
-    await page.waitForFunction(
-      async () =>
-        (await window.accountHarness.catalog("account-1")).length === 2,
-    );
+    await accountCatalogSize(2);
     expect(accountMaps()).toHaveLength(2);
     expect(backend.registrations).toHaveLength(registrations);
+    expect(
+      (await call("catalog", "account-1")).some((entry) => entry.id === seed),
+    ).toBe(false);
+    await expectSilence();
   }
 });
 
-test("the claims banner keeps between the open panels in a small window", async () => {
-  await rename("Made before signing in");
+test("signing in from a fresh browser with a draft keeps the draft and adds the cloud maps behind it", async () => {
+  await cloudAccountWithTwoMaps();
+  const registrations = backend.registrations.length;
+  await freshBrowser();
+  await edit("First browser draft");
+  const draft = await call("id");
+  backend.registerGate = deferred();
   await login();
-  await claim().waitFor();
-  await page.setViewportSize({ width: 800, height: 600 });
-  await page.keyboard.press("Alt+o");
-  await page.keyboard.press("Alt+n");
-  const edges = async (name: string, role: "region" | "complementary") => {
-    const box = await page.getByRole(role, { name }).boundingBox();
-    if (!box) throw new Error(`${name} is not visible.`);
-    return { left: box.x, right: box.x + box.width };
-  };
-  const banner = await edges("Maps from before sign-in", "region");
-  expect(banner.left).toBeGreaterThan(
-    (await edges("Outline", "complementary")).right,
+  // The draft stays on screen, and the swap to its copy resets nothing.
+  expect(await call("id")).toBe(draft);
+  await page.getByText("First browser draft", { exact: true }).waitFor();
+  await page.locator("[data-node-id]").first().click();
+  expect(await page.locator("[data-selected=true]").count()).toBe(1);
+  await untilRegistrationRequested();
+  backend.registerGate.resolve();
+  backend.registerGate = undefined;
+  await cloudSaved();
+  await claimed(draft);
+  expect(await call("id")).toBe(draft);
+  await page.getByText("First browser draft", { exact: true }).waitFor();
+  expect(await page.locator("[data-selected=true]").count()).toBe(1);
+  expect(backend.registrations).toHaveLength(registrations + 1);
+  expect(backend.projects.get(draft)?.ownerId).toBe(A.id);
+  await accountCatalogSize(3);
+  expect(accountMaps()).toHaveLength(3);
+  await expectSilence();
+});
+
+test("an edit while the cloud lookup is held keeps the map and the cloud maps join the list", async () => {
+  await cloudAccountWithTwoMaps();
+  await freshBrowser();
+  backend.recentGate = deferred();
+  const draft = await call("id");
+  await login();
+  await edit("Typed during lookup");
+  expect(await call("id")).toBe(draft);
+  expect(await page.locator("[data-selected=true]").count()).toBe(1);
+  backend.recentGate.resolve();
+  backend.recentGate = undefined;
+  await accountCatalogSize(3);
+  await cloudSaved();
+  await claimed(draft);
+  expect(await call("id")).toBe(draft);
+  await page.getByText("Typed during lookup", { exact: true }).waitFor();
+  expect(await page.locator("[data-selected=true]").count()).toBe(1);
+  expect(await page.getByLabel("Project name").inputValue()).not.toBe(
+    "Podcast plan",
   );
-  expect(banner.right).toBeLessThan(
-    (await edges("Notes", "complementary")).left,
-  );
-  for (const name of ["Close outline", "Close notes", "Not now"])
-    await page.getByRole("button", { name }).click({ trial: true });
+  expect(accountMaps()).toHaveLength(3);
+  await expectSilence();
 });
 
 test("a UUID owned elsewhere is copied to a new UUID without merging unrelated content", async () => {
@@ -500,10 +762,10 @@ test("a UUID owned elsewhere is copied to a new UUID without merging unrelated c
   const id = await call("id");
   backend.projects.set(id, { ownerId: B.id, doc: openProjectDocument(id) });
   await login();
-  await claim().click();
+  await page.waitForFunction((id) => window.accountHarness.id() !== id, id);
+  const replacement = await call("id");
   await page.getByText("Mine before sign-in", { exact: true }).waitFor();
   await cloudSaved();
-  const replacement = await call("id");
   expect(replacement).not.toBe(id);
   expect(backend.projects.get(id)?.ownerId).toBe(B.id);
   expect(backend.projects.get(replacement)?.ownerId).toBe(A.id);
@@ -514,6 +776,8 @@ test("a UUID owned elsewhere is copied to a new UUID without merging unrelated c
     (entry) => entry.id === id,
   )?.claim;
   expect(marker?.targetId).toBe(replacement);
+  expect(marker?.phase).toBe("complete");
+  await expectSilence();
 });
 
 test("logout from another tab fences a delayed getMe response and survives a stale server cookie", async () => {
@@ -931,28 +1195,39 @@ test("cloud-only projects load after reload without leaving a local copy", async
     .getByText("Saved to cloud · local saving off", { exact: true })
     .waitFor();
   expect(await call("id")).toBe(id);
+  // The migrated anonymous source keeps its database under the same UUID;
+  // the account's own copy is the one that must be gone.
   expect(
     await page.evaluate(
       async (id) =>
-        (await indexedDB.databases()).some((db) =>
-          db.name?.endsWith(`/project/${id}`),
+        (await indexedDB.databases()).some(
+          (db) =>
+            db.name?.includes("/account-1/") &&
+            db.name.endsWith(`/project/${id}`),
         ),
       id,
     ),
   ).toBe(false);
 });
 
-test("anonymous projects with cloud saving off are never offered for account upload", async () => {
+test("anonymous projects with cloud saving off migrate locally without ever being uploaded", async () => {
   const id = await call("id");
   await projectMenu("Project preferences…");
   await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
   await page.getByRole("button", { name: "Close project preferences" }).click();
   await login();
-  await cloudSaved();
+  await claimed(id);
+  expect(await call("id")).toBe(id);
   expect(backend.projects.has(id)).toBe(false);
-  expect(await claim().count()).toBe(0);
-  const anonymous = await call("catalog", "anonymous");
-  expect(anonymous.find((entry) => entry.id === id)?.saving?.cloud).toBe(false);
+  expect(backend.registrations).toHaveLength(0);
+  expect(
+    (await call("catalog", "account-1")).find((entry) => entry.id === id)
+      ?.saving?.cloud,
+  ).toBe(false);
+  await page
+    .getByText("Saved locally · cloud saving off", { exact: true })
+    .waitFor();
+  await expectSilence();
 });
 
 test("the shared view has editor-sized islands, plain tooltips and a retry that keeps the keyboard", async () => {
