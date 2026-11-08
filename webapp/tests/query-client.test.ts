@@ -133,7 +133,8 @@ test("shared query clients keep accounts separate and enforce ownership headers"
   const queries = client();
   const owners: string[] = [];
   const fetcher: typeof fetch = async (_url, init) => {
-    const owner = new Headers(init?.headers).get("X-Mindgrab-Account") ?? "";
+    const owner =
+      new Headers(init?.headers).get("X-Mindgrab-Account.php") ?? "";
     owners.push(owner);
     return status(owner);
   };

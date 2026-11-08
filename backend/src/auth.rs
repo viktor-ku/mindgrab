@@ -19,8 +19,8 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-pub const SESSION_COOKIE: &str = "mindgrab_session_loro";
-const STATE_COOKIE: &str = "mindgrab_login_loro";
+pub const SESSION_COOKIE: &str = "PHPSESSID";
+const STATE_COOKIE: &str = "PHPLOGINID";
 const LOCAL_USER_ID: &str = "local_boba_tee";
 const LOCAL_TOKEN: &str = "local-development";
 pub fn hash(value: &str) -> String {
@@ -368,6 +368,19 @@ impl Auth {
         redirect(&destination, cookies)
     }
     pub async fn identify(&self, headers: &HeaderMap) -> Result<User> {
+        // Parsed before the session is read, so the deploy check can prove without
+        // signing in that the edge passes this dotted header.
+        let expected = headers
+            .get("x-mindgrab-account.php")
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .filter(|v| *v > 0)
+                    .ok_or_else(ApiError::invalid)
+            })
+            .transpose()?;
         let browser = self
             .browser_cookie(headers, SESSION_COOKIE)
             .ok_or_else(ApiError::unauthorized)?;
@@ -407,16 +420,8 @@ impl Auth {
         }
         tx.commit().await?;
         let user = result?;
-        if let Some(expected) = headers.get("x-mindgrab-account") {
-            let value = expected
-                .to_str()
-                .ok()
-                .and_then(|v| v.parse::<i64>().ok())
-                .filter(|v| *v > 0)
-                .ok_or_else(ApiError::invalid)?;
-            if value != user.id {
-                return Err(ApiError::new(StatusCode::CONFLICT, "account_changed"));
-            }
+        if expected.is_some_and(|id| id != user.id) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "account_changed"));
         }
         Ok(user)
     }

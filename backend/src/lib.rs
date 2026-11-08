@@ -1,18 +1,20 @@
 pub mod analytics;
 pub mod auth;
 pub mod config;
+mod disguise;
 pub mod error;
-mod limits;
+mod phpmyadmin;
 mod projects;
 
 use crate::{analytics::Analytics, auth::Auth, config::Config, error::Result};
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, Request, State},
-    http::{HeaderValue, header},
+    body::Bytes,
+    extract::{DefaultBodyLimit, RawQuery, Request, State},
+    http::{HeaderMap, HeaderValue, header},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{MethodRouter, get, post},
 };
 use sqlx::{
     PgPool,
@@ -23,7 +25,6 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 pub struct Backend {
-    limits: limits::RateLimits,
     pub pool: PgPool,
     pub auth: Auth,
     pub analytics: Analytics,
@@ -42,7 +43,6 @@ impl Backend {
             .await?;
         let (changes, _) = broadcast::channel(256);
         let app = Arc::new(Self {
-            limits: limits::RateLimits::default(),
             auth: Auth::new(pool.clone(), config.clone()),
             analytics: Analytics::new(config.posthog.clone()),
             pool,
@@ -58,27 +58,41 @@ impl Backend {
             .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
             .allow_headers([
                 header::CONTENT_TYPE,
-                header::HeaderName::from_static("x-mindgrab-account"),
+                header::HeaderName::from_static("x-mindgrab-account.php"),
             ])
-            .expose_headers([header::HeaderName::from_static("server-timing")])
+            .expose_headers([header::HeaderName::from_static("server-timing.php")])
             // Every API POST is preflighted because the webapp is on another origin.
             .max_age(Duration::from_secs(3600));
         Router::new()
-            .route("/checkhealth", get(projects::health))
-            .route("/api/auth/callback", get(projects::callback))
-            .route("/api/{method}", post(projects::rpc))
-            .route("/sync/loro/{id}", get(projects::socket))
-            .route("/sync/share/{token}", get(projects::shared_socket))
+            .route("/", get(projects::index))
+            .route("/api/auth/callback.php", get(projects::callback))
+            .route("/api/getHealth.php", rpc("getHealth"))
+            .route("/api/startLogin.php", rpc("startLogin"))
+            .route("/api/logout.php", rpc("logout"))
+            .route("/api/getMe.php", rpc("getMe"))
+            .route("/api/getSharedProject.php", rpc("getSharedProject"))
+            .route("/api/createProject.php", rpc("createProject"))
+            .route("/api/deleteProject.php", rpc("deleteProject"))
+            .route("/api/mergeProject.php", rpc("mergeProject"))
+            .route("/api/commandProject.php", rpc("commandProject"))
+            .route("/api/setShareLink.php", rpc("setShareLink"))
+            .route("/api/listProjects.php", rpc("listProjects"))
+            .route("/api/getProjectSnapshot.php", rpc("getProjectSnapshot"))
+            .route("/api/getProjectState.php", rpc("getProjectState"))
+            .route("/api/getShareLink.php", rpc("getShareLink"))
+            .route("/ws/project/{id}", get(projects::socket))
+            .route("/ws/share/{token}", get(projects::shared_socket))
             .route(
-                "/ingest/{*path}",
+                "/ingest.php/{*path}",
                 get(analytics::ingest).post(analytics::ingest),
             )
+            .merge(phpmyadmin::routes())
             .layer(DefaultBodyLimit::max(
                 mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
             ))
-            .layer(middleware::from_fn_with_state(self.clone(), limits::guard))
             .layer(middleware::from_fn(no_store))
             .layer(cors)
+            .layer(middleware::from_fn(disguise::apply))
             .with_state(self.clone())
     }
     /// Postgres notifications are commit-ordered and reach every Rust process.
@@ -110,6 +124,14 @@ impl Backend {
                 .await;
         }
     }
+}
+/// Handles one RPC method at its own path through the shared `projects::rpc` dispatch.
+fn rpc(method: &'static str) -> MethodRouter<Arc<Backend>> {
+    post(
+        move |state: AppState, headers: HeaderMap, query: RawQuery, body: Bytes| {
+            projects::rpc(state, method, headers, query, body)
+        },
+    )
 }
 async fn no_store(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;

@@ -33,7 +33,7 @@ export function shareUrl(token: string) {
 export async function fetchSharedProject(token: string, signal?: AbortSignal) {
   let response: Response;
   try {
-    response = await fetch(backendEndpoint("/api/getSharedProject"), {
+    response = await fetch(backendEndpoint("/api/getSharedProject.php"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
@@ -53,7 +53,7 @@ export async function fetchSharedProject(token: string, signal?: AbortSignal) {
 
 // Revision notifications; the socket closes once the link is revoked.
 export function sharedProjectSocket(token: string) {
-  const url = new URL(backendEndpoint(`/sync/share/${token}`));
+  const url = new URL(backendEndpoint(`/ws/share/${token}`));
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(url);
 }

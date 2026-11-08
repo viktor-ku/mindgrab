@@ -13,7 +13,7 @@ import { backendCookieDomain, backendEndpoint } from "./backend";
 // GDPR: nothing loads or leaves the browser until the visitor chooses.
 // Accepting enables cookies and links activity to the account. Declining keeps
 // PostHog in cookieless mode: anonymous counts with no stored identifier.
-// Events go through the backend's /ingest proxy to PostHog's EU region.
+// Events go through the backend's /ingest.php proxy to PostHog's EU region.
 type IdeaKind = "child" | "sibling" | "root" | "parent";
 export interface AnalyticsEvents {
   project_created: { trigger: "first_open" | "menu"; project_count?: number };
@@ -129,7 +129,7 @@ async function load() {
       const { default: posthog } = await import("posthog-js");
       // Checked above; Bun's env typing (e2e) does not narrow across the closure.
       posthog.init(import.meta.env.VITE_POSTHOG_KEY as string, {
-        api_host: backendEndpoint("/ingest"),
+        api_host: backendEndpoint("/ingest.php"),
         ui_host: "https://eu.posthog.com",
         defaults: "2026-08-30",
         cookieless_mode: "on_reject",

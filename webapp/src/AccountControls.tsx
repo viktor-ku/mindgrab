@@ -56,7 +56,7 @@ export function AccountControls(props: {
     const form = document.createElement("form");
     form.method = "post";
     form.action = backendEndpoint(
-      action === "login" ? "/api/startLogin" : "/api/logout",
+      action === "login" ? "/api/startLogin.php" : "/api/logout.php",
     );
     form.hidden = true;
     document.body.append(form);

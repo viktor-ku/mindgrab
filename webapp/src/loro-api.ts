@@ -108,7 +108,7 @@ export class LoroApi {
   }
 
   async remove(id: string, signal: AbortSignal) {
-    await this.#json("deleteProject", { projectId: id }, signal);
+    await this.#json("deleteProject.php", { projectId: id }, signal);
   }
 
   list(signal: AbortSignal) {
@@ -125,7 +125,7 @@ export class LoroApi {
           .object({ projects: z.array(record) })
           .parse(
             await this.#json(
-              "listProjects",
+              "listProjects.php",
               { limit: 20, recent: true },
               signal,
             ),
@@ -145,13 +145,13 @@ export class LoroApi {
   // The project's view-only link token, or null while the project is private.
   async shareLink(id: string, signal: AbortSignal) {
     return shareLink.parse(
-      await this.#json("getShareLink", { projectId: id }, signal),
+      await this.#json("getShareLink.php", { projectId: id }, signal),
     ).token;
   }
 
   async setShareLink(id: string, enabled: boolean, signal: AbortSignal) {
     return shareLink.parse(
-      await this.#json("setShareLink", { projectId: id, enabled }, signal),
+      await this.#json("setShareLink.php", { projectId: id, enabled }, signal),
     ).token;
   }
 
@@ -164,7 +164,7 @@ export class LoroApi {
           this.#parseSnapshot(
             id,
             await this.#request(
-              `mergeProject?${new URLSearchParams({ projectId: id })}`,
+              `mergeProject.php?${new URLSearchParams({ projectId: id })}`,
               signal,
               {
                 headers: { "Content-Type": "application/octet-stream" },
@@ -187,7 +187,8 @@ export class LoroApi {
   async #request(path: string, signal: AbortSignal, init?: RequestInit) {
     signal.throwIfAborted();
     const headers = new Headers(init?.headers);
-    if (this.ownerId) headers.set("X-Mindgrab-Account", String(this.ownerId));
+    if (this.ownerId)
+      headers.set("X-Mindgrab-Account.php", String(this.ownerId));
     const response = await this.fetcher(this.endpoint(`/api/${path}`), {
       ...init,
       method: "POST",
@@ -219,8 +220,8 @@ export class LoroApi {
     return response.json();
   }
 
-  #json(method: string, args: unknown, signal: AbortSignal) {
-    return this.#request(method, signal, {
+  #json(path: string, args: unknown, signal: AbortSignal) {
+    return this.#request(path, signal, {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(args),
     });
@@ -229,7 +230,7 @@ export class LoroApi {
   async #register(id: string, signal: AbortSignal) {
     const result = record.parse(
       await this.#json(
-        "createProject",
+        "createProject.php",
         { projectId: id, schemaVersion: 1 },
         signal,
       ),
@@ -251,7 +252,7 @@ export class LoroApi {
         })
         .parse(
           await this.#json(
-            "listProjects",
+            "listProjects.php",
             { limit: 100, ...(cursor ? { cursor } : {}) },
             signal,
           ),
@@ -267,7 +268,7 @@ export class LoroApi {
 
   async #readSnapshot(id: string, signal: AbortSignal) {
     const result = snapshot.parse(
-      await this.#json("getProjectSnapshot", { projectId: id }, signal),
+      await this.#json("getProjectSnapshot.php", { projectId: id }, signal),
     );
     if (result.projectId !== id)
       throw new SyncError("Unexpected project snapshot.", "blocked");

@@ -93,7 +93,7 @@ fn concurrent_bootstraps_isolate_ports_and_compose_projects() -> Result<()> {
         );
         assert_eq!(
             env["WORKOS_REDIRECT_URI"],
-            format!("{}api/auth/callback", env["APP_URL"])
+            format!("{}api/auth/callback.php", env["APP_URL"])
         );
     }
     assert!(!root.path().join(".git").join(LOCK).exists());
@@ -193,7 +193,7 @@ fn mise_loads_credentials_before_generated_urls() -> Result<()> {
     let target = worktree(root.path(), "target")?;
     fs::write(
         root.path().join(".env"),
-        "WORKOS_CLIENT_ID=shared-client\nWORKOS_API_KEY=shared-secret\nPORT=3000\nWORKOS_REDIRECT_URI=http://localhost:5173/api/auth/callback\n",
+        "WORKOS_CLIENT_ID=shared-client\nWORKOS_API_KEY=shared-secret\nPORT=3000\nWORKOS_REDIRECT_URI=http://localhost:5173/api/auth/callback.php\n",
     )?;
     let generated = bootstrap_worktree(&root, &target)?;
     fs::write(
@@ -221,6 +221,63 @@ fn mise_loads_credentials_before_generated_urls() -> Result<()> {
     for (key, value) in generated {
         assert_eq!(inherited[&key], value, "{key}");
     }
+    Ok(())
+}
+
+#[test]
+fn a_saved_callback_moves_to_the_php_route_and_nothing_else_changes() -> Result<()> {
+    let root = repository()?;
+    let target = worktree(root.path(), "target")?;
+    let generated = bootstrap_worktree(&root, &target)?;
+    let path = target.join(CONFIG);
+    let current = fs::read_to_string(&path)?;
+    let stale = current.replace(CALLBACK, OLD_CALLBACK);
+    assert_ne!(stale, current);
+    fs::write(&path, format!("{stale}CUSTOM = \"keep\"\n"))?;
+    assert_eq!(bootstrap_worktree(&root, &target)?, generated);
+    let migrated = format!("{current}CUSTOM = \"keep\"\n");
+    assert_eq!(fs::read_to_string(&path)?, migrated);
+    bootstrap_worktree(&root, &target)?;
+    assert_eq!(fs::read_to_string(&path)?, migrated);
+    Ok(())
+}
+
+#[test]
+fn moving_a_saved_callback_keeps_comments_and_table_order() -> Result<()> {
+    let root = repository()?;
+    let target = worktree(root.path(), "target")?;
+    bootstrap_worktree(&root, &target)?;
+    let path = target.join(CONFIG);
+    let current = fs::read_to_string(&path)?;
+    let wrapped = |text: &str, callback: &str| {
+        let line = format!("{callback}\"");
+        let text = text.replace(&line, &format!("{line} # Registered in staging"));
+        format!("[tools]\nnode = \"24\"\n\n# Keep this note.\n{text}")
+    };
+    let stale = current.replace(CALLBACK, OLD_CALLBACK);
+    fs::write(&path, wrapped(&stale, OLD_CALLBACK))?;
+    bootstrap_worktree(&root, &target)?;
+    assert_eq!(fs::read_to_string(&path)?, wrapped(&current, CALLBACK));
+    Ok(())
+}
+
+#[test]
+fn a_custom_callback_is_left_alone() -> Result<()> {
+    let root = repository()?;
+    let target = worktree(root.path(), "target")?;
+    let generated = bootstrap_worktree(&root, &target)?;
+    let path = target.join(CONFIG);
+    let custom = fs::read_to_string(&path)?.replace(
+        &generated["WORKOS_REDIRECT_URI"],
+        "https://mindgrab.example/custom",
+    );
+    fs::write(&path, &custom)?;
+    let saved = bootstrap_worktree(&root, &target)?;
+    assert_eq!(
+        saved["WORKOS_REDIRECT_URI"],
+        "https://mindgrab.example/custom"
+    );
+    assert_eq!(fs::read_to_string(&path)?, custom);
     Ok(())
 }
 

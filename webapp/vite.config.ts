@@ -29,7 +29,7 @@ export default defineConfig(({ mode }) => {
             env.VITE_BACKEND_URL ||
             "http://localhost:3000",
         },
-        "/sync": {
+        "/ws": {
           target:
             process.env.VITE_BACKEND_URL ||
             env.VITE_BACKEND_URL ||

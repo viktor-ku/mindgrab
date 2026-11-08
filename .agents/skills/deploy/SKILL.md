@@ -9,7 +9,7 @@ Railway project `8b285039-3bb1-4136-a31d-5fede17bc0e8`, environment `production`
 services `mindgrab` (API, root `Dockerfile`) and `web` (static webapp,
 `webapp/Dockerfile`), plus `Postgres`. Railway builds both from the `live` branch.
 Production is `https://mindgrab.app`, the API is `https://api.mindgrab.app` and its
-healthcheck is `/checkhealth`. See `backend/README.md`.
+healthcheck is `/`. See `backend/README.md`.
 
 The rule behind every step: **`live` is only ever a copy of `main`.** Commit every
 change, including hotfixes, to `main`, push `main`, then run `mise run golive`.
@@ -59,6 +59,14 @@ environment variable for the command. Never print it.
      independently. Keep the API compatible with the webapp build still being served.
    - **Auth.** If `APP_URL` or the WorkOS redirect changes, the WorkOS dashboard must
      be updated too. Ask the user.
+   - **Routes configured outside the repository.** The `mindgrab` healthcheck path is
+     a Railway service setting and `WORKOS_REDIRECT_URI` a Railway variable. If the
+     diff moves the `/` health route or `/api/auth/callback.php`, update both before
+     golive: the old healthcheck path would return 404, and startup rejects any other
+     callback path, so the deployment fails. Have the user add the new redirect in
+     WorkOS first. Set the variable with `--skip-deploys`. Set the path with the
+     Railway MCP `update-service` (`healthcheckPath`, plus `environmentId`), which
+     applies on the next deployment.
 5. Run checks. Commit hooks already run lint, format and Clippy. For any change to
    code, dependencies or the `Dockerfile`, also run `mise run check`, or at least the
    tasks covering the changed areas (`backend:test`, `webapp:test`, `e2e:test`,
@@ -98,12 +106,22 @@ deploy, so only wait for the services the commit affects (`railway status -p 8b2
 When it exits with `SUCCESS`, verify production:
 
 ```sh
-curl -fsS -o /dev/null -w '%{http_code}\n' https://api.mindgrab.app/checkhealth   # 200 (503 = database unreachable)
+curl -fsS -o /dev/null -w '%{http_code}\n' https://api.mindgrab.app/   # 200 (503 = database unreachable)
+curl -sS -o /dev/null -D - https://api.mindgrab.app/ | grep -i '^x-powered-by\.php: PHP/8\.3\.14'
+curl -sS -X POST -H 'x-mindgrab-account.php: probe' https://api.mindgrab.app/api/getMe.php | grep -q '"code":"invalid_request"' && echo fence ok
 curl -fsS https://mindgrab.app/ | grep -q '<div id="root"\|<script' && echo webapp ok
 curl -fsS -o /dev/null -w '%{http_code}\n' https://mindgrab.app/s/deploy-check       # 200 from web
 railway logs "${R[@]}" --since 10m --filter '@level:error'
 railway logs "${R[@]}" --http --since 10m --filter '@httpStatus:>=500'
 ```
+
+Check `x-powered-by.php`, not `server`: Cloudflare replaces `server` with
+`cloudflare`, so `Apache/2.4.62` never reaches a client on this domain.
+
+The account fence fails open: if an edge drops `x-mindgrab-account.php`, a stale tab
+can write into another account with no error. `fence ok` above proves the header
+reached the backend, because only the backend sends that code. Without it, treat the
+deploy as failed and tell the user: `unauthorized` means the header was dropped.
 
 Then wait about 5 minutes and check again. The restart policy is `ON_FAILURE` with 10
 retries, so a crash loop only becomes visible after startup. A deployment that turns
@@ -111,7 +129,7 @@ retries, so a crash loop only becomes visible after startup. A deployment that t
 
 How to read the result: when a build or healthcheck **fails**, Railway keeps the
 previous deployment serving, so production is not down. When a deployment
-**crashes** after going live, or `/checkhealth` returns 503 or 5xx errors spike,
+**crashes** after going live, or `https://api.mindgrab.app/` returns 503 or 5xx errors spike,
 users are affected. Mitigate those first (step 4.2).
 
 ## 4. Fix failures
@@ -137,7 +155,9 @@ railway redeploy "${R[@]}" --commit <last-good-sha> -y
 .agents/skills/deploy/scripts/wait-for-deploy.sh <last-good-sha>   # the rollback deploy
 ```
 
-Do the same with `-s web` and `SERVICE=web` for a webapp failure.
+Do the same with `-s web` and `SERVICE=web` for a webapp failure. If the failed range
+moved the healthcheck or callback path, restore those settings (step 1.4) first, or
+the old commit cannot start. Roll back both services if it moved any API path.
 
 This deploys the old commit once without moving `live`, and the next golive
 replaces it. It cannot undo a schema change. If the new schema broke the old code,

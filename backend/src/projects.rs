@@ -11,7 +11,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -74,31 +74,43 @@ pub async fn callback(
         .callback(&headers, &query.unwrap_or_default())
         .await
 }
-pub async fn health(axum::extract::State(app): AppState) -> Response {
-    let started = std::time::Instant::now();
-    let healthy = matches!(
+async fn database_ready(app: &Backend) -> bool {
+    matches!(
         tokio::time::timeout(
             Duration::from_secs(2),
             sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&app.pool)
         )
         .await,
         Ok(Ok(1))
-    );
+    )
+}
+/// Apache's default page, and Railway's healthcheck: a deployment goes live on this 200.
+pub async fn index(axum::extract::State(app): AppState) -> Response {
+    if database_ready(&app).await {
+        Html("<html><body><h1>It works!</h1></body></html>\n").into_response()
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE.into_response()
+    }
+}
+pub async fn health(axum::extract::State(app): AppState) -> Response {
+    let started = std::time::Instant::now();
+    let healthy = database_ready(&app).await;
     let ms = started.elapsed().as_secs_f64() * 1000.;
     let mut response = (if healthy {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},Json(json!({"status":if healthy {"ok"} else {"degraded"},"database":{"status":if healthy {"up"} else {"down"},"latency_ms":if healthy {Some(ms)} else {None}}}))).into_response();
-    response
-        .headers_mut()
-        .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
+    response.headers_mut().insert(
+        "server-timing.php",
+        format!("db;dur={ms:.3}").parse().unwrap(),
+    );
     response
 }
 pub async fn rpc(
     axum::extract::State(app): AppState,
-    Path(method): Path<String>,
+    method: &'static str,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Result<Response> {
-    match method.as_str() {
+    match method {
         "getHealth" => return Ok(health(axum::extract::State(app)).await),
         "startLogin" => return app.auth.start(&headers).await,
         "logout" => return app.auth.logout(&headers).await,
@@ -109,10 +121,10 @@ pub async fn rpc(
             app.config.same_origin(&headers)?
         }
         "listProjects" | "getProjectSnapshot" | "getProjectState" | "getShareLink" => {}
-        _ => return Ok(StatusCode::NOT_FOUND.into_response()),
+        _ => unreachable!(),
     }
     let user = app.auth.identify(&headers).await?;
-    match method.as_str() {
+    match method {
         "createProject" => {
             let args: Create = parse(&headers, &body)?;
             if args.schema_version != 1 {

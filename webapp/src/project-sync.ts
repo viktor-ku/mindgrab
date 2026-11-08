@@ -38,7 +38,7 @@ export function websocketProvider(
     connect() {
       if (destroyed || (socket && socket.readyState < WebSocket.CLOSING))
         return;
-      const url = new URL(backendEndpoint(`/sync/loro/${id}`));
+      const url = new URL(backendEndpoint(`/ws/project/${id}`));
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("ownerId", String(ownerId));
       const current = new WebSocket(url);
