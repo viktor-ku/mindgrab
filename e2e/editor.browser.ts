@@ -160,9 +160,7 @@ describe("collapsing branches", () => {
     expect(await page.locator("[data-node-id]").count()).toBe(1);
     expect(await page.locator("svg.pointer-events-none path").count()).toBe(0);
     expect(
-      await node(root)
-        .getByRole("button", { name: "Expand 3 hidden nodes" })
-        .count(),
+      await node(root).getByRole("button", { name: "Expand 3 ideas" }).count(),
     ).toBe(1);
     expect(await call("content")).toEqual(content);
     expect(await call("localUpdates")).toBe(updates);
@@ -172,9 +170,7 @@ describe("collapsing branches", () => {
     for (const id of [child, grandchild, sibling]) await node(id).waitFor();
     expect(await page.locator("svg.pointer-events-none path").count()).toBe(3);
     await page.keyboard.press("Alt+g");
-    await node(root)
-      .getByRole("button", { name: "Expand 3 hidden nodes" })
-      .click();
+    await node(root).getByRole("button", { name: "Expand 3 ideas" }).click();
     await node(grandchild).waitFor();
     await node(root).click({ button: "right" });
     await page.getByRole("menuitem", { name: "Collapse children" }).click();
@@ -207,9 +203,7 @@ describe("collapsing branches", () => {
     await call("edit", grandchild, 0, 10, "Updated");
     const added = await addChild(child, "Remote child");
     expect(
-      await node(root)
-        .getByRole("button", { name: "Expand 4 hidden nodes" })
-        .count(),
+      await node(root).getByRole("button", { name: "Expand 4 ideas" }).count(),
     ).toBe(1);
     await page.keyboard.press("Alt+g");
     await node(sibling).waitFor();

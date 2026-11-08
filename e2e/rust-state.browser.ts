@@ -110,12 +110,16 @@ async function newPage() {
   page.on("pageerror", (error) => errors.push(error.message));
   return page;
 }
+// Waits for the account workspace to settle: the map stays editable through
+// sign-in, so without this an edit would land on the untouched map and make
+// it a new cloud project instead of opening the account's latest.
 async function login(page: Page) {
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
     .locator('[aria-label="Account"] button[aria-haspopup="menu"]')
     .waitFor();
   await page.waitForSelector('[data-storage-ready="true"]');
+  await saved(page);
 }
 async function saved(page: Page) {
   try {
@@ -170,14 +174,21 @@ async function openNamed(page: Page, name: string) {
   await saved(page);
 }
 
-test("main app signs in, claims anonymous work, reloads durable state, and accepts native Rust commands", async () => {
+test("main app signs in, migrates anonymous work silently, reloads durable state, and accepts native Rust commands", async () => {
   await edit(page, "Anonymous work 🦀");
-  await login(page);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page
-    .getByRole("button", { name: "Add anonymous projects to this account" })
-    .click();
+    .locator('[aria-label="Account"] button[aria-haspopup="menu"]')
+    .waitFor();
+  // The map is on screen at once; its copy into the account needs no click.
   await page.getByText("Anonymous work 🦀", { exact: true }).waitFor();
+  expect(
+    await page
+      .getByRole("button", { name: "Add maps to this account" })
+      .count(),
+  ).toBe(0);
   await saved(page);
+  expect(await page.getByRole("alert").count()).toBe(0);
   const id = await currentId(page);
   const view = (await rpc(page, "getProjectState", {
     projectId: id,

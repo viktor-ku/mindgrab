@@ -12,7 +12,7 @@ export function saveIndicator(state: {
   recovering?: boolean;
 }): { tone: SaveTone; label: string } {
   const { local, localStatus, cloud, recovering } = state;
-  if (localStatus === "error") return { tone: "error", label: "Save failed" };
+  if (localStatus === "error") return { tone: "error", label: "Couldn’t save" };
   if (
     cloud?.status === "retrying" ||
     cloud?.status === "auth" ||

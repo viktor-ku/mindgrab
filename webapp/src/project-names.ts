@@ -53,3 +53,11 @@ export function generateProjectName(
 
   throw new Error("All generated project names are already in use.");
 }
+
+const generatedName = new RegExp(
+  `^(?:${colors.join("|")}) (?:${nouns.join("|")}) (?:0[1-9]|[1-9][0-9])$`,
+);
+
+// A name generateProjectName could have produced; anything else was typed.
+export const isGeneratedProjectName = (name: string) =>
+  generatedName.test(name);

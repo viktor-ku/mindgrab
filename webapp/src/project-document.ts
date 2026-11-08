@@ -9,6 +9,7 @@ import type {
 } from "./generated/mindgrab-state/model";
 import type { MindMapNode, NodePosition } from "./mind-map";
 import type { NodeColor } from "./node-colors";
+import { isGeneratedProjectName } from "./project-names";
 import { z } from "zod";
 
 // WASM is loaded before any editor or repository can create a document.
@@ -252,6 +253,19 @@ export function projectForest(content: DocumentView): ForestNode[] {
       children: convert(next ?? []),
     }));
   return convert(projectMindMap(content));
+}
+// The untouched seed every new map starts from: one "New idea" root with no
+// content and a generated name. A rename is work, so it counts as an edit.
+export function isPristineSeed(forest: ForestNode[], name: string) {
+  if (forest.length !== 1 || !isGeneratedProjectName(name)) return false;
+  const [root] = forest;
+  return (
+    root.text === "New idea" &&
+    !root.note &&
+    root.color === DEFAULT_NODE_COLOR &&
+    !root.position &&
+    root.children.length === 0
+  );
 }
 function create(
   doc: ProjectDocument,

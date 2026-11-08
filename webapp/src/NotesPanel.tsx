@@ -1,7 +1,6 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
 import { closeOnEscape } from "./escape-key";
 import { CloseIcon } from "./icons";
-import { ALT_LABEL } from "./ShortcutsDialog";
 import type { ProjectDocument } from "./project-document";
 import { bindTextarea } from "./text-binding";
 
@@ -36,7 +35,10 @@ export function NotesPanel(props: {
       data-no-pan
       data-toolbar
       aria-label="Notes"
-      class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
+      // Focusable, so a press on the header or footer keeps focus in the
+      // panel, where Esc closes it, instead of handing it to the map.
+      tabIndex={-1}
+      class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default outline-none"
       ref={(el) => closeOnEscape(el, () => props.onClose())}
     >
       <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
@@ -50,7 +52,8 @@ export function NotesPanel(props: {
           type="button"
           class="icon-button size-8!"
           aria-label="Close notes"
-          title={`Close notes (${ALT_LABEL}N)`}
+          // Esc, not the Alt shortcut: the notes field keeps that key for typing.
+          title="Close notes (Esc)"
           onClick={props.onClose}
         >
           <CloseIcon class="size-4" />
@@ -68,7 +71,7 @@ export function NotesPanel(props: {
           ref={input}
           aria-label="Idea notes"
           placeholder="Add details, links, or context…"
-          class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400"
+          class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset"
           onFocus={props.onFocusChange}
           onBlur={props.onFocusChange}
         />

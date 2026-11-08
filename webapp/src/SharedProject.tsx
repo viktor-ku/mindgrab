@@ -45,10 +45,10 @@ import {
   SharedProjectError,
   sharedProjectSocket,
 } from "./shared-project";
+import { panelInsets } from "./view-insets";
 
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 2.5;
-const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
 
 // A read-only, live view of a project opened from its share link. It keeps
 // the document in memory only: nothing touches the viewer's own projects, and
@@ -286,17 +286,26 @@ export function SharedProject(props: { token: string }) {
     y: NODE_MIN_HEIGHT / 2,
   });
 
+  // Fit map and outline picks work in the room beside the open panels, as in
+  // the editor.
+  const viewInsets = () =>
+    panelInsets(
+      canvas.clientWidth,
+      outlineOpen(),
+      !!selectedNote() && !notesDismissed(),
+    );
   function fitMap() {
     const nodes = layout().nodes;
     if (!nodes.length) return;
+    const insets = viewInsets();
     const bounds = {
       minX: Math.min(...nodes.map((node) => node.x)),
       minY: Math.min(...nodes.map((node) => node.y)),
       maxX: Math.max(...nodes.map((node) => node.x + node.width)),
       maxY: Math.max(...nodes.map((node) => node.y + node.height)),
     };
-    const width = canvas.clientWidth - VIEW_INSETS.left - VIEW_INSETS.right;
-    const height = canvas.clientHeight - VIEW_INSETS.top - VIEW_INSETS.bottom;
+    const width = canvas.clientWidth - insets.left - insets.right;
+    const height = canvas.clientHeight - insets.top - insets.bottom;
     const next = Math.min(
       1,
       Math.max(
@@ -311,10 +320,10 @@ export function SharedProject(props: { token: string }) {
     moveView({
       zoom: next,
       left:
-        (VIEW_INSETS.left - VIEW_INSETS.right) / 2 -
+        (insets.left - insets.right) / 2 -
         next * ((bounds.minX + bounds.maxX) / 2 - origin.x),
       top:
-        (VIEW_INSETS.top - VIEW_INSETS.bottom) / 2 -
+        (insets.top - insets.bottom) / 2 -
         next * ((bounds.minY + bounds.maxY) / 2 - origin.y),
     });
   }
@@ -333,8 +342,11 @@ export function SharedProject(props: { token: string }) {
     const node = positioned().get(id);
     if (!node) return;
     const origin = viewOrigin();
+    const insets = viewInsets();
     moveView({
-      left: -zoom() * (node.x + node.width / 2 - origin.x),
+      left:
+        (insets.left - insets.right) / 2 -
+        zoom() * (node.x + node.width / 2 - origin.x),
       top: -zoom() * (node.y + node.height / 2 - origin.y),
     });
   }
@@ -460,13 +472,17 @@ export function SharedProject(props: { token: string }) {
           select(undefined);
       }}
       onKeyDown={(e) => {
+        // The outline closes on Esc from inside it, as in the editor.
         if (e.key === "Escape") {
-          if (outlineOpen()) setOutlineOpen(false);
-          else if (selectedNote() && !notesDismissed()) setNotesDismissed(true);
-          else select(undefined);
+          if (selectedNote() && !notesDismissed()) {
+            setNotesDismissed(true);
+            // The notes close button goes away while it holds focus.
+            if (e.target.closest('[aria-label="Notes"]'))
+              canvas.focus({ preventScroll: true });
+          } else select(undefined);
         }
       }}
-      class="map-canvas overflow-hidden w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
+      class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() ? "grabbing" : "grab" }}
     >
       <Show when={status() === "ready"}>
@@ -558,14 +574,18 @@ export function SharedProject(props: { token: string }) {
       <Show when={status() === "missing"}>
         {centered(() => (
           <>
-            <p class="font-display text-2xl font-semibold">
-              This link isn’t shared anymore
-            </p>
-            <p class="text-sm leading-6 text-stone-600">
-              The owner turned off sharing or removed the map. Ask them for a
-              new link.
-            </p>
-            <a href="/" class="map-control text-accent-deep">
+            {/* An alert, so the failure is announced like the loading text
+                it replaces. It lays out as the column around it does. */}
+            <div role="alert" class="flex flex-col items-center gap-3">
+              <p class="font-display text-2xl font-semibold">
+                This link isn’t shared anymore
+              </p>
+              <p class="text-sm leading-6 text-stone-600">
+                The owner turned off sharing or removed the map. Ask them for a
+                new link.
+              </p>
+            </div>
+            <a href="/" class="primary-button">
               Open Mindgrab
             </a>
           </>
@@ -574,17 +594,23 @@ export function SharedProject(props: { token: string }) {
       <Show when={status() === "error"}>
         {centered(() => (
           <>
-            <p class="font-display text-2xl font-semibold">
-              Couldn’t open this map
-            </p>
-            <p class="text-sm leading-6 text-stone-600">
-              Check your connection and try again.
-            </p>
+            <div role="alert" class="flex flex-col items-center gap-3">
+              <p class="font-display text-2xl font-semibold">
+                Couldn’t open this map
+              </p>
+              <p class="text-sm leading-6 text-stone-600">
+                Check your connection and try again.
+              </p>
+            </div>
             <button
               type="button"
-              class="map-control text-accent-deep"
+              class="primary-button"
               disabled={snapshot.isFetching}
-              onClick={refetch}
+              onClick={() => {
+                refetch();
+                // This button disables itself and then goes away.
+                canvas.focus({ preventScroll: true });
+              }}
             >
               Retry
             </button>
@@ -595,10 +621,15 @@ export function SharedProject(props: { token: string }) {
       <div class="pointer-events-none absolute top-3 right-3 left-3 z-30 flex items-start justify-between gap-2">
         <section
           data-toolbar
-          aria-label="Shared project"
-          class="map-toolbar pointer-events-auto flex min-w-0 items-center gap-1 cursor-default"
+          aria-label="Shared map"
+          class="map-toolbar pointer-events-auto flex min-h-11 min-w-0 items-center gap-1 cursor-default"
         >
-          <a href="/" class="shrink-0" aria-label="Mindgrab" title="Mindgrab">
+          <a
+            href="/"
+            class="shrink-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            aria-label="Mindgrab"
+            title="Mindgrab"
+          >
             <BrandMark class="mx-1 size-6" />
           </a>
           <Show when={status() === "ready"}>
@@ -622,7 +653,7 @@ export function SharedProject(props: { token: string }) {
               class="icon-button"
               aria-label="Outline"
               title="Outline"
-              aria-pressed={outlineOpen()}
+              aria-expanded={outlineOpen()}
               onClick={() => setOutlineOpen((open) => !open)}
             >
               <OutlineIcon />
@@ -632,14 +663,14 @@ export function SharedProject(props: { token: string }) {
         <a
           href="/"
           data-toolbar
-          class="map-toolbar map-control pointer-events-auto shrink-0 max-sm:hidden"
+          class="primary-button account-signin pointer-events-auto inline-flex shrink-0 items-center max-sm:hidden"
         >
           Make your own map
         </a>
       </div>
 
       <Show when={status() === "ready" && outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
           <Outline
             roots={forest()}
             text={(id) => view()?.text(id) ?? ""}
@@ -653,6 +684,7 @@ export function SharedProject(props: { token: string }) {
             }}
             onToggle={toggleCollapse}
             onEdit={centerOn}
+            shortcut={false}
             onClose={() => {
               setOutlineOpen(false);
               canvas.focus({ preventScroll: true });
@@ -679,7 +711,11 @@ export function SharedProject(props: { token: string }) {
                 type="button"
                 class="icon-button size-8!"
                 aria-label="Close notes"
-                onClick={() => setNotesDismissed(true)}
+                title="Close notes (Esc)"
+                onClick={() => {
+                  setNotesDismissed(true);
+                  canvas.focus({ preventScroll: true });
+                }}
               >
                 <CloseIcon class="size-4" />
               </button>
@@ -701,6 +737,7 @@ export function SharedProject(props: { token: string }) {
             type="button"
             class="icon-button"
             aria-label="Zoom out"
+            title="Zoom out"
             disabled={zoom() <= ZOOM_MIN}
             onClick={() => changeZoom(zoom() / 1.2)}
           >
@@ -708,8 +745,9 @@ export function SharedProject(props: { token: string }) {
           </button>
           <button
             type="button"
-            class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
+            class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
             aria-label="Zoom to 100%"
+            title="Zoom to 100%"
             onClick={() => changeZoom(1)}
           >
             {Math.round(zoom() * 100)}%
@@ -718,6 +756,7 @@ export function SharedProject(props: { token: string }) {
             type="button"
             class="icon-button"
             aria-label="Zoom in"
+            title="Zoom in"
             disabled={zoom() >= ZOOM_MAX}
             onClick={() => changeZoom(zoom() * 1.2)}
           >
@@ -728,6 +767,7 @@ export function SharedProject(props: { token: string }) {
             type="button"
             class="icon-button"
             aria-label="Fit map"
+            title="Fit map"
             disabled={!forest().length}
             onClick={fitMap}
           >

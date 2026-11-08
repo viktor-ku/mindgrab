@@ -54,7 +54,7 @@ test("yellow means a write is running", () => {
 test("red means a save failed and outranks everything else", () => {
   expect(dot(true, "error", { status: "saved" })).toEqual({
     tone: "error",
-    label: "Save failed",
+    label: "Couldn’t save",
   });
   expect(dot(true, "saving", failure)).toEqual({
     tone: "error",

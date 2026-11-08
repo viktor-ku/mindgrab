@@ -8,11 +8,12 @@ import {
   createQuery,
   useQueryClient,
 } from "@tanstack/solid-query";
-import { catalogKey } from "./query-client";
+import { catalogKey, QUICK_RETRIES, saveRetryDelay } from "./query-client";
 import {
   batch,
   createEffect,
   createMemo,
+  createRoot as createReactiveRoot,
   createSignal,
   For,
   on,
@@ -42,24 +43,31 @@ import {
   createProjectDocument,
   createRoot,
   createSibling,
+  DEFAULT_NODE_COLOR,
   deleteSubtree,
+  isPristineSeed,
   LIMITS,
   moveNode,
   ORIGIN,
   setNodeNote,
   renameProject,
+  setSavingPreferences,
   reorderNode,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
 import { createProjectView } from "./project-view";
-import { bindTextarea } from "./text-binding";
+import { bindTextarea, composing } from "./text-binding";
 import {
   ProjectRepository,
   accountNamespace,
   ANONYMOUS_NAMESPACE,
 } from "./project-repository";
-import type { ProjectHandle } from "./project-repository";
+import type {
+  CatalogEntry,
+  ProjectHandle,
+  RepositoryScope,
+} from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
 import { NODE_COLORS } from "./node-colors";
 import type { NodeColor } from "./node-colors";
@@ -77,7 +85,14 @@ import {
   writeProjectFile,
 } from "./project-import-export";
 import { closeOnEscape } from "./escape-key";
-import { ALT_LABEL, MOD_LABEL, ShortcutsDialog } from "./ShortcutsDialog";
+import { inOpenMenu, menuArrowKeys, transientLayer } from "./transient-layer";
+import {
+  ALT_LABEL,
+  DELETE_LABEL,
+  MOD_LABEL,
+  SHIFT_LABEL,
+  ShortcutsDialog,
+} from "./ShortcutsDialog";
 import { Outline } from "./Outline";
 import { NotesPanel } from "./NotesPanel";
 import {
@@ -124,7 +139,12 @@ import {
 import { AnalyticsConsent } from "./AnalyticsConsent";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
-import { claimAnonymousProjects, claimCandidates } from "./anonymous-claims";
+import {
+  claimAnonymousProjects,
+  claimCandidates,
+  flagLateEdits,
+  waitingToCopy,
+} from "./anonymous-claims";
 import { LoroApi, SyncError } from "./loro-api";
 import type {
   DropTarget,
@@ -139,6 +159,7 @@ import type { CloudStatus } from "./project-sync";
 import { createLocalSave } from "./local-save";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
+import { panelEdges, panelInsets } from "./view-insets";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -164,6 +185,11 @@ const ZOOM_MAX = 2.5;
 // back to this device's own projects.
 const CLOUD_CATALOG_TIMEOUT_MS = 10_000;
 const CLOUD_LOOKUP_KEY = ["latest-cloud-project"] as const;
+// How long a failed migration waits between the slow retries that follow
+// its quick ones.
+const MIGRATION_RETRY_INTERVAL_MS = 30_000;
+const newestFirst = (a: CatalogEntry, b: CatalogEntry) =>
+  b.createdAt.localeCompare(a.createdAt);
 // A device-wide input preference: what a plain scroll wheel does on the canvas.
 type WheelMode = "pan" | "zoom";
 const WHEEL_MODE_KEY = "mindgrab:wheel-mode";
@@ -200,10 +226,6 @@ function storeFlag(key: string, value: boolean) {
 
 const OUTLINE_KEY = "mindgrab:outline-open";
 
-// Screen space kept clear of floating toolbars and panels when fitting or
-// following nodes.
-const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
-
 function NodeEditor(props: {
   doc: ProjectDocument;
   id: string;
@@ -221,8 +243,23 @@ function NodeEditor(props: {
       writing: true,
     });
   const [value, setValue] = createSignal("");
+  // The doc changes under an open editor when the placeholder is adopted;
+  // the merged doc holds everything typed so far, so only the binding moves.
+  createEffect(
+    on(
+      () => props.doc,
+      (doc) => {
+        const { selectionStart, selectionEnd, selectionDirection } = input;
+        onCleanup(bindTextarea(input, doc, props.id, setValue));
+        input.setSelectionRange(
+          selectionStart,
+          selectionEnd,
+          selectionDirection,
+        );
+      },
+    ),
+  );
   onMount(() => {
-    onCleanup(bindTextarea(input, props.doc, props.id, setValue));
     const canvas = input.closest<HTMLElement>("[aria-label='Mind map canvas']");
     const scrollLeft = canvas?.scrollLeft ?? 0;
     const scrollTop = canvas?.scrollTop ?? 0;
@@ -378,10 +415,19 @@ export function Node(props: {
           fallback={
             <button
               type="button"
+              // The editor picks ideas with the arrow keys: as tab stops they
+              // would add a child at every Tab. Shared views only have Tab.
+              tabIndex={props.readOnly ? undefined : -1}
               aria-pressed={props.selected}
               aria-expanded={props.descendants ? !props.collapsed : undefined}
-              aria-keyshortcuts={props.descendants ? "Alt+G" : undefined}
-              class="min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer outline-none"
+              aria-keyshortcuts={
+                props.descendants && !props.readOnly ? "Alt+G" : undefined
+              }
+              class={`min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer ${
+                props.readOnly
+                  ? "rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
+                  : "outline-none"
+              }`}
             >
               {props.text || "New idea"}
             </button>
@@ -402,7 +448,11 @@ export function Node(props: {
             role="img"
             class="note-badge"
             aria-label="Has notes"
-            title={`Has notes · open them with ${ALT_LABEL}N`}
+            title={
+              props.readOnly
+                ? "Has notes"
+                : `Has notes · open them with ${ALT_LABEL}N`
+            }
           >
             <NoteIcon class="size-3.5" />
           </span>
@@ -410,9 +460,14 @@ export function Node(props: {
         <Show when={props.collapsed}>
           <button
             type="button"
-            class="rounded-md border border-current/15 bg-white/60 px-1.5 text-[10px] leading-4 font-semibold whitespace-nowrap cursor-pointer hover:bg-white/90 focus-visible:outline-2"
-            aria-label={`Expand ${props.descendants} hidden ${props.descendants === 1 ? "node" : "nodes"}`}
-            title={`Expand children (${ALT_LABEL}G)`}
+            tabIndex={props.readOnly ? undefined : -1}
+            class="rounded-md border border-current/15 bg-white/60 px-1.5 text-[10px] leading-4 font-semibold whitespace-nowrap cursor-pointer hover:bg-white/90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
+            aria-label={`Expand ${props.descendants} ${props.descendants === 1 ? "idea" : "ideas"}`}
+            title={
+              props.readOnly
+                ? "Expand children"
+                : `Expand children (${ALT_LABEL}G)`
+            }
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
@@ -473,59 +528,92 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       : ANONYMOUS_NAMESPACE,
   });
   const [workspace, setWorkspace] = createSignal(repository);
+  // While an account is signed in, this tab's one anonymous repository: it
+  // owns the maps made before sign-in until each has migrated.
+  const [anonymousRepo, setAnonymousRepo] = createSignal<ProjectRepository>();
+  // Which repository owns the open map; everything owner-sensitive follows it.
+  const [activeOwner, setActiveOwner] = createSignal(repository);
+  // A query whose key changes while it has no data suspends the route and
+  // detaches the canvas, which ends an edit in progress; the previous list
+  // stands in until the new one arrives.
+  const keepList = (previous: CatalogEntry[] | undefined) => previous ?? [];
   const catalog = createQuery(() => {
     const owner = workspace();
     return {
       queryKey: catalogKey(owner.names.catalog),
       queryFn: () => owner.list(),
+      placeholderData: keepList,
       structuralSharing: false,
     };
   });
-  const savedProjects = () => catalog.data ?? [];
-  const claims = createQuery(() => ({
-    queryKey: ["anonymous-claims", deployment, account().user?.id ?? null],
-    enabled: account().status === "authenticated",
-    queryFn: async () => {
-      const userId = account().user?.id;
-      if (!userId) return [];
-      const source = new ProjectRepository({
-        deployment,
-        namespace: ANONYMOUS_NAMESPACE,
-      });
-      try {
-        return await claimCandidates(source, userId);
-      } finally {
-        await source.close();
-      }
-    },
-  }));
-  const claimCount = () =>
-    account().status === "authenticated" ? (claims.data?.length ?? 0) : 0;
-  // "Not now" lasts until the account changes.
   // Nothing durable keeps this project: local saving is off and cloud saving
-  // is off or cannot run without an account.
+  // is off or cannot run without an account. An anonymous map kept open under
+  // an account never attaches to that account's cloud.
   const memoryOnly = () =>
     !view().saving().local &&
-    (!view().saving().cloud || account().status !== "authenticated");
-  const [claimDismissed, setClaimDismissed] = createSignal(false);
-  // Every account check emits a new state object; only a different account
-  // may bring the dismissed prompt back, so compare the id itself.
-  const accountId = createMemo(() => account().user?.id);
-  createEffect(on(accountId, () => setClaimDismissed(false)));
+    (!view().saving().cloud ||
+      account().status !== "authenticated" ||
+      activeOwner() !== workspace());
   let handleRepository = repository;
   let activeHandle: ProjectHandle | undefined;
   let stopCatalog: (() => void) | undefined;
+  let stopAnonymousCatalog: (() => void) | undefined;
   let cloud: CloudWorkspace | undefined;
-  let authNavigationPending = false;
+  const [authNavigationPending, setAuthNavigationPending] = createSignal(false);
   let disposed = false;
   let activation = 0;
-  let claimAbort: AbortController | undefined;
+  // The placeholder's version when it was made; any other version is an edit.
+  let draftVersion = "";
+  // Work that could not be saved when it left the screen, held with the
+  // repository it belongs to until a retry gets it stored.
   const parked = new Set<{
     repository: ProjectRepository;
-    handle: ProjectHandle;
+    save: () => Promise<void>;
   }>();
+  const saveAndClose = (handle: ProjectHandle) => async () => {
+    await handle.flush();
+    await handle.close();
+  };
+  // A draft keeps its own account: it is stored under the scope it was written
+  // in, never under whoever signs in next. A retired workspace refuses to open
+  // anything, so this goes through a repository of its own.
+  const saveDraft =
+    (scope: RepositoryScope, id: string, snapshot: Uint8Array) => async () => {
+      const owner = new ProjectRepository(scope);
+      try {
+        const handle = await owner.open(id, { remember: false });
+        try {
+          handle.doc.merge(snapshot, ORIGIN.import);
+          await handle.flush();
+          await handle.refreshMetadata();
+        } finally {
+          await handle.close();
+        }
+      } finally {
+        await owner.close();
+      }
+    };
   const [cloudStatus, setCloudStatus] = createSignal<CloudStatus>();
   const [recoveryPending, setRecoveryPending] = createSignal(false);
+  const owned = (owner: ProjectRepository) =>
+    owner === repository || owner === anonymousRepo();
+  const migrationKey = ["anonymous-migration", deployment] as const;
+  // The anonymous repository lives as long as the signed-in session. Its
+  // catalog channel brings other tabs' claim markers, which drive the
+  // candidates.
+  function keepAnonymous(source: ProjectRepository) {
+    stopAnonymousCatalog?.();
+    stopAnonymousCatalog = source.onCatalogChange(() => {
+      void queryClient.invalidateQueries({
+        queryKey: ["anonymous-claims", deployment],
+      });
+    });
+    setAnonymousRepo(source);
+  }
+  if (activeUserId)
+    keepAnonymous(
+      new ProjectRepository({ deployment, namespace: ANONYMOUS_NAMESPACE }),
+    );
 
   const initializeMutation = createMutation(() => ({
     mutationKey: ["workspace", "initialize"],
@@ -541,23 +629,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       identify(state.user);
     return accountMutation.mutateAsync(state);
   };
-  const claimMutation = createMutation(() => ({
-    mutationKey: ["workspace", "claim"],
-    mutationFn: performAddAnonymousProjects,
+  const swapMutation = createMutation(() => ({
+    mutationKey: ["workspace", "swap"],
+    mutationFn: performSwap,
   }));
-  const claiming = () => claimMutation.isPending;
-  const claimMessage = () =>
-    claimMutation.isError
-      ? "Could not finish adding anonymous projects. Your local work is retained; retry to continue."
-      : "";
-  const addAnonymousProjects = () => {
-    if (!claiming()) claimMutation.mutate();
-  };
+  const switchMutation = createMutation(() => ({
+    mutationKey: ["workspace", "switch"],
+    mutationFn: performSwitch,
+  }));
   const openMutation = createMutation(() => ({
     mutationKey: ["project", "open"],
     mutationFn: performOpenProject,
   }));
-  const openProject = (id: string) => openMutation.mutateAsync(id);
   const createMutationState = createMutation(() => ({
     mutationKey: ["project", "create"],
     mutationFn: performCreateNewProject,
@@ -627,7 +710,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       auth.state.status !== "authenticated" ||
       cloud ||
       disposed ||
-      authNavigationPending
+      authNavigationPending()
     )
       return;
     const owner = repository;
@@ -656,38 +739,113 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   function ephemeralDocument() {
-    return createProjectDocument(crypto.randomUUID(), generateProjectName([]), {
-      text: "New idea",
-    });
+    const draft = createProjectDocument(
+      crypto.randomUUID(),
+      generateProjectName([]),
+      { text: "New idea" },
+    );
+    draftVersion = draft.version();
+    return draft;
   }
 
-  async function activate(handle: ProjectHandle, owner = repository) {
+  // The one commit point for putting a map on screen. Nothing async runs
+  // between the `unless` check, the merge and setDoc, so what the user sees
+  // is never a moment behind what is saved. Returns whether it committed.
+  async function activate(
+    handle: ProjectHandle,
+    owner = repository,
+    {
+      keepView = false,
+      merge,
+      unless,
+      adopted = false,
+    }: {
+      // Keep selection, folds and viewport: the map on screen stays the same.
+      keepView?: boolean;
+      merge?: () => Uint8Array;
+      unless?: () => boolean;
+      adopted?: boolean;
+    } = {},
+  ): Promise<boolean> {
     const request = ++activation;
-    if (disposed || owner !== repository) {
+    if (disposed || !owned(owner)) {
       await handle.close();
-      return;
+      return false;
     }
     cloud?.detach();
     const previous = activeHandle;
+    const previousOwner = handleRepository;
+    // Set when this map is not going on screen after all. Checked before the
+    // project name is touched, so a map that is turned away interrupts nothing.
+    const declined = () => {
+      if (unless?.()) {
+        if (previous && previousOwner === repository) cloud?.activate(previous);
+        return handle.close().then(() => false);
+      }
+      // An edited placeholder is the user's map: it is kept, and the map that
+      // was about to open stays in the Load list. The adopted handle shares
+      // the placeholder's UUID, which ends the recursion.
+      if (
+        !adopted &&
+        !activeHandle &&
+        doc().version() !== draftVersion &&
+        handle.id !== doc().id
+      )
+        return handle.close().then(() => adoptDraft(repository));
+    };
+    const early = declined();
+    if (early) return early;
+    if (!keepView) finishProjectName();
+    let unsaved = false;
     try {
       if (previous && previous !== handle) await previous.flush();
     } catch (error) {
-      await handle.close();
-      if (owner === repository && previous) cloud?.activate(previous);
-      throw error;
+      // A swap carries the edits through the merge below, so the old handle
+      // is parked for recovery instead of giving up.
+      if (!keepView) {
+        await handle.close();
+        if (previous && previousOwner === repository) cloud?.activate(previous);
+        throw error;
+      }
+      unsaved = true;
     }
-    if (disposed || request !== activation || owner !== repository) {
+    if (composing()) await until(() => !composing());
+    if (disposed || request !== activation || !owned(owner)) {
       await handle.close();
-      return;
+      return false;
     }
+    // A name typed during the flush commits into the current map and counts
+    // as an edit.
+    if (!keepView) finishProjectName();
+    const late = declined();
+    if (late) return late;
+    if (merge) handle.doc.merge(merge(), ORIGIN.import);
+    // The session memo decides ownership of the new doc inside setDoc, so the
+    // handle must already be the active one.
     handleRepository = owner;
     activeHandle = handle;
-    resetProjectUi();
-    setDoc(handle.doc);
-    setStorageReady(true);
-    cloud?.activate(handle);
-    setSavingHandle(handle);
-    if (previous && previous !== handle) await previous.close();
+    batch(() => {
+      setActiveOwner(owner);
+      if (!keepView) resetProjectUi();
+      setDoc(handle.doc);
+      setStorageReady(true);
+      if (owner === repository) cloud?.activate(handle);
+      setSavingHandle(handle);
+    });
+    if (previous && previous !== handle) {
+      if (unsaved) {
+        parked.add({
+          repository: previousOwner,
+          save: saveAndClose(previous),
+        });
+        setRecoveryPending(true);
+      } else await previous.close();
+    }
+    if (adopted) {
+      await handle.flush();
+      await handle.refreshMetadata();
+    }
+    if (keepView) return true;
     try {
       const preference = await queryClient.fetchQuery({
         queryKey: ["project-view", owner.names.catalog, handle.id],
@@ -695,7 +853,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           (await owner.preference(`project/${handle.id}/view`)) ?? null,
         gcTime: 0,
       });
-      if (request !== activation || disposed || owner !== repository) return;
+      if (request !== activation || disposed || !owned(owner)) return true;
       if (preference && typeof preference === "object") {
         const view = preference as ViewportPreference;
         setLayoutAnchor(view.anchor);
@@ -710,6 +868,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch {
       // A missing local viewport preference does not prevent opening content.
     }
+    return true;
+  }
+
+  // Persists the placeholder under its own UUID and keeps it on screen. The
+  // snapshot is taken at the commit point, so keystrokes typed while the
+  // project opened are included.
+  async function adoptDraft(owner: ProjectRepository, remember = true) {
+    const current = doc();
+    const handle = await owner.open(current.id, { remember });
+    return activate(handle, owner, {
+      adopted: true,
+      keepView: true,
+      merge: () => current.snapshot(),
+      // A stored map that arrived meanwhile has already replaced the draft.
+      unless: () => doc() !== current,
+    });
   }
 
   // A new map opens with its first idea selected, ready for typing or Tab.
@@ -718,15 +892,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (root) setSelectedId(root);
   }
 
-  // Without a remembered project, open an existing one before seeding a map:
-  // this device's newest, else the account's most recently changed cloud map.
   // A new browser has no local projects for an account, so its cloud catalog
-  // decides; otherwise every sign-in on a new device added an empty map.
-  async function openExisting(target: ProjectRepository) {
-    const [local] = (await target.list()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
-    );
-    if (local) return target.open(local.id);
+  // decides which map opens; otherwise every sign-in on a new device added an
+  // empty map. Null means the account has no cloud maps; undefined, that the
+  // lookup could not run.
+  async function openLatestCloud(target: ProjectRepository) {
     const ownerId = activeUserId;
     if (
       target !== repository ||
@@ -738,7 +908,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     const deadline = AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS);
     try {
-      const handle = await queryClient.fetchQuery({
+      return await queryClient.fetchQuery({
         queryKey: [...CLOUD_LOOKUP_KEY, target.names.catalog],
         queryFn: ({ signal }) =>
           openLatestCloudProject(
@@ -753,49 +923,161 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         retryDelay: (attempt) => 500 * 2 ** attempt,
         gcTime: 0,
       });
-      return handle ?? undefined;
     } catch {
-      // Unavailable: a first map is still better than no editor.
       return;
     }
+  }
+
+  // The first of these maps that can be read. One damaged map must not stand
+  // between the user and the rest; only when none opens does the error surface.
+  async function openFirstReadable(owner: ProjectRepository, ids: string[]) {
+    let failure: unknown;
+    for (const id of ids) {
+      if (!owned(owner) || disposed) return;
+      try {
+        return await owner.open(id);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (failure && owned(owner) && !disposed) throw failure;
+  }
+
+  // The map that opens first replaces the whole screen, so it waits while the
+  // user is busy on the placeholder. An edit ends the wait: the placeholder is
+  // then the map, whether or not the user has left the editor.
+  function untilFree() {
+    const placeholder = untrack(doc);
+    return until(() => {
+      historyRevision();
+      return (
+        doc() !== placeholder || doc().version() !== draftVersion || !occupied()
+      );
+    });
+  }
+  // Save or another action may put the placeholder in storage while the first
+  // map is still opening; that map then stays where it is.
+  const adopted = () => !!activeHandle;
+  async function arrive(handle: ProjectHandle, owner: ProjectRepository) {
+    await untilFree();
+    return activate(handle, owner, { unless: adopted });
+  }
+
+  // Opens one of this browser's anonymous maps under the account: the
+  // remembered one when it is among them, else the first. The migration
+  // swaps it to its account copy later.
+  async function openAnonymous(
+    source: ProjectRepository,
+    entries: CatalogEntry[],
+  ) {
+    const remembered = await source.latestProject();
+    const handle = await openFirstReadable(
+      source,
+      entries
+        .map((entry) => entry.id)
+        .sort((a, b) => +(b === remembered) - +(a === remembered)),
+    ).catch(() => undefined);
+    if (!handle) return false;
+    if (!owned(source) || disposed) {
+      await handle.close();
+      return false;
+    }
+    setLookupArmed(true);
+    await arrive(handle, source);
+    return true;
   }
 
   async function openLatestOrCreate(target = repository) {
     const latest = await target.latestProject();
     if (target !== repository || disposed) return;
-    if (latest) {
-      await activate(await target.open(latest), target);
-      return;
-    }
-    const existing = await openExisting(target);
-    if (existing) {
-      await activate(existing, target);
-      return;
-    }
+    const local = (await target.list()).sort(newestFirst);
     if (target !== repository || disposed) return;
-    await activate(
-      await target.create({
-        name: generateProjectName([]),
-        root: { text: "New idea" },
-      }),
-      target,
-    );
-    if (target === repository && !disposed) {
-      selectFirstIdea();
-      track("project_created", { trigger: "first_open" });
+    let unreadable = false;
+    const stored = [
+      ...new Set([...(latest ? [latest] : []), ...local.map(({ id }) => id)]),
+    ];
+    if (stored.length) {
+      // None readable: the cases below still give the user a map to work in.
+      const handle = await openFirstReadable(target, stored).catch(
+        () => undefined,
+      );
+      if (handle) {
+        await arrive(handle, target);
+        return;
+      }
+      if (target !== repository || disposed) return;
+      unreadable = true;
     }
+    const source = anonymousRepo();
+    const userId = activeUserId;
+    if (source && userId) {
+      // Pending anonymous work opens before anything is created: a reload
+      // after sign-in lands here while the copy into the account is still
+      // hidden.
+      const candidates = await claimCandidates(source, userId);
+      if (target !== repository || disposed || activeHandle) return;
+      if (
+        await openAnonymous(
+          source,
+          candidates.filter((entry) => entry.claim?.phase !== "complete"),
+        )
+      )
+        return;
+      const existing = await openLatestCloud(target);
+      // A placeholder adopted during the lookup is the user's map now.
+      if (target !== repository || disposed || activeHandle) {
+        await existing?.close();
+        return;
+      }
+      if (existing) {
+        await arrive(existing, target);
+        return;
+      }
+      // An untouched anonymous map is a better first map than another empty
+      // one. It becomes the account's first if the cloud has none, and can
+      // still be swapped for the latest if the lookup got no answer.
+      if (
+        await openAnonymous(
+          source,
+          (await source.list()).filter(
+            (entry) => entry.saving?.local !== false,
+          ),
+        )
+      )
+        return;
+      if (target !== repository || disposed || activeHandle) return;
+    }
+    await untilFree();
+    if (activeHandle) return;
+    // The placeholder is the first map, so nothing can race it into a second.
+    const untouched = doc().version() === draftVersion;
+    // Stored maps that did not open may only be slow, so an empty stand-in
+    // does not take over as the map the next visit opens.
+    await adoptDraft(target, !(unreadable && untouched));
+    if (target !== repository || disposed) return;
+    if (untouched && !occupied()) {
+      focusMap();
+      selectFirstIdea();
+    }
+    track("project_created", { trigger: "first_open" });
   }
 
   async function performInitializeWorkspace() {
     await auth.hydrate();
     if (disposed) return;
-    if (auth.state.user?.id !== activeUserId) await accountChanged(auth.state);
-    else {
-      setAccount(auth.state);
-      watchCatalog(repository);
-      await openLatestOrCreate(repository);
+    try {
+      if (auth.state.user?.id !== activeUserId)
+        await accountChanged(auth.state);
+      else {
+        setAccount(auth.state);
+        watchCatalog(repository);
+        await openLatestOrCreate(repository);
+      }
+    } finally {
+      // After the first open, so a sign-in finds the map it has to keep; but
+      // a map that cannot open must not stop the session check.
+      if (!disposed) auth.start();
     }
-    if (!disposed) auth.start();
   }
 
   function watchCatalog(owner: ProjectRepository) {
@@ -811,27 +1093,48 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   async function retireWorkspace(
     owner: ProjectRepository,
-    handle?: ProjectHandle,
+    save?: () => Promise<void>,
   ) {
     owner.detach();
-    if (handle) {
+    if (save)
       try {
-        await handle.flush();
+        await save();
       } catch {
-        parked.add({ repository: owner, handle });
+        parked.add({ repository: owner, save });
         if (!disposed) setRecoveryPending(true);
         return;
       }
-      await handle.close();
-    }
     await owner.close();
   }
 
-  function refreshClaims(owner = repository) {
-    if (owner !== repository || disposed) return Promise.resolve();
+  function refreshClaims() {
+    if (disposed) return Promise.resolve();
     return queryClient.invalidateQueries({
       queryKey: ["anonymous-claims", deployment],
     });
+  }
+
+  // Signing in from an untouched map opens the account's own latest map
+  // instead of copying the seed: this device's newest, else the cloud's,
+  // looked up in the background. Local state is read before discovery can
+  // fill the catalog with imports, which would hide the most recent map.
+  async function settleSignIn(target: ProjectRepository) {
+    if (!openPristine()) return;
+    const localLatest = await target.latestProject();
+    const local = (await target.list()).sort(newestFirst);
+    if (target !== repository || disposed || !openPristine()) return;
+    const ids = [
+      ...new Set([
+        ...(localLatest ? [localLatest] : []),
+        ...local.map(({ id }) => id),
+      ]),
+    ];
+    if (!ids.length) {
+      setLookupArmed(true);
+      return;
+    }
+    // The commit waits for a pause in typing; cloud discovery need not.
+    if (!switchMutation.isPending) switchMutation.mutate(ids);
   }
 
   async function performAccountChanged(state: SessionState) {
@@ -841,8 +1144,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (state.status !== "authenticated" || nextUserId !== activeUserId) {
       cloud?.destroy();
       cloud = undefined;
-      claimAbort?.abort();
-      claimAbort = undefined;
       setCloudStatus(
         state.status === "expired"
           ? { status: "auth", message: state.message ?? "Sign in again." }
@@ -855,14 +1156,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       return;
     }
     activation++;
-    // Ends a new browser's cloud lookup when its account leaves.
+    // Ends a new browser's cloud lookup and a running migration when their
+    // account leaves; a key change alone would not stop them.
     void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
+    void queryClient.cancelQueries({ queryKey: migrationKey });
     saveView.clear();
     stopCatalog?.();
-    finishWriting();
-    finishProjectName();
     const previousRepository = repository;
     const previousHandle = activeHandle;
+    const previousOwner = handleRepository;
+    const previousAnonymous = anonymousRepo();
     activeUserId = nextUserId;
     const nextRepository = new ProjectRepository({
       deployment,
@@ -878,69 +1181,172 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     });
     repository = nextRepository;
     setWorkspace(nextRepository);
+    setStorageMessage("");
+    setLookupNull(false);
+    setLookupArmed(false);
+    if (
+      nextUserId &&
+      previousHandle &&
+      previousOwner.scope.namespace === ANONYMOUS_NAMESPACE
+    ) {
+      // Signing in keeps the map the user is looking at: it stays open and
+      // saving locally while its copy into the account is made behind the
+      // scenes, and the swap to that copy waits for a pause in typing.
+      if (previousRepository !== previousOwner)
+        void retireWorkspace(previousRepository);
+      keepAnonymous(previousOwner);
+      watchCatalog(nextRepository);
+      await settleSignIn(nextRepository);
+      if (repository === nextRepository && !disposed) {
+        startCloud();
+        void refreshClaims();
+      }
+      return;
+    }
+    finishWriting();
+    finishProjectName();
     handleRepository = nextRepository;
     activeHandle = undefined;
+    setActiveOwner(nextRepository);
     setSavingHandle(undefined);
-    resetProjectUi();
-    setDoc(ephemeralDocument());
+    // An edited placeholder is the user's map. Signing in carries an anonymous
+    // one into the account; any other change of account leaves it behind.
+    const edited = !previousHandle && doc().version() !== draftVersion;
+    const followsSignIn =
+      edited &&
+      !!nextUserId &&
+      previousRepository.scope.namespace === ANONYMOUS_NAMESPACE;
+    const leftBehind =
+      edited && !followsSignIn
+        ? saveDraft(previousRepository.scope, doc().id, doc().snapshot())
+        : undefined;
+    if (!followsSignIn) {
+      resetProjectUi();
+      setDoc(ephemeralDocument());
+    }
     setStorageReady(false);
-    setStorageMessage("");
-    claimMutation.reset();
+    stopAnonymousCatalog?.();
+    stopAnonymousCatalog = undefined;
+    setAnonymousRepo(undefined);
+    const saveOn = (owner: ProjectRepository) =>
+      previousHandle && previousOwner === owner
+        ? saveAndClose(previousHandle)
+        : undefined;
+    void retireWorkspace(
+      previousRepository,
+      saveOn(previousRepository) ?? leftBehind,
+    );
+    if (previousAnonymous && previousAnonymous !== previousRepository)
+      void retireWorkspace(previousAnonymous, saveOn(previousAnonymous));
+    if (nextUserId)
+      keepAnonymous(
+        new ProjectRepository({ deployment, namespace: ANONYMOUS_NAMESPACE }),
+      );
     watchCatalog(nextRepository);
-    void retireWorkspace(previousRepository, previousHandle);
     try {
       await openLatestOrCreate(nextRepository);
     } catch {
       if (repository === nextRepository && !disposed)
         setStorageMessage(
-          "Could not open this account’s local projects. Retry local saving.",
+          "Could not open this account’s local maps. Retry local saving.",
         );
     }
     if (repository === nextRepository && !disposed) {
       startCloud();
-      void refreshClaims(nextRepository);
+      void refreshClaims();
     }
   }
 
-  async function performAddAnonymousProjects() {
-    if (auth.state.status !== "authenticated" || !activeUserId) return;
-    const owner = repository;
-    const userId = activeUserId;
-    const abort = new AbortController();
-    claimAbort = abort;
-    const source = new ProjectRepository({
-      deployment,
-      namespace: ANONYMOUS_NAMESPACE,
-    });
-    try {
-      const ids = await claimAnonymousProjects(
-        source,
-        owner,
-        userId,
-        abort.signal,
-        new LoroApi(undefined, undefined, userId, queryClient),
-      );
-      if (owner !== repository || disposed || abort.signal.aborted) return;
-      track("anonymous_maps_claimed", { count: ids.length });
-      showNotice({
-        message: `Added ${ids.length} ${ids.length === 1 ? "map" : "maps"} to your account. Cloud saving continues automatically.`,
+  function until(ready: () => boolean) {
+    return new Promise<void>((resolve) => {
+      createReactiveRoot((dispose) => {
+        createEffect(() => {
+          if (!ready()) return;
+          dispose();
+          resolve();
+        });
       });
-      await refreshClaims(owner);
-      cloud?.retry();
-      if (ids[0]) await openProject(ids[0]);
-    } catch (error) {
-      if (owner !== repository || disposed || abort.signal.aborted) return;
-      await refreshClaims(owner);
-      if (error instanceof SyncError && error.kind === "auth") {
-        auth.expire();
-        void auth.check();
+    });
+  }
+  // The swap waits for a pause in typing rather than interrupting the user.
+  const typing = () => writing() || projectNameDraft() !== undefined;
+  const untilIdle = () => until(() => !typing());
+  // Opening another map replaces the whole screen, so it also waits for the
+  // search or panel the user is in.
+  const occupied = () =>
+    typing() ||
+    fieldFocused() ||
+    searchOpen() ||
+    showLoad() ||
+    overlayOpen() ||
+    composing();
+
+  // Moves the screen from the anonymous map to its account copy without the
+  // user noticing: between two keystrokes, keeping selection and viewport.
+  // Edits made since the copy travel with the merge.
+  async function performSwap({
+    sourceId,
+    targetId,
+  }: {
+    sourceId: string;
+    targetId: string;
+  }) {
+    const source = anonymousRepo();
+    const owner = repository;
+    const anonymousHandle = activeHandle;
+    if (
+      !source ||
+      !anonymousHandle ||
+      anonymousHandle.id !== sourceId ||
+      handleRepository !== source
+    )
+      return;
+    // A sign-out being saved must not find the screen changed under it.
+    const unchanged = () =>
+      !disposed &&
+      !authNavigationPending() &&
+      repository === owner &&
+      activeHandle === anonymousHandle &&
+      handleRepository === source;
+    while (unchanged()) {
+      await untilIdle();
+      if (!unchanged()) return;
+      const target = await owner.open(targetId);
+      if (
+        await activate(target, owner, {
+          keepView: true,
+          merge: () => anonymousHandle.doc.snapshot(),
+          unless: () => authNavigationPending() || typing(),
+        })
+      )
+        return;
+    }
+  }
+
+  // Opens the account's latest map in place of an untouched anonymous one,
+  // between two keystrokes rather than never: a refusal while the user is
+  // typing is retried at the next pause, as the swap does.
+  async function performSwitch(ids: string[]) {
+    const owner = repository;
+    const source = anonymousRepo();
+    const seed = activeHandle;
+    const unchanged = () =>
+      !disposed &&
+      repository === owner &&
+      activeHandle === seed &&
+      handleRepository === source &&
+      openPristine();
+    while (unchanged()) {
+      await until(() => !occupied());
+      if (!unchanged()) return;
+      const handle = await openFirstReadable(owner, ids).catch(() => undefined);
+      // Nothing readable here: the seed stays, and only the cloud can decide.
+      if (!handle) {
+        setLookupArmed(true);
+        return;
       }
-      throw error;
-    } finally {
-      await source.close();
-      if (claimAbort === abort) {
-        claimAbort = undefined;
-      }
+      // activate closes the handle itself when it refuses.
+      if (await activate(handle, owner, { unless: pristineUnless })) return;
     }
   }
 
@@ -951,6 +1357,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Read synchronously, even inside a batch, to tie notices to history.
   let historyCount = 0;
   let editorSelection: TextSelection | undefined;
+  // Whether a stored map is on screen. Until then the canvas shows a
+  // placeholder that is a real draft: its first edit makes it the map.
   const [storageReady, setStorageReady] = createSignal(false);
   const [savingHandle, setSavingHandle] = createSignal<ProjectHandle>();
   const localSave = createLocalSave(savingHandle);
@@ -975,7 +1383,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const saveProblems = () =>
     [
       localSave.message() &&
-        `${localSave.message()} Export a copy to keep your changes.`,
+        `${localSave.message()} Export a backup to keep your changes.`,
       cloudProblem(),
       recoveryPending() &&
         "Edits from the previous account could not be saved. They remain in memory; retry before leaving.",
@@ -1054,6 +1462,274 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const view = () => session().view;
   const forest = () => view().forest();
 
+  // The map on screen while it is still the seed every map starts from. Node
+  // edits change no catalog entry, so this memo on the live doc, not a catalog
+  // event, is what re-evaluates the migration candidates.
+  const openPristine = createMemo(() => {
+    const source = anonymousRepo();
+    if (!source || activeOwner() !== source) return false;
+    const roots = forest();
+    const [root] = roots;
+    if (roots.length !== 1 || !root || root.next?.length) return false;
+    return isPristineSeed(
+      [
+        {
+          id: root.id,
+          text: view().text(root.id),
+          note: view().note(root.id),
+          color: root.color ?? DEFAULT_NODE_COLOR,
+          ...(root.position && { position: root.position }),
+          children: [],
+        },
+      ],
+      view().name(),
+    );
+  });
+  // Set once the cloud lookup has said the account has no maps at all: the
+  // seed then migrates to become its first one.
+  const [lookupNull, setLookupNull] = createSignal(false);
+  // Set when the account has no local maps, so only the cloud can decide.
+  const [lookupArmed, setLookupArmed] = createSignal(false);
+  const pristineUnless = () => !openPristine() || occupied();
+  // The open map, when it is one of the anonymous maps.
+  const openId = createMemo(() => {
+    const source = anonymousRepo();
+    return source && activeOwner() === source
+      ? (savingHandle()?.id ?? null)
+      : null;
+  });
+  const openInclude = () => !openPristine() || lookupNull();
+  // The waiting maps are local, so listing them never depends on the account
+  // check getting through; only copying them does.
+  const claims = createQuery(() => {
+    const userId = account().user?.id ?? activeUserId ?? null;
+    const source = anonymousRepo();
+    const id = openId();
+    const include = openInclude();
+    return {
+      queryKey: ["anonymous-claims", deployment, userId, id, include],
+      enabled: !!userId && !!source,
+      placeholderData: keepList,
+      queryFn: () =>
+        userId && source
+          ? claimCandidates(source, userId, id ? { open: { id, include } } : {})
+          : [],
+    };
+  });
+  createQuery(() => {
+    const userId = account().user?.id;
+    const source = anonymousRepo();
+    return {
+      queryKey: ["anonymous-late-edits", deployment, userId ?? null],
+      enabled: account().status === "authenticated" && !!userId && !!source,
+      staleTime: Number.POSITIVE_INFINITY,
+      queryFn: () => (userId && source ? flagLateEdits(source, userId) : false),
+    };
+  });
+  const candidateCount = () => claims.data?.filter(waitingToCopy).length ?? 0;
+  // Memory-only anonymous maps never migrate, but they stay reachable: leaving
+  // one for another map must not strand it.
+  const anonymousInMemory = createQuery(() => {
+    const source = anonymousRepo();
+    return {
+      queryKey: ["anonymous-claims", deployment, "in-memory"],
+      enabled: !!source,
+      placeholderData: keepList,
+      queryFn: async () =>
+        (await source?.list())?.filter(
+          (entry) => entry.saving?.local === false,
+        ) ?? [],
+    };
+  });
+  // While signed in, Load also lists the maps still waiting to migrate.
+  const savedProjects = createMemo(() => {
+    const own = catalog.data ?? [];
+    const waiting = [
+      ...(claims.data ?? []).filter(
+        (entry) => entry.claim?.phase !== "complete",
+      ),
+      ...(anonymousInMemory.data ?? []),
+    ].filter((entry) => !own.some((project) => project.id === entry.id));
+    return waiting.length ? [...own, ...waiting] : own;
+  });
+  // Copies every anonymous map into the account, silently. The open map's
+  // claim pauses before completing so this tab can swap to the copy; a
+  // run repeats until it claims nothing, so a candidate that appeared mid-run
+  // is not left for the next trigger.
+  const migration = createQuery(() => {
+    const userId = account().user?.id;
+    const source = anonymousRepo();
+    const destination = workspace();
+    return {
+      queryKey: [...migrationKey, userId ?? null],
+      enabled:
+        account().status === "authenticated" &&
+        !!source &&
+        !authNavigationPending() &&
+        candidateCount() > 0,
+      queryFn: async ({ signal }) => {
+        if (!userId || !source) return 0;
+        const api = new LoroApi(undefined, undefined, userId, queryClient);
+        let total = 0;
+        for (;;) {
+          const open = untrack(() => {
+            const id = openId();
+            return id ? { id, include: openInclude() } : undefined;
+          });
+          const ids = await claimAnonymousProjects(
+            source,
+            destination,
+            userId,
+            signal,
+            api,
+            open
+              ? {
+                  open: {
+                    ...open,
+                    beforeComplete: (sourceId, targetId) =>
+                      swapMutation.mutateAsync({ sourceId, targetId }),
+                  },
+                }
+              : {},
+          );
+          total += ids.length;
+          if (!ids.length) break;
+        }
+        return total;
+      },
+      // Quick retries, then the slow poll and focus refetch below take over.
+      retry: (count, error) =>
+        count < QUICK_RETRIES &&
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
+      refetchInterval: (state) =>
+        state.state.status === "error" ? MIGRATION_RETRY_INTERVAL_MS : false,
+      refetchOnWindowFocus: (state) => state.state.status === "error",
+      refetchOnReconnect: true,
+      gcTime: 0,
+    };
+  });
+  // Candidates that appear later (another tab, an edit to the seed) start a
+  // new run; a copy in progress is never cut short for them.
+  createEffect(
+    on(
+      () => claims.data,
+      (entries) => {
+        if (!entries?.some(waitingToCopy)) return;
+        void queryClient.invalidateQueries(
+          { queryKey: migrationKey },
+          { cancelRefetch: false },
+        );
+      },
+      { defer: true },
+    ),
+  );
+  // A tab that did not run the claim (it lost the lock, or signed in through
+  // another tab) swaps once the marker says its open map is done.
+  createEffect(
+    on(
+      () => [claims.data, authNavigationPending()] as const,
+      ([entries, pending]) => {
+        // A sign-out being saved leaves the screen alone; the swap follows
+        // once that is abandoned.
+        if (pending) return;
+        const source = anonymousRepo();
+        const userId = account().user?.id;
+        const done = entries?.find(
+          (entry) =>
+            entry.id === activeHandle?.id &&
+            handleRepository === source &&
+            entry.claim?.phase === "complete" &&
+            entry.claim.ownerId === userId,
+        );
+        const targetId = done?.claim?.targetId;
+        if (done && targetId && !swapMutation.isPending)
+          swapMutation.mutate({ sourceId: done.id, targetId });
+      },
+    ),
+  );
+  createEffect(
+    on(
+      () => migration.dataUpdatedAt,
+      () => {
+        const total = migration.data;
+        if (!total) return;
+        track("anonymous_maps_claimed", { count: total });
+        void refreshClaims();
+        cloud?.retry();
+      },
+      { defer: true },
+    ),
+  );
+  createEffect(
+    on(
+      () => migration.errorUpdatedAt,
+      () => {
+        const error = migration.error;
+        if (!error) return;
+        void refreshClaims();
+        // The maps that did copy still have to sync.
+        cloud?.retry();
+        if (error instanceof SyncError && error.kind === "auth") {
+          auth.expire();
+          void auth.check();
+        }
+      },
+      { defer: true },
+    ),
+  );
+  // A new browser's cloud lookup, retried on reconnect: the account's most
+  // recently changed map replaces the untouched seed, and a definite "none"
+  // lets the seed become the account's first map.
+  const latestLookup = createQuery(() => {
+    const owner = workspace();
+    const userId = account().user?.id;
+    const source = anonymousRepo();
+    return {
+      queryKey: [...CLOUD_LOOKUP_KEY, owner.names.catalog, userId ?? null],
+      enabled:
+        account().status === "authenticated" &&
+        !!userId &&
+        !!source &&
+        lookupArmed() &&
+        activeOwner() === source &&
+        openPristine() &&
+        !lookupNull(),
+      queryFn: async ({ signal }) => {
+        if (!userId) return null;
+        const handle = await openLatestCloudProject(
+          owner,
+          new LoroApi(undefined, undefined, userId, queryClient),
+          AbortSignal.any([
+            signal,
+            AbortSignal.timeout(CLOUD_CATALOG_TIMEOUT_MS),
+          ]),
+        );
+        if (!handle) return null;
+        await handle.close();
+        return { id: handle.id };
+      },
+      networkMode: "online" as const,
+      retry: (_count, error) =>
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
+      refetchOnReconnect: true,
+      gcTime: 0,
+    };
+  });
+  createEffect(
+    on(
+      () => latestLookup.dataUpdatedAt,
+      () => {
+        const result = latestLookup.data;
+        if (result === undefined) return;
+        if (result === null) setLookupNull(true);
+        else if (!switchMutation.isPending) switchMutation.mutate([result.id]);
+      },
+      { defer: true },
+    ),
+  );
+
   // Each command is its own undo step, never merged with typing around it.
   function command<T>(action: (doc: ProjectDocument) => T): T {
     const { doc, undo } = session();
@@ -1090,6 +1766,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [showBackup, setShowBackup] = createSignal(false);
   const [showPreferences, setShowPreferences] = createSignal(false);
   const [showShare, setShowShare] = createSignal(false);
+  // Share sends people to the preferences to turn cloud saving on, and takes
+  // them back once it is. An effect, not the dialog's onClose, which fires
+  // twice per close. Leaving the preferences for another task clears the flag.
+  let returnToShare = false;
+  createEffect(
+    on(
+      showPreferences,
+      (open) => {
+        if (open || !returnToShare) return;
+        returnToShare = false;
+        if (view().saving().cloud) setShowShare(true);
+      },
+      { defer: true },
+    ),
+  );
   const [menuOpen, setMenuOpen] = createSignal(false);
   // Phones get one button: everything else lives in the panel it opens.
   const phoneQuery = window.matchMedia("(max-width: 639px)");
@@ -1115,8 +1806,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     value: import("./project-document").SavingPreferences,
   ) {
     const handle = activeHandle;
-    const owner = repository;
-    if (!handle) return;
+    const owner = handleRepository;
+    // On the placeholder a switch is an edit like any other: the placeholder
+    // becomes the map, and the map that was opening stays in the list, its
+    // own switches untouched.
+    if (!handle) {
+      setSavingPreferences(doc(), value);
+      return;
+    }
     try {
       await owner.updateSaving(handle, value);
       track("saving_changed", { local: value.local, cloud: value.cloud });
@@ -1488,6 +2185,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
     });
     fitMap();
+    canvas.focus({ preventScroll: true });
   }
   function exitFocus() {
     if (notice()?.action?.label === "Leave focus") setNotice(undefined);
@@ -1602,11 +2300,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }),
   );
 
+  const projectMenuButton = () =>
+    document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Project menu"]',
+    );
   function closeProjectMenu() {
     setMenuOpen(false);
-    document
-      .querySelector<HTMLButtonElement>('button[aria-label="Project menu"]')
-      ?.focus();
+    projectMenuButton()?.focus({ preventScroll: true });
   }
   const [mapFilter, setMapFilter] = createSignal("");
   createEffect(on(showLoad, () => setMapFilter(""), { defer: true }));
@@ -1644,25 +2344,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       { defer: true },
     ),
   );
-
-  function menuArrowKeys(e: KeyboardEvent & { currentTarget: HTMLElement }) {
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
-    e.preventDefault();
-    const items = Array.from(
-      e.currentTarget.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitem"]:not(:disabled)',
-      ),
-    );
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next =
-      e.key === "Home"
-        ? 0
-        : e.key === "End"
-          ? items.length - 1
-          : (current + (e.key === "ArrowDown" ? 1 : -1) + items.length) %
-            items.length;
-    items[next]?.focus();
-  }
 
   function resetPlacement(id: string) {
     const placed = placedIds(id);
@@ -1708,11 +2389,31 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
   const [notesOpen, setNotesOpen] = createSignal(false);
-  // A panel that closes while it holds focus hands focus back to the map, so
-  // keyboard users never land on the page body.
+  // A field can be in use before anything is typed into it.
+  const [fieldFocused, setFieldFocused] = createSignal(false);
+  const isTextField = (target: EventTarget) =>
+    target instanceof Element &&
+    target.matches(
+      'textarea[aria-label="Idea notes"], input[aria-label="Project name"]',
+    );
+  // Chrome that closes while it holds focus (a panel, a menu item, a banner
+  // button, a breadcrumb) hands focus back to the map, so keyboard users never
+  // land on the page body.
   createEffect(
     on(
-      () => [outlineOpen(), notesOpen(), menuOpen(), overlayOpen()],
+      () => [
+        outlineOpen(),
+        notesOpen(),
+        menuOpen(),
+        overlayOpen(),
+        !!contextMenu(),
+        colorOpen(),
+        !!returnView(),
+        focusId(),
+        consentOpen(),
+        // "Check account again" goes away once the check succeeds.
+        account().status === "unavailable" || account().status === "expired",
+      ],
       () => {
         if (!document.activeElement || document.activeElement === document.body)
           canvas?.focus({ preventScroll: true });
@@ -1720,6 +2421,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       { defer: true },
     ),
   );
+  // A mouse click on a button that only changes the view hands the keyboard
+  // back to the map. Pressed from the keyboard (detail 0) it keeps focus, so
+  // Enter can zoom again.
+  const backToCanvas = (e: MouseEvent) => {
+    if (e.detail > 0) canvas.focus({ preventScroll: true });
+  };
   // Opening notes from the keyboard moves focus into them; closing returns it.
   function toggleNotes(open = !notesOpen()) {
     finishWriting();
@@ -1735,13 +2442,74 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else canvas.focus({ preventScroll: true });
   }
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
-  const viewInsets = () => {
-    const wide = canvasSize().width >= 640;
+  const viewInsets = () =>
+    panelInsets(canvasSize().width, outlineOpen(), notesOpen());
+  // A panel that opens over the selected idea moves the map aside, as
+  // selecting that idea with the panel already open would.
+  createEffect(
+    on(
+      [outlineOpen, notesOpen],
+      (open, before) => {
+        const id = selectedId();
+        const opened = open.some((now, index) => now && !before?.[index]);
+        if (id && opened && !isPhone()) keepInView(id);
+      },
+      { defer: true },
+    ),
+  );
+  // The storage island shows in the corner where the outline starts, so the
+  // outline starts 8px under it: the island's top is at 64px.
+  const [storageIslandHeight, setStorageIslandHeight] = createSignal(0);
+  const outlineTop = () =>
+    storageIslandHeight() && !isPhone()
+      ? { top: `${64 + storageIslandHeight() + 8}px` }
+      : undefined;
+  // Centred chrome sits in a strip of the canvas, given as its distance from
+  // the left and right edges.
+  interface Strip {
+    left: number;
+    right: number;
+  }
+  const stripStyle = (strip: Strip) => ({
+    left: `${strip.left}px`,
+    right: `${strip.right}px`,
+  });
+  // The top bars keep to the strip between the open panels, 8px clear of
+  // each, so they never cover a panel's header.
+  const panelStrip = (): Strip => {
+    const edges = panelEdges(canvasSize().width, outlineOpen(), notesOpen());
     return {
-      ...VIEW_INSETS,
-      ...(wide && outlineOpen() && { left: 316 }),
-      ...(wide && notesOpen() && { right: 348 }),
+      left: edges.left ? edges.left + 8 : 12,
+      right: edges.right ? edges.right + 8 : 12,
     };
+  };
+  // Beside open panels the breadcrumb keeps the focused branch readable: it
+  // drops the steps above it first, then the label of the way out.
+  const crumbRoom = () =>
+    isPhone()
+      ? Number.POSITIVE_INFINITY
+      : canvasSize().width - panelStrip().left - panelStrip().right;
+  const crumbs = () =>
+    crumbRoom() < 480 ? focusPath().slice(-1) : focusPath();
+  // Under about 900px the centred selection toolbar would run under the zoom
+  // island, so it centres in the room left of it: the island's 241px, its
+  // 12px margin and an 8px gap.
+  const bottomStrip = (): Strip => {
+    const width = canvasSize().width;
+    return { left: 12, right: width >= 640 && width < 900 ? 261 : 12 };
+  };
+  // The notice stays centred over the toolbar and narrows until it is clear
+  // of the open panels. Where that leaves too little to read, it centres
+  // between the panels instead; with no room there either, it covers a
+  // panel's edge for the few seconds it shows.
+  const noticeStrip = (): Strip => {
+    const row = bottomStrip();
+    const panels = panelStrip();
+    const inset = Math.max(0, panels.left - row.left, panels.right - row.right);
+    const narrowed = { left: row.left + inset, right: row.right + inset };
+    const fits = (strip: Strip) =>
+      canvasSize().width - strip.left - strip.right >= 240;
+    return fits(narrowed) ? narrowed : fits(panels) ? panels : row;
   };
   // Branches travel through the clipboard as indented Markdown lists, so they
   // paste into other apps and pasted outlines become branches here.
@@ -1891,7 +2659,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const next =
       regions[(current + direction + regions.length) % regions.length];
     if (next === canvas) canvas.focus({ preventScroll: true });
-    else next.querySelector<HTMLElement>(focusable)?.focus();
+    // A panel is entered at its content, not at its close button.
+    else
+      (
+        next.querySelector<HTMLElement>(
+          'textarea, [role="tree"] [tabindex="0"]',
+        ) ?? next.querySelector<HTMLElement>(focusable)
+      )?.focus();
   }
 
   const [showHelp, setShowHelp] = createSignal(false);
@@ -1910,7 +2684,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       handle: ProjectHandle,
       value: ViewportPreference,
     ) => {
-      if (repository !== owner || activeHandle !== handle) return;
+      if (handleRepository !== owner || activeHandle !== handle) return;
       viewportMutation.mutate({ owner, id: handle.id, value });
     },
     200,
@@ -1990,6 +2764,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setReturnView(undefined);
       setFocusId(undefined);
     });
+    focusMap();
+  }
+
+  function focusMap() {
     // A first visit opens a project after the analytics banner has appeared;
     // keep "Accept all" focused until the visitor chooses.
     const banner = consentOpen()
@@ -2000,32 +2778,62 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     (banner ?? canvas).focus({ preventScroll: true });
   }
 
-  async function performOpenProject(id: string) {
-    const target = repository;
+  async function performOpenProject({
+    id,
+    owner,
+  }: {
+    id: string;
+    owner: ProjectRepository;
+  }) {
+    const target = owner;
     try {
       await activeHandle?.flush();
       const handle = await target.open(id);
       await activate(handle, target);
-      if (target !== repository || disposed) return;
+      if (!owned(target) || disposed) return;
+      // An edited placeholder was adopted instead; the chosen map stays in
+      // the Load list.
+      if (activeHandle !== handle) return;
       const state = handle.state();
       if (state.status === "ready") {
         track("project_opened", { idea_count: details().size });
         setStorageMessage("");
         showNotice({ message: `Opened “${truncate(state.view.name, 40)}”` });
-      } else setStorageMessage("Project is still loading.");
+      } else setStorageMessage("Map is still loading.");
     } catch (error) {
-      if (target !== repository || disposed) return;
+      if (!owned(target) || disposed) return;
       setStorageMessage(
-        error instanceof Error ? error.message : "Could not open this project.",
+        error instanceof Error ? error.message : "Could not open this map.",
       );
       throw error;
     }
+  }
+
+  // Puts a map the user just made on screen. A placeholder edited while it
+  // was made is adopted at that commit, and the new map opens with a second
+  // one. Returns whether the new map is on screen.
+  async function activateCreated(
+    handle: ProjectHandle,
+    owner: ProjectRepository,
+  ) {
+    const committed = await activate(handle, owner);
+    if (!committed || activeHandle === handle) return committed;
+    if (!owned(owner) || disposed) return false;
+    const again = await owner.open(handle.id);
+    await activate(again, owner);
+    return activeHandle === again;
   }
 
   async function performCreateNewProject() {
     const target = repository;
     try {
       await activeHandle?.flush();
+      // An edited placeholder is saved first, so the new map opens beside it
+      // instead of being adopted away.
+      if (!activeHandle && doc().version() !== draftVersion) {
+        await adoptDraft(target);
+        if (target !== repository || disposed) return;
+      }
       const projects = await queryClient.fetchQuery({
         queryKey: catalogKey(target.names.catalog),
         queryFn: () => target.list(),
@@ -2036,7 +2844,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         root: { text: "New idea" },
         saving: view().saving(),
       });
-      await activate(handle, target);
+      if (!(await activateCreated(handle, target))) return;
       if (target !== repository || disposed) return;
       setStorageMessage("");
       selectFirstIdea();
@@ -2047,7 +2855,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch (error) {
       if (target !== repository || disposed) return;
       setStorageMessage(
-        error instanceof Error ? error.message : "Could not create a project.",
+        error instanceof Error ? error.message : "Could not create a map.",
       );
       throw error;
     }
@@ -2067,26 +2875,26 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function performSave() {
     finishWriting();
     finishProjectName();
-    if (!activeHandle) {
-      setStorageMessage("Project storage is still opening.");
-      return;
-    }
-    const owner = repository;
+    if (!activeHandle) await adoptDraft(repository);
+    const owner = handleRepository;
     const handle = activeHandle;
+    if (!handle) return;
     setShowLoad(false);
     try {
       await localSave.save();
-      if (repository !== owner || activeHandle !== handle || disposed) return;
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
+        return;
       track("project_saved", { local: view().saving().local });
       if (view().saving().local) {
         setStorageMessage("");
-        showNotice({ message: "Saved locally." });
+        showNotice({ message: "Saved locally" });
       } else
         setStorageMessage(
-          "Local saving is off. Export a copy to keep your work.",
+          "Local saving is off. Export a backup to keep your work.",
         );
     } catch (error) {
-      if (repository !== owner || activeHandle !== handle || disposed) return;
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
+        return;
       throw error;
     }
   }
@@ -2094,41 +2902,47 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   async function performRetryLocalSaving() {
     if (!activeHandle) await initializeWorkspace();
     for (const recovery of [...parked]) {
-      await recovery.handle.flush();
-      await recovery.handle.close();
-      await recovery.repository.close();
+      await recovery.save();
       parked.delete(recovery);
+      // A repository still in use (a swap parked its handle) stays open.
+      if (
+        !owned(recovery.repository) &&
+        ![...parked].some((other) => other.repository === recovery.repository)
+      )
+        await recovery.repository.close();
     }
     setRecoveryPending(parked.size > 0);
     if (activeHandle) await localSave.save();
-    else {
-      const owner = repository;
-      const current = doc();
-      const handle = await owner.open(current.id);
-      handle.doc.merge(current.snapshot(), ORIGIN.import);
-      await handle.flush();
-      await handle.refreshMetadata();
-      await activate(handle, owner);
-    }
+    else await adoptDraft(repository);
   }
 
   async function saveBeforeAuth(action: "login" | "logout") {
     finishWriting();
     finishProjectName();
-    const owner = repository;
+    // An edited placeholder leaves as a saved map; only broken storage stops it.
+    if (!activeHandle)
+      try {
+        await adoptDraft(repository);
+      } catch {
+        setStorageMessage("Wait for local map storage before leaving.");
+        return false;
+      }
+    const owner = handleRepository;
     const handle = activeHandle;
-    if (!handle || claiming()) {
-      setStorageMessage("Wait for local project storage before leaving.");
+    if (!handle) {
+      setStorageMessage("Wait for local map storage before leaving.");
       return false;
     }
-    authNavigationPending = true;
+    setAuthNavigationPending(true);
     cloud?.destroy();
     cloud = undefined;
+    // A copy in progress must not race the navigation.
+    await queryClient.cancelQueries({ queryKey: migrationKey });
     owner.setRelaysPaused(true);
     let leaving = false;
     try {
       await retryLocalSaving();
-      if (repository !== owner || activeHandle !== handle || disposed)
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
         return false;
       await handle.refreshMetadata();
       await owner.setLatestProject(handle.id);
@@ -2140,7 +2954,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         collapsed: [...collapsedIds()],
       });
       await handle.flush();
-      if (repository !== owner || activeHandle !== handle || disposed)
+      if (handleRepository !== owner || activeHandle !== handle || disposed)
         return false;
       await auth.prepareNavigation(action);
       leaving = true;
@@ -2149,14 +2963,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       else track("signed_out");
       return true;
     } catch {
-      if (repository !== owner || disposed) return false;
+      if (handleRepository !== owner || disposed) return false;
       setStorageMessage(
-        "Could not save your project before leaving. Free up browser storage and try again.",
+        "Could not save your map before leaving. Free up browser storage and retry.",
       );
       return false;
     } finally {
       if (!leaving) {
-        authNavigationPending = false;
+        setAuthNavigationPending(false);
         owner.setRelaysPaused(false);
         startCloud();
       }
@@ -2178,15 +2992,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       track("project_list_opened", { project_count: projects.length });
     } catch (error) {
       if (repository !== owner || disposed) return;
-      setStorageMessage(
-        "Could not list projects. Browser storage is unavailable.",
-      );
+      setStorageMessage("Could not list maps. Browser storage is unavailable.");
       throw error;
     }
   }
 
   function load(id: string) {
-    openMutation.mutate(id);
+    const source = anonymousRepo();
+    const anonymous = source && !catalog.data?.some((map) => map.id === id);
+    openMutation.mutate({ id, owner: anonymous ? source : repository });
   }
 
   async function performExportCurrentProject() {
@@ -2204,9 +3018,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStorageMessage(
-          error instanceof Error
-            ? error.message
-            : "Could not export this project.",
+          error instanceof Error ? error.message : "Could not export this map.",
         );
         throw error;
       }
@@ -2228,6 +3040,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const { content, preferences } = prepareProjectImport(imported);
       await activeHandle?.flush();
       if (owner !== repository || disposed) return;
+      if (!activeHandle && doc().version() !== draftVersion) {
+        await adoptDraft(owner);
+        if (owner !== repository || disposed) return;
+      }
       const handle = await owner.importContent({
         ...content,
         saving: preferences?.saving ?? view().saving(),
@@ -2252,7 +3068,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               }),
           })
           .catch(() => {});
-      await activate(handle, owner);
+      if (!(await activateCreated(handle, owner))) return;
       if (owner !== repository || disposed) return;
       await owner.setLatestProject(handle.id).catch(() => {});
       showNotice({ message: `Imported “${truncate(content.name, 40)}”` });
@@ -2266,7 +3082,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         setStorageMessage(
           error instanceof Error
             ? error.message
-            : "Could not import this project file.",
+            : "Could not import this backup.",
         );
         throw error;
       }
@@ -2387,12 +3203,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let contextKeyAt = -Infinity;
   function openContextMenu(e: MouseEvent) {
     const target = e.target instanceof Element ? e.target : undefined;
-    const toolbar = target?.closest("[data-toolbar]");
+    const toolbar = target?.closest("[data-toolbar], dialog");
     const nodeElement = target?.closest<HTMLElement>("[data-node-id]");
     if (toolbar) {
       setContextMenu(undefined);
       return;
     }
+    // Working on the map ends an open search, as a left press does.
+    if (searchOpen()) closeSearch(true);
 
     e.preventDefault();
     finishWriting();
@@ -2679,7 +3497,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   function startPointer(e: PointerEvent, nodeId?: string) {
     if (
-      !storageReady() ||
       !e.isPrimary ||
       e.button !== 0 ||
       pointer ||
@@ -2773,23 +3590,25 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   onMount(() => {
     const stopAuth = auth.subscribe((state) => void accountChanged(state));
+    const first = repository;
     void initializeWorkspace().catch((error) => {
-      if (disposed) return;
+      if (disposed || repository !== first) return;
       setStorageMessage(
         error instanceof Error
           ? error.message
-          : "Could not open local project storage.",
+          : "Could not open local map storage.",
       );
     });
     onCleanup(() => {
       disposed = true;
       activation++;
-      claimAbort?.abort();
       void queryClient.cancelQueries({ queryKey: CLOUD_LOOKUP_KEY });
+      void queryClient.cancelQueries({ queryKey: migrationKey });
       stopAuth();
       auth.destroy();
       cloud?.destroy();
       stopCatalog?.();
+      stopAnonymousCatalog?.();
       void queryClient.cancelQueries({
         queryKey: catalogKey(repository.names.catalog),
       });
@@ -2800,13 +3619,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queryKey: ["anonymous-claims", deployment],
       });
       queryClient.removeQueries({ queryKey: ["anonymous-claims", deployment] });
+      const source = anonymousRepo();
+      void activeHandle?.close();
       void repository.close();
+      if (source && source !== repository) void source.close();
       for (const recovery of parked) void recovery.repository.close();
     });
 
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (
+        recoveryPending() ||
+        (!activeHandle && doc().version() !== draftVersion) ||
         repository.hasMemoryOnlyProjects() ||
+        anonymousRepo()?.hasMemoryOnlyProjects() ||
         (!view().saving().local &&
           (!view().saving().cloud || cloudStatus()?.status !== "saved"))
       ) {
@@ -2818,20 +3643,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();
-      if (overlayOpen() || searchOpen()) return;
+      if (overlayOpen()) return;
       if (
-        !storageReady() ||
         e.isComposing ||
         writing() ||
         (e.target instanceof Element &&
           e.target.closest("textarea, input, [contenteditable=true]"))
       )
         return;
-      if (contextMenu()) {
+      // An open menu owns the keyboard; its own Esc handling closes it.
+      if (contextMenu() || menuOpen() || inOpenMenu(e.target)) return;
+      // While search is open the map ignores every key but Esc, which closes
+      // it from anywhere.
+      if (searchOpen()) {
         if (e.key === "Escape") {
           e.preventDefault();
-          setContextMenu(undefined);
-          canvas.focus({ preventScroll: true });
+          closeSearch(false);
         }
         return;
       }
@@ -2924,14 +3751,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         add("root");
         return;
       }
-      if (
-        !selectedId() ||
-        (e.target instanceof Element && e.target.closest("[data-toolbar]"))
-      )
+      if (e.target instanceof Element && e.target.closest("[data-toolbar]"))
         return;
-      const id = selectedId() as string;
       const arrow = ARROW_DIRECTIONS.get(e.key);
       const plain = !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+      const first = visibleForest()[0]?.id;
+      // Ideas are not tab stops, so with nothing selected an arrow key is the
+      // keyboard's way onto the map.
+      if (!selectedId() && arrow && plain && first) {
+        e.preventDefault();
+        setColorScope("node");
+        setSelectedId(first);
+        return;
+      }
+      if (!selectedId()) return;
+      const id = selectedId() as string;
       // Option+arrows move ideas everywhere. Ctrl+arrows also work, except that
       // macOS reserves them for Mission Control.
       const move = arrow && !e.shiftKey && !e.metaKey && e.altKey !== e.ctrlKey;
@@ -2998,6 +3832,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
     };
     const wheel = (e: WheelEvent) => {
+      if (e.target instanceof Element && e.target.closest("dialog")) {
+        // The dialog scrolls itself, but a pinch there must not zoom the page.
+        if (e.ctrlKey || e.metaKey) e.preventDefault();
+        return;
+      }
       if (
         e.target instanceof Element &&
         e.target.closest("[data-toolbar], textarea")
@@ -3029,16 +3868,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           setTop(top() - (e.shiftKey && !e.deltaX ? 0 : e.deltaY) * unit);
         });
     };
-    const saveShortcut = (event: KeyboardEvent | null) => {
+    // Saving is automatic, so the key must first keep the browser's own "Save
+    // page" dialog away. It saves only from the map: in a text field or behind
+    // a dialog a save would end the edit or act out of sight.
+    const saveShortcut = (event: KeyboardEvent) => {
+      event.preventDefault();
       if (
-        !event ||
+        overlayOpen() ||
         event.isComposing ||
         writing() ||
         (event.target instanceof Element &&
           event.target.closest("textarea, input, [contenteditable=true]"))
       )
         return;
-      event.preventDefault();
       save();
     };
     const historyShortcut = (
@@ -3048,8 +3890,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (
         !event ||
         event.isComposing ||
-        !storageReady() ||
         contextMenu() ||
+        menuOpen() ||
+        inOpenMenu(event.target) ||
         pointer
       )
         return;
@@ -3080,9 +3923,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       } else if (action === "undo") undo();
       else redo();
     };
-    // Let the callback decide whether the target accepts text before suppressing
-    // the browser's native save dialog.
     const shortcuts = (event: KeyboardEvent) => {
+      const mod = (event.ctrlKey || event.metaKey) && !event.altKey;
+      if (mod && !event.shiftKey && matchesLetter(event, "s")) {
+        saveShortcut(event);
+        return;
+      }
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
       if (overlayOpen()) return;
       // F6 moves between the canvas and the toolbars from anywhere, including
@@ -3098,48 +3944,23 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cycleRegions(event.shiftKey ? -1 : 1);
         return;
       }
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (!mod) return;
       if (matchesLetter(event, "f") && !event.shiftKey) {
-        if (!storageReady() || showPreferences()) return;
+        if (showPreferences()) return;
         event.preventDefault();
         openSearch();
         return;
       }
-      if (matchesLetter(event, "s") && !event.shiftKey) saveShortcut(event);
-      else if (matchesLetter(event, "z"))
+      if (matchesLetter(event, "z"))
         historyShortcut(event, event.shiftKey ? "redo" : "undo");
       else if (matchesLetter(event, "y") && !event.shiftKey)
         historyShortcut(event, "redo");
     };
     makeEventListener(window, "keydown", shortcuts);
     makeEventListener(window, "keydown", keydown);
-    const dismissContextMenu = (e: PointerEvent) => {
-      // Menus close on any press outside them, like native menus.
-      if (
-        menuOpen() &&
-        e.target instanceof Element &&
-        !e.target.closest('[aria-label="Project menu"]')
-      )
-        setMenuOpen(false);
-      if (
-        colorOpen() &&
-        e.target instanceof Element &&
-        !e.target.closest(
-          '[aria-label="Selected node color controls"], button[aria-label="Color"]',
-        )
-      )
-        setColorOpen(false);
-      if (
-        !(e.target instanceof Element) ||
-        !e.target.closest("[data-context-menu]")
-      )
-        setContextMenu(undefined);
-    };
-    makeEventListener(window, "pointerdown", dismissContextMenu);
     makeEventListener(window, "pointerup", (e) => stopPointer(e, true));
     makeEventListener(canvas, "wheel", wheel, { passive: false });
     const canvasClipboard = (e: ClipboardEvent) =>
-      storageReady() &&
       !writing() &&
       !overlayOpen() &&
       !searchOpen() &&
@@ -3257,6 +4078,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     setShowBackup(false);
     setMenuOpen((open) => !open);
   };
+  // "Sign in" inside a dialog: the dialog closes and the normal sign-in
+  // starts, so its progress and failures show where they always do. Phones
+  // keep their account controls in the menu panel, which opens instead.
+  let signIn: (() => void) | undefined;
+  const signInFrom = (show: (open: boolean) => void) =>
+    account().status === "authenticated" || account().status === "checking"
+      ? undefined
+      : () => {
+          returnToShare = false;
+          show(false);
+          if (isPhone()) setMenuOpen(true);
+          else signIn?.();
+        };
   // Runs a phone panel action on the map, with the panel out of the way.
   const fromPanel = (run: () => void) => () => {
     setMenuOpen(false);
@@ -3279,7 +4113,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       onInput={(e) => setProjectNameDraft(e.currentTarget.value)}
       onBlur={finishProjectName}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === "Escape") e.currentTarget.blur();
+        if (e.key !== "Enter" && e.key !== "Escape") return;
+        e.currentTarget.blur();
+        canvas.focus({ preventScroll: true });
       }}
     />
   );
@@ -3291,7 +4127,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         class="menu-item"
         aria-expanded={showLoad()}
         aria-controls="saved-projects"
-        disabled={!storageReady()}
         onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
       >
         Open map…
@@ -3315,21 +4150,32 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 else closeProjectMenu();
               })
             }
-            onKeyDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              // Only the keys the menu would take stop here. The rest reach
+              // the window, which keeps Mod+S from the browser and runs F6.
+              if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key))
+                e.stopPropagation();
+              // Enter opens the first match, but only of a typed filter: the
+              // unfiltered list starts with whichever map is newest.
+              const first = listedProjects()[0];
+              if (e.key === "Enter" && mapFilter().trim() && first) {
+                e.preventDefault();
+                setMenuOpen(false);
+                load(first.id);
+              }
+            }}
           />
         </Show>
         <ul
           id="saved-projects"
-          aria-label="Available projects"
+          aria-label="Saved maps"
           class="mx-1 mb-1 max-h-60 overflow-y-auto rounded-lg bg-stone-50 p-1 text-sm"
         >
           <For
             each={listedProjects()}
             fallback={
               <li class="px-2 py-2 text-stone-500">
-                {mapFilter().trim()
-                  ? "No maps match."
-                  : "No saved projects yet."}
+                {mapFilter().trim() ? "No maps match" : "No saved maps yet"}
               </li>
             }
           >
@@ -3369,6 +4215,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       tabIndex={-1}
       aria-label="Mind map canvas"
       data-storage-ready={storageReady()}
+      onFocusIn={(e) => setFieldFocused(isTextField(e.target))}
+      onFocusOut={(e) => {
+        if (isTextField(e.target)) setFieldFocused(false);
+      }}
       onPointerDown={(e) => {
         if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
           return;
@@ -3383,7 +4233,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         if (e.target === canvas) stopPointer(e, false);
       }}
       onContextMenu={openContextMenu}
-      class="map-canvas overflow-hidden w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
+      class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
       <ProjectPreferences
@@ -3398,9 +4248,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         cloudStatus={cloudStatus()}
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
+        onSignIn={signInFrom(setShowPreferences)}
         onReviewAnalytics={
           isPhone() && analyticsEnabled
             ? () => {
+                returnToShare = false;
                 setShowPreferences(false);
                 reviewConsent();
               }
@@ -3416,12 +4268,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }
         cloud={view().saving().cloud}
         onOpenPreferences={() => {
+          returnToShare = true;
           setShowShare(false);
           setShowPreferences(true);
         }}
+        onSignIn={signInFrom(setShowShare)}
         onShared={(enabled) => track("share_link_changed", { enabled })}
       />
-      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2">
+      {/* On desktop the two top columns hold the menus and the search results,
+          which open over the bottom chrome in a small window. */}
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2 sm:z-40">
         <span role="status" class="sr-only">
           {saveDot().label}
         </span>
@@ -3494,31 +4350,24 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             ref={(el) => {
               projectMenu = el;
-              closeOnEscape(el, closeProjectMenu);
+              transientLayer(el, {
+                trigger: projectMenuButton,
+                close: () => setMenuOpen(false),
+              });
             }}
             data-no-pan
             data-toolbar
             role="menu"
             aria-label="Project menu"
-            class="map-toolbar menu-panel pointer-events-auto w-72 cursor-default"
+            // A long menu scrolls itself rather than run off a short window.
+            class="map-toolbar menu-panel pointer-events-auto max-h-[calc(100dvh-5rem)] w-72 overflow-y-auto cursor-default outline-none"
             onKeyDown={menuArrowKeys}
-            onFocusOut={(e) => {
-              // Tabbing out of the menu closes it, like a native menu.
-              const next = e.relatedTarget;
-              if (
-                next instanceof Element &&
-                !e.currentTarget.contains(next) &&
-                !next.closest('[aria-label="Project menu"]')
-              )
-                setMenuOpen(false);
-            }}
           >
             <fieldset disabled={fileBusy()} class="contents">
               <button
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   createNewProject();
@@ -3531,7 +4380,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   importProjectFromFile();
@@ -3544,7 +4392,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 onClick={() => {
                   setMenuOpen(false);
                   save();
@@ -3580,7 +4427,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 aria-haspopup="dialog"
                 onClick={() => {
                   setMenuOpen(false);
@@ -3595,12 +4441,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                disabled={!storageReady()}
                 aria-haspopup="dialog"
                 onClick={() => {
                   setMenuOpen(false);
                   finishWriting();
                   finishProjectName();
+                  returnToShare = false;
                   setShowPreferences(true);
                 }}
               >
@@ -3626,21 +4472,53 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             data-no-pan
             data-toolbar
-            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2 text-xs text-stone-600 cursor-default"
+            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
+            ref={(el) => {
+              const observer = new ResizeObserver(() =>
+                setStorageIslandHeight(el.offsetHeight),
+              );
+              observer.observe(el);
+              onCleanup(() => {
+                observer.disconnect();
+                setStorageIslandHeight(0);
+              });
+            }}
           >
             <Show when={memoryOnly()}>
               <p role="status" class="text-amber-800">
-                Memory only · Export before closing this tab.
+                In memory only · Export before closing this tab.
               </p>
             </Show>
-            <p role="status" class="empty:hidden">
-              {storageMessage()}
-            </p>
+            <div class="flex items-start gap-2 has-[p:empty]:hidden">
+              <p
+                role="status"
+                data-storage-message
+                class="min-w-0 flex-1 self-center"
+              >
+                {storageMessage()}
+              </p>
+              {/* While local saving is unavailable the message explains the
+                  retry button below, so it stays. */}
+              <Show when={storageMessage() && storageReady()}>
+                <button
+                  type="button"
+                  class="icon-button size-8!"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  onClick={() => {
+                    setStorageMessage("");
+                    canvas.focus({ preventScroll: true });
+                  }}
+                >
+                  <CloseIcon class="size-4" />
+                </button>
+              </Show>
+            </div>
             <Show when={!storageReady()}>
               <div class="flex flex-wrap gap-1">
                 <button
                   type="button"
-                  class="map-control text-xs"
+                  class="map-control outlined"
                   onClick={retryLocal}
                 >
                   Retry local saving
@@ -3650,7 +4528,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </div>
         </Show>
       </div>
-      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2">
+      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2 sm:z-40">
         <Show when={!isPhone()}>
           <div class="flex items-start gap-2">
             <nav
@@ -3667,7 +4545,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   class="icon-button"
                   aria-label="Undo"
                   title={`Undo (${MOD_LABEL}Z)`}
-                  disabled={!storageReady() || !canUndo()}
+                  disabled={!canUndo()}
                   onClick={undo}
                 >
                   <UndoIcon />
@@ -3676,8 +4554,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   type="button"
                   class="icon-button"
                   aria-label="Redo"
-                  title={`Redo (${MOD_LABEL}⇧Z)`}
-                  disabled={!storageReady() || !canRedo()}
+                  title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
+                  disabled={!canRedo()}
                   onClick={redo}
                 >
                   <RedoIcon />
@@ -3690,7 +4568,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label="Search"
                 title={`Search (${MOD_LABEL}F)`}
                 aria-expanded={searchOpen()}
-                disabled={!storageReady()}
                 onClick={() =>
                   searchOpen() ? closeSearch(false) : openSearch()
                 }
@@ -3702,9 +4579,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 class="icon-button"
                 aria-label="Outline"
                 title={`Outline (${ALT_LABEL}O)`}
-                aria-pressed={outlineOpen()}
-                disabled={!storageReady()}
-                onClick={() => setOutlineOpen((open) => !open)}
+                aria-expanded={outlineOpen()}
+                onClick={(e) => {
+                  setOutlineOpen((open) => !open);
+                  backToCanvas(e);
+                }}
               >
                 <OutlineIcon />
               </button>
@@ -3713,8 +4592,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               state={account()}
               beforeNavigate={saveBeforeAuth}
               onRetry={() => void auth.check()}
-              claiming={claiming()}
-              claimMessage={claimMessage()}
+              signInRef={(start) => {
+                signIn = start;
+              }}
             />
           </div>
         </Show>
@@ -3723,7 +4603,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             aria-label="Search ideas"
-            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default"
+            // The field fills the island, so the island carries its focus ring.
+            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
+            // Beside the notes, not over their header: previews select ideas,
+            // and their notes follow.
+            classList={{
+              "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
+                notesOpen() && !isPhone(),
+            }}
+            ref={(el) => closeOnEscape(el, () => closeSearch(false))}
           >
             <div class="flex items-center gap-2 px-2">
               <SearchIcon class="size-4 shrink-0 text-stone-400" />
@@ -3750,10 +4638,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 }}
                 onKeyDown={(e) => {
                   const count = searchResults().length;
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    closeSearch(false);
-                  } else if (e.key === "Enter") {
+                  if (e.key === "Enter") {
                     e.preventDefault();
                     closeSearch(count > 0);
                   } else if (
@@ -3773,7 +4658,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button -mr-1"
                 aria-label="Close search"
-                title="Close search and return (Esc)"
+                title="Close search (Esc)"
                 onClick={() => closeSearch(false)}
               >
                 <CloseIcon class="size-4" />
@@ -3860,7 +4745,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </div>
       </Show>
       <Show when={outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-3 left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div
+          class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+          style={outlineTop()}
+        >
           <Outline
             roots={scopeForest()}
             text={(id) => view().text(id)}
@@ -3885,136 +4773,108 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         </div>
       </Show>
       <AnalyticsConsent />
-      <Show when={claimCount() > 0 && !claimDismissed()}>
-        <section
-          data-no-pan
-          data-toolbar
-          aria-label="Maps from before sign-in"
-          class="map-toolbar absolute top-16 left-1/2 z-30 w-[28rem] max-w-[calc(100%-1.5rem)] -translate-x-1/2 p-3 cursor-default"
-        >
-          <p class="text-sm font-semibold text-stone-800">
-            Your earlier work is safe
-          </p>
-          <p class="mt-0.5 text-xs leading-5 text-stone-600">
-            {claimCount() === 1
-              ? "A map you made before signing in is saved only in this browser. Add it to your account to keep it in the cloud and open it here."
-              : `${claimCount()} maps you made before signing in are saved only in this browser. Add them to your account to keep them in the cloud and open them here.`}
-          </p>
-          <div class="mt-2.5 flex flex-wrap items-center gap-2">
+      {/* One column, so these stack instead of covering each other. */}
+      <div
+        class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
+        style={stripStyle(panelStrip())}
+      >
+        <Show when={focusId()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Branch focus"
+            // Clipped, so nothing can spill over the panels beside it. The
+            // minimum keeps the way out in reach.
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 overflow-hidden text-sm cursor-default"
+          >
             <button
               type="button"
-              class="primary-button px-3! py-1.5! text-xs!"
-              disabled={claiming()}
-              onClick={() => void addAnonymousProjects()}
+              class="map-control flex h-9 shrink-0 items-center gap-1.5"
+              title="Show the whole map (Esc with nothing selected)"
+              onClick={exitFocus}
             >
-              {claiming()
-                ? "Adding projects…"
-                : "Add anonymous projects to this account"}
+              <ArrowLeftIcon class="size-4" />
+              <span classList={{ "sr-only": crumbRoom() < 240 }}>
+                Whole map
+              </span>
             </button>
-            <button
-              type="button"
-              class="map-control text-xs"
-              disabled={claiming()}
-              onClick={() => {
-                track("anonymous_maps_claim_dismissed", {
-                  count: claimCount(),
-                });
-                setClaimDismissed(true);
-              }}
-            >
-              Not now
-            </button>
-          </div>
-        </section>
-      </Show>
-      <Show when={returnView()}>
-        <nav
-          data-no-pan
-          data-toolbar
-          aria-label="Return from search"
-          class="map-toolbar absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
-          classList={{ "top-16": !focusId(), "top-[7.25rem]": !!focusId() }}
-        >
-          <button
-            type="button"
-            class="map-control flex items-center gap-1.5"
-            title="Restore the view and folds from before the search"
-            onClick={() => {
-              const back = returnView();
-              setReturnView(undefined);
-              if (back) restoreView(back);
-              canvas.focus({ preventScroll: true });
-            }}
-          >
-            <ArrowLeftIcon class="size-4" />
-            Back to where you were
-          </button>
-          <button
-            type="button"
-            class="icon-button size-8!"
-            aria-label="Stay here"
-            title="Stay here"
-            onClick={() => setReturnView(undefined)}
-          >
-            <CloseIcon class="size-4" />
-          </button>
-        </nav>
-      </Show>
-      <Show when={focusId()}>
-        <nav
-          data-no-pan
-          data-toolbar
-          aria-label="Branch focus"
-          class="map-toolbar absolute top-16 left-1/2 z-20 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-0.5 text-sm cursor-default"
-        >
-          <button
-            type="button"
-            class="map-control flex items-center gap-1.5"
-            title="Show the whole map (Esc)"
-            onClick={exitFocus}
-          >
-            <ArrowLeftIcon class="size-4" />
-            Whole map
-          </button>
-          <For each={focusPath()}>
-            {(id, index) => (
-              <>
-                <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
-                <Show
-                  when={index() < focusPath().length - 1}
-                  fallback={
-                    <span
-                      aria-current="location"
-                      class="max-w-48 truncate px-2 font-medium text-stone-800"
+            <For each={crumbs()}>
+              {(id, index) => (
+                <>
+                  <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
+                  <Show
+                    when={index() < crumbs().length - 1}
+                    fallback={
+                      <span
+                        aria-current="location"
+                        class="max-w-48 truncate px-2 font-medium text-stone-800"
+                      >
+                        {nodeLabel(id)}
+                      </span>
+                    }
+                  >
+                    {/* The steps above give way first, so where you are stays
+                        readable. */}
+                    <button
+                      type="button"
+                      class="map-control h-9 max-w-36 shrink-3 truncate"
+                      onClick={() => focusBranch(id)}
                     >
                       {nodeLabel(id)}
-                    </span>
-                  }
-                >
-                  <button
-                    type="button"
-                    class="map-control max-w-36 truncate"
-                    onClick={() => focusBranch(id)}
-                  >
-                    {nodeLabel(id)}
-                  </button>
-                </Show>
-              </>
-            )}
-          </For>
-        </nav>
-      </Show>
+                    </button>
+                  </Show>
+                </>
+              )}
+            </For>
+          </nav>
+        </Show>
+        <Show when={returnView()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Return from search"
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 text-sm cursor-default"
+          >
+            <button
+              type="button"
+              class="map-control flex h-9 min-w-0 items-center gap-1.5"
+              title="Restore the view and folds from before the search"
+              onClick={() => {
+                const back = returnView();
+                setReturnView(undefined);
+                if (back) restoreView(back);
+                canvas.focus({ preventScroll: true });
+              }}
+            >
+              <ArrowLeftIcon class="size-4 shrink-0" />
+              <span class="truncate">Back to where you were</span>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Stay here"
+              title="Stay here"
+              onClick={() => setReturnView(undefined)}
+            >
+              <CloseIcon class="size-4" />
+            </button>
+          </nav>
+        </Show>
+      </div>
       {/* The notice keeps its place above the selection toolbar's slot, so the
           toolbar reappearing (when an edit ends on press) never moves it from
           under the pointer. */}
-      <div class="pointer-events-none absolute bottom-[4.25rem] left-1/2 z-30 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 justify-center">
+      <div
+        class="pointer-events-none absolute bottom-[4.25rem] z-30 flex justify-center"
+        style={stripStyle(noticeStrip())}
+      >
         <Show when={notice()}>
           {(current) => (
             <div
               role="status"
               data-no-pan
               data-toolbar
-              class="notice pointer-events-auto flex items-center gap-3 cursor-default"
+              class="notice pointer-events-auto flex min-w-0 items-center gap-3 cursor-default"
             >
               <span class="min-w-0 truncate">{current().message}</span>
               <Show when={current().action}>
@@ -4041,7 +4901,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           )}
         </Show>
       </div>
-      <div class="pointer-events-none absolute bottom-3 left-1/2 z-20 flex w-max max-w-[calc(100%-1.5rem)] -translate-x-1/2 flex-col items-center gap-2">
+      {/* Level with the notice and after it, so the color popover, which opens
+          into the notice's slot, paints over it. */}
+      <div
+        class="pointer-events-none absolute bottom-3 z-30 flex flex-col items-center gap-2"
+        style={stripStyle(bottomStrip())}
+      >
         <Show when={selectedId() && !writing() && !drag()}>
           <section
             data-no-pan
@@ -4052,15 +4917,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <Show when={colorOpen()}>
               <section
                 aria-label="Selected node color controls"
-                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2"
+                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2 outline-none"
+                // Opaque: it opens over the notice and the analytics banner,
+                // and inside the toolbar its own blur cannot hide them.
+                style={{ background: "var(--surface)" }}
                 ref={(el) =>
-                  closeOnEscape(el, () => {
-                    setColorOpen(false);
-                    document
-                      .querySelector<HTMLButtonElement>(
+                  transientLayer(el, {
+                    trigger: () =>
+                      document.querySelector<HTMLButtonElement>(
                         'button[aria-label="Color"]',
-                      )
-                      ?.focus();
+                      ),
+                    close: () => setColorOpen(false),
                   })
                 }
               >
@@ -4080,7 +4947,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       checked={colorScope() === "node"}
                       onChange={() => setColorScope("node")}
                     />
-                    <span>This node</span>
+                    <span>This idea</span>
                   </label>
                   <label
                     class="color-scope"
@@ -4102,7 +4969,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <fieldset class="grid grid-cols-4 gap-1 px-1">
                   <legend class="sr-only">
                     Choose a color for{" "}
-                    {colorScope() === "node" ? "this node" : "this branch"}
+                    {colorScope() === "node" ? "this idea" : "this branch"}
                   </legend>
                   <For each={NODE_COLORS}>
                     {(color) => (
@@ -4113,7 +4980,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         aria-pressed={
                           (selectedNode()?.color ?? "blue") === color.value
                         }
-                        title={`${color.label} · ${colorScope() === "node" ? "This node" : "This branch"}`}
+                        title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
                         onClick={() => colorSelectedNode(color.value)}
                       >
                         <span
@@ -4147,8 +5014,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 </fieldset>
                 <p class="px-2 pb-1 text-xs text-stone-500">
                   {colorScope() === "node"
-                    ? "Changes only the selected node."
-                    : "Changes this node and all its descendants."}
+                    ? "Changes only the selected idea."
+                    : "Changes this idea and everything under it."}
                 </p>
               </section>
             </Show>
@@ -4164,7 +5031,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="tool-button"
-              title="Add a sibling idea (Enter)"
+              // Enter on a central idea adds a child instead.
+              title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
               disabled={selectedId() === focusId()}
               onClick={() => add("sibling")}
             >
@@ -4178,7 +5046,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Color"
               title="Color"
               aria-expanded={colorOpen()}
-              onClick={() => setColorOpen((open) => !open)}
+              onClick={(e) => {
+                setColorOpen((open) => !open);
+                if (!colorOpen()) backToCanvas(e);
+              }}
             >
               <span
                 aria-hidden="true"
@@ -4190,7 +5061,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               class="icon-button relative"
               aria-label="Notes"
               title={`Notes (${ALT_LABEL}N)`}
-              aria-pressed={notesOpen()}
+              aria-expanded={notesOpen()}
               onClick={() => toggleNotes()}
             >
               <NoteIcon />
@@ -4228,7 +5099,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button narrow-hide"
                 aria-label={
-                  focusId() === selectedId() ? "Leave focus" : "Focus branch"
+                  focusId() === selectedId()
+                    ? "Leave focus"
+                    : "Focus on this branch"
                 }
                 title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
                 aria-pressed={focusId() === selectedId()}
@@ -4245,7 +5118,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="More actions"
               title="More actions"
               aria-haspopup="menu"
+              aria-expanded={!!contextMenu()?.above}
               onClick={(e) => {
+                if (contextMenu()?.above) {
+                  setContextMenu(undefined);
+                  backToCanvas(e);
+                  return;
+                }
                 const bounds = e.currentTarget.getBoundingClientRect();
                 const id = selectedId();
                 setContextMenu({
@@ -4391,7 +5270,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="primary-button"
-            disabled={!storageReady()}
             onClick={() => add("root")}
           >
             Create an idea
@@ -4403,17 +5281,24 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <div
             ref={(el) => {
               contextMenuElement = el;
-              closeOnEscape(el, () => {
-                setContextMenu(undefined);
-                canvas.focus({ preventScroll: true });
+              const moreActions = () =>
+                document.querySelector<HTMLButtonElement>(
+                  'button[aria-label="More actions"]',
+                );
+              transientLayer(el, {
+                trigger: moreActions,
+                close: () => setContextMenu(undefined),
+                // A right-click menu has no trigger; it came from the map.
+                returnFocus: () =>
+                  (contextMenu()?.above && moreActions()) || canvas,
               });
             }}
             data-no-pan
             data-toolbar
             data-context-menu
             role="menu"
-            aria-label={menu().nodeId ? "Node actions" : "Canvas actions"}
-            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default"
+            aria-label={menu().nodeId ? "Idea actions" : "Canvas actions"}
+            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default outline-none"
             style={{
               left: `${menu().x}px`,
               top: `${menu().y}px`,
@@ -4436,7 +5321,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     add("root", position);
                   }}
                 >
-                  Create root node
+                  New central idea
                 </button>
               }
             >
@@ -4456,7 +5341,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       class="menu-item"
                       onClick={run(() => add("child"))}
                     >
-                      Add child node
+                      Add child idea
                       <kbd class="ml-auto">Tab</kbd>
                     </button>
                     <button
@@ -4466,8 +5351,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       disabled={nodeId() === focusId()}
                       onClick={run(() => add("sibling"))}
                     >
-                      Add sibling
-                      <kbd class="ml-auto">Enter</kbd>
+                      Add sibling idea
+                      {/* Enter on a central idea adds a child instead. */}
+                      <Show when={details().get(nodeId())?.parent}>
+                        <kbd class="ml-auto">Enter</kbd>
+                      </Show>
                     </button>
                     <button
                       type="button"
@@ -4477,7 +5365,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(insertParent)}
                     >
                       Insert parent
-                      <kbd class="ml-auto">⇧Tab</kbd>
+                      <kbd class="ml-auto">{SHIFT_LABEL}Tab</kbd>
                     </button>
                     <div class="menu-divider" />
                     <button
@@ -4571,7 +5459,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       onClick={run(removeSelected)}
                     >
                       Delete
-                      <kbd class="ml-auto">⌫</kbd>
+                      <kbd class="ml-auto">{DELETE_LABEL}</kbd>
                     </button>
                   </>
                 );
@@ -4581,9 +5469,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         )}
       </Show>
       <Show when={!isPhone()}>
-        <div
+        <section
           data-no-pan
           data-toolbar
+          aria-label="View and help"
           class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
         >
           <fieldset aria-label="Canvas zoom" class="flex items-center gap-0.5">
@@ -4593,16 +5482,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom out"
               title={`Zoom out (${MOD_LABEL}−)`}
               disabled={zoom() <= ZOOM_MIN}
-              onClick={() => changeZoom(zoom() / 1.2)}
+              onClick={(e) => {
+                changeZoom(zoom() / 1.2);
+                backToCanvas(e);
+              }}
             >
               <MinusIcon />
             </button>
             <button
               type="button"
-              class="map-control min-w-14 px-1! text-xs tabular-nums max-sm:hidden"
+              class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
               aria-label="Zoom to 100%"
               title={`Zoom to 100% (${MOD_LABEL}0)`}
-              onClick={() => changeZoom(1)}
+              onClick={(e) => {
+                changeZoom(1);
+                backToCanvas(e);
+              }}
             >
               {Math.round(zoom() * 100)}%
             </button>
@@ -4612,7 +5507,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom in"
               title={`Zoom in (${MOD_LABEL}+)`}
               disabled={zoom() >= ZOOM_MAX}
-              onClick={() => changeZoom(zoom() * 1.2)}
+              onClick={(e) => {
+                changeZoom(zoom() * 1.2);
+                backToCanvas(e);
+              }}
             >
               <PlusIcon />
             </button>
@@ -4623,7 +5521,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Fit map"
               title={`Fit map (${ALT_LABEL}1)`}
               disabled={!forest().length}
-              onClick={fitMap}
+              onClick={(e) => {
+                fitMap();
+                backToCanvas(e);
+              }}
             >
               <FitMapIcon />
             </button>
@@ -4632,14 +5533,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="icon-button"
-            aria-label="Keyboard shortcuts and navigation"
-            title="Shortcuts and navigation (?)"
+            aria-label="Shortcuts and navigation"
+            title="Shortcuts and navigation (? with nothing selected)"
             aria-haspopup="dialog"
             onClick={() => setShowHelp(true)}
           >
             <HelpIcon />
           </button>
-        </div>
+        </section>
       </Show>
       <Show when={isPhone()}>
         <Dialog
@@ -4679,7 +5580,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <button
                 type="button"
                 class="panel-pair"
-                disabled={!storageReady() || !canUndo()}
+                disabled={!canUndo()}
                 onClick={fromPanel(undo)}
               >
                 <UndoIcon />
@@ -4688,7 +5589,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <button
                 type="button"
                 class="panel-pair"
-                disabled={!storageReady() || !canRedo()}
+                disabled={!canRedo()}
                 onClick={fromPanel(redo)}
               >
                 <RedoIcon />
@@ -4699,7 +5600,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            disabled={!storageReady()}
             onClick={fromPanel(openSearch)}
           >
             <SearchIcon />
@@ -4708,7 +5608,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            disabled={!storageReady()}
             onClick={fromPanel(() => setOutlineOpen(true))}
           >
             <OutlineIcon />
@@ -4728,7 +5627,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               onClick={fromPanel(createNewProject)}
             >
               New map
@@ -4737,7 +5635,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               aria-haspopup="dialog"
               onClick={fromPanel(() => setShowShare(true))}
             >
@@ -4759,7 +5656,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <button
                   type="button"
                   class="menu-item"
-                  disabled={!storageReady()}
                   onClick={fromPanel(importProjectFromFile)}
                 >
                   Import backup…
@@ -4783,9 +5679,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              disabled={!storageReady()}
               aria-haspopup="dialog"
-              onClick={fromPanel(() => setShowPreferences(true))}
+              onClick={fromPanel(() => {
+                returnToShare = false;
+                setShowPreferences(true);
+              })}
             >
               Project preferences…
             </button>
@@ -4803,8 +5701,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             state={account()}
             beforeNavigate={saveBeforeAuth}
             onRetry={() => void auth.check()}
-            claiming={claiming()}
-            claimMessage={claimMessage()}
             onAuthError={() => setMenuOpen(true)}
             shownElsewhere={saveDot().label}
           />
