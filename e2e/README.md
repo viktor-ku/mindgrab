@@ -29,5 +29,8 @@ cd e2e
 bun --bun test ./editor.browser.ts -t "add, edit, navigate"
 ```
 
+Set `MINDGRAB_SCREENSHOTS` to a directory to save pictures of the update notice
+from the offline suite on desktop and phone widths.
+
 `mise run check` includes all browser and native checks. The
 `webapp:test:browser` and `webapp:test:offline` tasks remain aliases.

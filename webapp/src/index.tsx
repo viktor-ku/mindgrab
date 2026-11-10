@@ -3,7 +3,12 @@ import { QueryClientProvider } from "@tanstack/solid-query";
 import { queryClient, executeMutation } from "./query-client";
 import { RouterProvider } from "@tanstack/solid-router";
 import { Show } from "solid-js";
-import { offlineMessage, startOfflineShell } from "./offline-shell";
+import {
+  offlineMessage,
+  pendingUpdate,
+  startOfflineShell,
+} from "./offline-shell";
+import { UpdateNotice } from "./UpdateNotice";
 import { startAnalytics } from "./analytics";
 import { render } from "solid-js/web";
 import { router } from "./router.tsx";
@@ -36,15 +41,19 @@ render(
             >
               Retry opening
             </button>
+            <UpdateNotice inline />
           </main>
         }
       >
         <RouterProvider router={router} />
-        <Show when={offlineMessage()}>
+        <UpdateNotice />
+        {/* Under the map's chrome, so it never covers a toolbar. The update
+            notice says all there is to say while an update waits. */}
+        <Show when={offlineMessage() && !pendingUpdate()}>
           <p
             role="status"
             aria-label="Offline application"
-            class="fixed bottom-3 left-3 z-30 max-w-sm rounded bg-white/90 px-3 py-2 text-xs text-stone-600"
+            class="fixed bottom-3 left-3 z-10 max-w-sm rounded bg-white/90 px-3 py-2 text-xs text-stone-600"
           >
             {offlineMessage()}
           </p>

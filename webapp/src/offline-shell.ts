@@ -13,20 +13,100 @@ export function compatibleShell(value: unknown): boolean {
   );
 }
 
-async function inspect(worker: ServiceWorker) {
+function ask<T>(worker: ServiceWorker, message: string, failure: string) {
   const channel = new MessageChannel();
-  return new Promise<unknown>((resolve, reject) => {
+  return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       channel.port1.close();
-      reject(new Error("Cached application version could not be verified."));
+      reject(new Error(failure));
     }, 5000);
     channel.port1.onmessage = ({ data }) => {
       clearTimeout(timer);
       channel.port1.close();
       resolve(data);
     };
-    worker.postMessage("MINDGRAB_SHELL_INFO", [channel.port2]);
+    worker.postMessage(message, [channel.port2]);
   });
+}
+const inspect = (worker: ServiceWorker) =>
+  ask<unknown>(
+    worker,
+    "MINDGRAB_SHELL_INFO",
+    "Cached application version could not be verified.",
+  );
+
+// A newer build that has installed and waits for every Mindgrab window to
+// close. Kept apart from offlineMessage so no status can replace it.
+const [pendingUpdate, setPendingUpdate] = createSignal<ServiceWorker>();
+export { pendingUpdate };
+
+// What a reload would lose in this window, if anything. Editors register one.
+type UpdateGuard = () => Promise<string | undefined>;
+const guards = new Set<UpdateGuard>();
+export function guardUpdate(guard: UpdateGuard) {
+  guards.add(guard);
+  return () => void guards.delete(guard);
+}
+// Set just before the update reloads, after the guards passed or the person
+// confirmed the risks, so the editor does not ask again on unload.
+let leaving = false;
+export const leavingForUpdate = () => leaving;
+
+export type UpdateOutcome =
+  | { status: "unsafe"; risks: string[] }
+  | { status: "others"; others: number }
+  | { status: "reloading" };
+
+/** Other open Mindgrab windows, which must close before this one updates. */
+export const otherWindows = (worker: ServiceWorker) =>
+  ask<{ others: number }>(
+    worker,
+    "MINDGRAB_WINDOWS",
+    "The update did not answer.",
+  ).then(({ others }) => others);
+
+function activated(worker: ServiceWorker) {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("The update did not start.")),
+      10_000,
+    );
+    const check = () => {
+      if (worker.state !== "activated") return;
+      clearTimeout(timer);
+      worker.removeEventListener("statechange", check);
+      resolve();
+    };
+    worker.addEventListener("statechange", check);
+    check();
+  });
+}
+
+// "Update now". Never activates while another window could still run the old
+// build, and never reloads over work a guard reports unless force is set.
+export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
+  const worker = pendingUpdate();
+  if (!worker) throw new Error("No update is waiting.");
+  // Ends text editing, so typed text reaches the map before it is saved.
+  if (document.activeElement instanceof HTMLElement)
+    document.activeElement.blur();
+  const risks: string[] = [];
+  for (const guard of guards) {
+    const risk = await guard().catch((error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    );
+    if (risk) risks.push(risk);
+  }
+  if (risks.length && !force) return { status: "unsafe", risks };
+  const { others, activating } = await ask<{
+    others: number;
+    activating: boolean;
+  }>(worker, "MINDGRAB_ACTIVATE", "The update did not answer.");
+  if (!activating) return { status: "others", others };
+  await activated(worker);
+  leaving = true;
+  window.location.reload();
+  return { status: "reloading" };
 }
 
 const UPDATE_INTERVAL_MS = 5 * 60_000;
@@ -45,11 +125,11 @@ function monitorUpdates() {
     if (observed.has(registration)) return;
     observed.add(registration);
     const report = () => {
-      if (registration.waiting)
-        setOfflineMessage(
-          "An update is ready. Save or export your maps before closing all Mindgrab tabs to reopen. Maps with local saving off are not kept in this browser.",
-        );
-      else if (registration.active)
+      const waiting = registration.waiting ?? undefined;
+      // A waiting worker turns redundant when a newer build replaces it.
+      waiting?.addEventListener("statechange", report);
+      setPendingUpdate(waiting?.state === "installed" ? waiting : undefined);
+      if (registration.active)
         setOfflineMessage(
           "Ready to reopen offline in this browser. Only maps with local saving on are available offline.",
         );

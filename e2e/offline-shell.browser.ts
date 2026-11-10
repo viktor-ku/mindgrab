@@ -11,7 +11,7 @@ import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "playwright";
-import { chromium } from "playwright";
+import { chromium, devices } from "playwright";
 import { build } from "vite";
 import { STORAGE_GENERATION } from "../webapp/src/offline-contract";
 
@@ -139,8 +139,13 @@ afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
-async function launch() {
-  context = await chromium.launchPersistentContext(profile, { headless: true });
+async function launch(
+  options: Parameters<typeof chromium.launchPersistentContext>[1] = {},
+) {
+  context = await chromium.launchPersistentContext(profile, {
+    headless: true,
+    ...options,
+  });
   page = context.pages()[0];
   page.on("pageerror", (error) => errors.push(error.message));
 }
@@ -165,11 +170,12 @@ afterEach(async () => {
 async function load(url = origin) {
   await page.goto(url);
   // A cold profile opens the anonymous workspace until getMe swaps in the
-  // account's, which strands edits and closes menus. The name also shows offline.
+  // account's, which strands edits and closes menus. The name also shows offline
+  // (inside the closed menu on phones).
   await page
     .locator('[aria-label="Account"]', { hasText: `Account ${user}` })
     .first()
-    .waitFor();
+    .waitFor({ state: "attached" });
   await page.waitForSelector('[data-storage-ready="true"]');
   await page.waitForSelector("[data-node-id]");
 }
@@ -203,6 +209,34 @@ async function edit(text: string) {
     .locator(".notice")
     .getByText("Saved locally", { exact: true })
     .waitFor();
+}
+// Set MINDGRAB_SCREENSHOTS to a directory to keep pictures of the notice.
+async function screenshot(target: Page, name: string) {
+  const directory = process.env.MINDGRAB_SCREENSHOTS;
+  if (directory)
+    await target.screenshot({
+      path: join(directory, `${name}.png`),
+      animations: "disabled",
+    });
+}
+const updateNotice = (target: Page) =>
+  target.getByRole("region", { name: "Update" });
+const updateNow = (target: Page, disabled = false) =>
+  updateNotice(target).getByRole("button", { name: "Update now", disabled });
+async function release(target = page) {
+  version = 1;
+  await target.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await waitForWorker(target, async () =>
+    Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+  );
+}
+async function updated(target = page) {
+  await target.waitForFunction(() => document.title === "Mindgrab 1");
+  await target.waitForSelector('[data-storage-ready="true"]');
+  await waitForWorker(
+    target,
+    async () => !(await navigator.serviceWorker.getRegistration())?.waiting,
+  );
 }
 async function cacheKeys() {
   return page.evaluate(async () => {
@@ -318,9 +352,7 @@ test("a new production version waits for all tabs while unsynced edits remain du
   await waitForWorker(page, async () =>
     Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
   );
-  expect(await page.getByLabel("Offline application").innerText()).toContain(
-    "An update is ready",
-  );
+  await updateNotice(page).getByText("Close your other Mindgrab tab").waitFor();
   expect(await page.title()).toBe("Mindgrab 0");
   expect(await second.title()).toBe("Mindgrab 0");
   expect((await cacheKeys()).names).toHaveLength(2);
@@ -408,9 +440,14 @@ test("incompatible cached versions show recovery before opening project storage"
   await waitForWorker(page, async () =>
     Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
   );
-  await context.close();
-  await launch();
-  await load();
+  // No editor runs here, so the update can replace the cached shell at once.
+  await screenshot(page, "desktop-recovery");
+  await updateNow(page).click();
+  await page.waitForSelector('[data-storage-ready="true"]');
+  await waitForWorker(
+    page,
+    async () => !(await navigator.serviceWorker.getRegistration())?.waiting,
+  );
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Do not migrate or delete",
   );
@@ -482,9 +519,7 @@ test("visible tabs retry failed release checks periodically without an online ev
   await waitForWorker(page, async () =>
     Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
   );
-  expect(await page.getByLabel("Offline application").innerText()).toContain(
-    "An update is ready",
-  );
+  await updateNow(page).waitFor();
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Retain through deployment outage",
   );
@@ -521,4 +556,146 @@ test("a failed first registration recovers on reconnect without reopening", asyn
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
     "Work before shell installation",
   );
+});
+
+test("an old tab and a tab opened beside it both offer the update, which waits for the other tab and keeps local edits", async () => {
+  await load();
+  await installed();
+  await edit("Kept through Update now");
+  await release();
+  await updateNotice(page)
+    .getByText("A new version of Mindgrab is ready.")
+    .waitFor();
+  // The update replaces the offline status instead of sharing its look.
+  expect(await page.getByLabel("Offline application").count()).toBe(0);
+  await screenshot(page, "desktop-old-tab");
+  // A tab opened now still gets the old build, and says what to do.
+  const second = await context.newPage();
+  second.on("pageerror", (error) => errors.push(error.message));
+  await second.goto(origin);
+  await second.waitForSelector('[data-storage-ready="true"]');
+  expect(await second.title()).toBe("Mindgrab 0");
+  await updateNotice(second)
+    .getByText("Close your other Mindgrab tab or window to update.")
+    .waitFor();
+  await updateNow(second, true).waitFor();
+  await screenshot(second, "desktop-new-tab");
+  await page.bringToFront();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await updateNow(page, true).waitFor();
+  // Even asked directly, the waiting worker does not take over another tab.
+  expect(
+    await page.evaluate(async () => {
+      const worker = (await navigator.serviceWorker.getRegistration())?.waiting;
+      const channel = new MessageChannel();
+      const reply = new Promise((resolve) => {
+        channel.port1.onmessage = ({ data }) => resolve(data);
+      });
+      worker?.postMessage("MINDGRAB_ACTIVATE", [channel.port2]);
+      return reply;
+    }),
+  ).toEqual({ others: 1, activating: false });
+  expect(
+    await second.evaluate(async () =>
+      Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+    ),
+  ).toBe(true);
+  expect(await second.title()).toBe("Mindgrab 0");
+  await second.close();
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await updateNow(page).click();
+  await updated();
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Kept through Update now",
+  );
+  expect(await updateNotice(page).count()).toBe(0);
+  await page
+    .getByLabel("Offline application")
+    .getByText("Ready to reopen offline", { exact: false })
+    .waitFor();
+  expect((await cacheKeys()).names).toHaveLength(1);
+  await screenshot(page, "desktop-updated");
+  await context.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('[data-storage-ready="true"]');
+  expect(await page.title()).toBe("Mindgrab 1");
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Kept through Update now",
+  );
+});
+
+test("Update now warns and stays before it would lose a map with local saving off", async () => {
+  await load();
+  await installed();
+  await page.locator("[data-node-id]").first().dblclick();
+  await page.getByLabel("Node text").fill("Only in this tab");
+  await page.getByLabel("Node text").press("Enter");
+  await page.getByRole("button", { name: "Project menu" }).click();
+  await page
+    .getByRole("menuitem", { name: "Project preferences…" })
+    .first()
+    .click();
+  await page.getByRole("switch", { name: "Save locally", exact: true }).click();
+  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await release();
+  await updateNow(page).click();
+  const warning = updateNotice(page).getByRole("alert");
+  await warning.getByText("Updating now would lose work").waitFor();
+  expect(await warning.innerText()).toContain(
+    "A map with local saving off is not saved anywhere else yet.",
+  );
+  await screenshot(page, "desktop-unsafe-warning");
+  await updateNotice(page).getByRole("button", { name: "Not now" }).click();
+  await updateNow(page).waitFor();
+  expect(await page.title()).toBe("Mindgrab 0");
+  expect(
+    await page.evaluate(async () =>
+      Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+    ),
+  ).toBe(true);
+  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
+    "Only in this tab",
+  );
+  // Confirming the loss is the only way past the warning.
+  await updateNow(page).click();
+  await updateNotice(page)
+    .getByRole("button", { name: "Update and lose it" })
+    .click();
+  await updated();
+});
+
+test("on a phone the update notice clears the menu and the selection toolbar and updates", async () => {
+  await context.close();
+  const { defaultBrowserType: _, ...phone } = devices["iPhone 13"];
+  await launch({ ...phone, deviceScaleFactor: 2 });
+  await load();
+  await installed();
+  await release();
+  await page.locator("[data-node-id]").first().click();
+  const toolbar = page.getByRole("region", { name: "Selected idea" });
+  await toolbar.waitFor();
+  await updateNow(page).waitFor();
+  const box = async (locator: ReturnType<Page["locator"]>) => {
+    const rect = await locator.boundingBox();
+    if (!rect) throw new Error("Not on screen");
+    return rect;
+  };
+  const notice = await box(updateNotice(page));
+  const viewport = page.viewportSize();
+  expect(notice.x).toBeGreaterThanOrEqual(0);
+  expect(notice.x + notice.width).toBeLessThanOrEqual(viewport?.width ?? 0);
+  for (const other of [
+    await box(page.getByRole("button", { name: "Project menu" })),
+    await box(toolbar),
+  ])
+    expect(
+      notice.x < other.x + other.width &&
+        other.x < notice.x + notice.width &&
+        notice.y < other.y + other.height &&
+        other.y < notice.y + notice.height,
+    ).toBe(false);
+  await screenshot(page, "phone-old-tab");
+  await updateNow(page).click();
+  await updated();
+  expect(await updateNotice(page).count()).toBe(0);
 });
