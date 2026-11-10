@@ -54,10 +54,9 @@ export const leavingForUpdate = () => leaving;
 
 export type UpdateOutcome =
   | { status: "unsafe"; risks: string[] }
-  | { status: "others"; others: number }
   | { status: "reloading" };
 
-/** Other open Mindgrab windows, which must close before this one updates. */
+/** Other open Mindgrab windows, which update along with this one. */
 export const otherWindows = (worker: ServiceWorker) =>
   ask<{ others: number }>(
     worker,
@@ -82,14 +81,8 @@ function activated(worker: ServiceWorker) {
   });
 }
 
-// "Update now". Never activates while another window could still run the old
-// build, and never reloads over work a guard reports unless force is set.
-export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
-  const worker = pendingUpdate();
-  if (!worker) throw new Error("No update is waiting.");
-  // Ends text editing, so typed text reaches the map before it is saved.
-  if (document.activeElement instanceof HTMLElement)
-    document.activeElement.blur();
+// Saves pending work in this window and returns what a reload would lose.
+async function checkGuards() {
   const risks: string[] = [];
   for (const guard of guards) {
     const risk = await guard().catch((error: unknown) =>
@@ -97,13 +90,103 @@ export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
     );
     if (risk) risks.push(risk);
   }
+  return risks;
+}
+
+// Every Mindgrab window of this origin follows an update started in any of
+// them: it saves and reports its risks when asked, and reloads once the new
+// worker takes over. Activation only ever comes from a click on Update now.
+type TabMessage =
+  | { type: "prepare"; id: string }
+  | { type: "prepared"; id: string; risks: string[] }
+  | { type: "reload" };
+let tabs: BroadcastChannel | undefined;
+let initiating = false;
+async function follow() {
+  if (initiating || leaving) return;
+  await checkGuards();
+  leaving = true;
+  window.location.reload();
+}
+function listenToTabs() {
+  if (tabs || !("BroadcastChannel" in window)) return;
+  const channel = new BroadcastChannel("mindgrab-update");
+  tabs = channel;
+  channel.addEventListener("message", (event: MessageEvent<TabMessage>) => {
+    const message = event.data;
+    if (message?.type === "prepare")
+      void checkGuards().then((risks) =>
+        channel.postMessage({
+          type: "prepared",
+          id: message.id,
+          risks,
+        } satisfies TabMessage),
+      );
+    if (message?.type === "reload") void follow();
+  });
+  // No worker claims a running page, so a new controller means Update now.
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    void follow();
+  });
+}
+
+const PREPARE_TIMEOUT_MS = 5000;
+// Asks the other windows to save, and collects what their reload would lose.
+// A window that does not answer (a frozen background tab) counts as a risk.
+function prepareOthers(expected: number) {
+  const channel = tabs;
+  if (!expected || !channel) return Promise.resolve<string[]>([]);
+  const id = crypto.randomUUID();
+  return new Promise<string[]>((resolve) => {
+    const risks = new Set<string>();
+    let answered = 0;
+    const finish = () => {
+      clearTimeout(timer);
+      channel.removeEventListener("message", reply);
+      const silent = expected - answered;
+      if (silent > 0)
+        risks.add(
+          `${silent === 1 ? "Another Mindgrab tab" : `${silent} other Mindgrab tabs`} did not answer, so unsaved work there could be lost.`,
+        );
+      resolve([...risks]);
+    };
+    const reply = ({ data }: MessageEvent<TabMessage>) => {
+      if (data?.type !== "prepared" || data.id !== id) return;
+      answered++;
+      for (const risk of data.risks) risks.add(`In another tab: ${risk}`);
+      if (answered >= expected) finish();
+    };
+    const timer = setTimeout(finish, PREPARE_TIMEOUT_MS);
+    channel.addEventListener("message", reply);
+    channel.postMessage({ type: "prepare", id } satisfies TabMessage);
+  });
+}
+
+// "Update now", which the person clicks for every open Mindgrab tab. Each tab
+// saves first; the new build takes over only when no tab would lose work, or
+// after the person confirms what would be lost (force).
+export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
+  const worker = pendingUpdate();
+  if (!worker) throw new Error("No update is waiting.");
+  // Ends text editing, so typed text reaches the map before it is saved.
+  if (document.activeElement instanceof HTMLElement)
+    document.activeElement.blur();
+  const [own, others] = await Promise.all([
+    checkGuards(),
+    otherWindows(worker).then(prepareOthers),
+  ]);
+  const risks = [...own, ...others];
   if (risks.length && !force) return { status: "unsafe", risks };
-  const { others, activating } = await ask<{
-    others: number;
-    activating: boolean;
-  }>(worker, "MINDGRAB_ACTIVATE", "The update did not answer.");
-  if (!activating) return { status: "others", others };
-  await activated(worker);
+  initiating = true;
+  try {
+    await ask(worker, "MINDGRAB_ACTIVATE", "The update did not answer.");
+    await activated(worker);
+  } catch (error) {
+    initiating = false;
+    throw error;
+  }
+  // Controlled tabs already follow controllerchange; this reaches the rest.
+  tabs?.postMessage({ type: "reload" } satisfies TabMessage);
   leaving = true;
   window.location.reload();
   return { status: "reloading" };
@@ -118,8 +201,9 @@ const register = () =>
 
 // Keep discovery alive even if an offline startup/failed deployment prevents the
 // first registration. Visible tabs retry periodically and on focus/reconnect
-// hints. Never activate or reload a running editor here.
+// hints. Nothing here activates a worker or reloads a tab on its own.
 function monitorUpdates() {
+  listenToTabs();
   const observed = new WeakSet<ServiceWorkerRegistration>();
   const observe = (registration: ServiceWorkerRegistration) => {
     if (observed.has(registration)) return;

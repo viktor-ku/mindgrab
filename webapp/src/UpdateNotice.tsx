@@ -1,20 +1,15 @@
 import { makeEventListener } from "@solid-primitives/event-listener";
-import {
-  createMutation,
-  createQuery,
-  useQueryClient,
-} from "@tanstack/solid-query";
+import { createMutation, createQuery } from "@tanstack/solid-query";
 import { createEffect, For, Match, Show, Switch } from "solid-js";
 import { applyUpdate, otherWindows, pendingUpdate } from "./offline-shell";
 
 const plural = (count: number, word: string) =>
   `${count} ${word}${count === 1 ? "" : "s"}`;
 
-// A newer build waits until no window runs the old one. This stays on screen
-// until the person updates, and says what stands in the way when something
-// does: other open Mindgrab windows, or work that a reload would lose.
+// A newer build waits until the person updates. This stays on screen until
+// then, says which other open tabs update along with this one, and warns
+// before any of them would lose work.
 export function UpdateNotice(props: { inline?: boolean }) {
-  const queryClient = useQueryClient();
   const ids = new WeakMap<ServiceWorker, number>();
   let count = 0;
   const windowsKey = () => {
@@ -28,8 +23,8 @@ export function UpdateNotice(props: { inline?: boolean }) {
       queryKey: windowsKey(),
       queryFn: () => (worker ? otherWindows(worker) : 0),
       enabled: !!worker,
-      // Closing another tab happens elsewhere, so look again while visible
-      // and as soon as this window regains focus.
+      // Tabs open and close elsewhere, so look again while visible and as
+      // soon as this window regains focus.
       refetchInterval: 3000,
       refetchOnWindowFocus: "always" as const,
       retry: false,
@@ -38,12 +33,6 @@ export function UpdateNotice(props: { inline?: boolean }) {
   const update = createMutation(() => ({
     mutationKey: ["offline-shell", "apply-update"],
     mutationFn: (force: boolean) => applyUpdate(force),
-    // Another window opened since the last look: show it like the poll would.
-    onSuccess: (outcome) => {
-      if (outcome.status !== "others") return;
-      queryClient.setQueryData(windowsKey(), outcome.others);
-      update.reset();
-    },
   }));
   const others = () => windows.data ?? 0;
   const busy = () => update.isPending || update.data?.status === "reloading";
@@ -95,11 +84,11 @@ export function UpdateNotice(props: { inline?: boolean }) {
                   {(count) => (
                     <>
                       {" "}
-                      Close your other{" "}
+                      Updating also reloads your other{" "}
                       {count() === 1
-                        ? "Mindgrab tab or window"
-                        : `${plural(count(), "Mindgrab tab")} or windows`}{" "}
-                      to update.
+                        ? "Mindgrab tab"
+                        : plural(count(), "Mindgrab tab")}
+                      .
                     </>
                   )}
                 </Show>
@@ -107,7 +96,6 @@ export function UpdateNotice(props: { inline?: boolean }) {
               <button
                 type="button"
                 class="primary-button compact shrink-0"
-                disabled={others() > 0}
                 onClick={() => update.mutate(false)}
               >
                 Update now
@@ -168,8 +156,8 @@ export function UpdateNotice(props: { inline?: boolean }) {
                 <span class="font-semibold">
                   A new version of Mindgrab is ready.
                 </span>{" "}
-                It could not start here. Close every Mindgrab tab and window,
-                then open Mindgrab again.
+                The update could not start. Try again, or close every Mindgrab
+                tab and open Mindgrab again.
               </p>
               <button
                 type="button"

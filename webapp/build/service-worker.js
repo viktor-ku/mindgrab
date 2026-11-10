@@ -25,7 +25,7 @@ self.addEventListener("install", (event) => {
         throw error;
       }
       // No automatic skipWaiting: old clients must retain their build and
-      // pending writes. Only the last open window may ask for it (below).
+      // pending writes. Only a click on Update now asks for it (below).
     })(),
   );
 });
@@ -47,9 +47,9 @@ self.addEventListener("message", (event) => {
       version: BUILD.version,
       compatibility: BUILD.compatibility,
     });
-  // Asked of a waiting worker by the "Update now" button. Activation changes
-  // the worker of every open Mindgrab window, so it happens only from the last
-  // one, which reloads itself right after. Any other window keeps its build.
+  // Asked of a waiting worker by the "Update now" button, which the person
+  // clicks for every open Mindgrab window. Those windows save their work
+  // first and reload as soon as this worker takes over.
   if (event.data === "MINDGRAB_WINDOWS" || event.data === "MINDGRAB_ACTIVATE")
     event.waitUntil(
       (async () => {
@@ -60,9 +60,8 @@ self.addEventListener("message", (event) => {
         const others = windows.filter(
           (client) => client.id !== event.source?.id,
         ).length;
-        const activating = event.data === "MINDGRAB_ACTIVATE" && others === 0;
-        if (activating) await self.skipWaiting();
-        event.ports[0]?.postMessage({ others, activating });
+        if (event.data === "MINDGRAB_ACTIVATE") await self.skipWaiting();
+        event.ports[0]?.postMessage({ others });
       })(),
     );
 });

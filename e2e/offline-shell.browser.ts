@@ -352,7 +352,9 @@ test("a new production version waits for all tabs while unsynced edits remain du
   await waitForWorker(page, async () =>
     Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
   );
-  await updateNotice(page).getByText("Close your other Mindgrab tab").waitFor();
+  await updateNotice(page)
+    .getByText("Updating also reloads your other Mindgrab tab")
+    .waitFor();
   expect(await page.title()).toBe("Mindgrab 0");
   expect(await second.title()).toBe("Mindgrab 0");
   expect((await cacheKeys()).names).toHaveLength(2);
@@ -558,7 +560,7 @@ test("a failed first registration recovers on reconnect without reopening", asyn
   );
 });
 
-test("an old tab and a tab opened beside it both offer the update, which waits for the other tab and keeps local edits", async () => {
+test("an old tab and a tab opened beside it both offer the update, and one click moves both to the new build with their edits", async () => {
   await load();
   await installed();
   await edit("Kept through Update now");
@@ -569,52 +571,39 @@ test("an old tab and a tab opened beside it both offer the update, which waits f
   // The update replaces the offline status instead of sharing its look.
   expect(await page.getByLabel("Offline application").count()).toBe(0);
   await screenshot(page, "desktop-old-tab");
-  // A tab opened now still gets the old build, and says what to do.
+  // A tab opened now still gets the old build, and offers the same update.
   const second = await context.newPage();
   second.on("pageerror", (error) => errors.push(error.message));
   await second.goto(origin);
   await second.waitForSelector('[data-storage-ready="true"]');
   expect(await second.title()).toBe("Mindgrab 0");
   await updateNotice(second)
-    .getByText("Close your other Mindgrab tab or window to update.")
+    .getByText("Updating also reloads your other Mindgrab tab.")
     .waitFor();
-  await updateNow(second, true).waitFor();
   await screenshot(second, "desktop-new-tab");
   await page.bringToFront();
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await updateNow(page, true).waitFor();
-  // Even asked directly, the waiting worker does not take over another tab.
-  expect(
-    await page.evaluate(async () => {
-      const worker = (await navigator.serviceWorker.getRegistration())?.waiting;
-      const channel = new MessageChannel();
-      const reply = new Promise((resolve) => {
-        channel.port1.onmessage = ({ data }) => resolve(data);
-      });
-      worker?.postMessage("MINDGRAB_ACTIVATE", [channel.port2]);
-      return reply;
-    }),
-  ).toEqual({ others: 1, activating: false });
-  expect(
-    await second.evaluate(async () =>
-      Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
-    ),
-  ).toBe(true);
+  await updateNotice(page)
+    .getByText("Updating also reloads your other Mindgrab tab.")
+    .waitFor();
+  // Nothing reloads until someone clicks.
+  expect(await page.title()).toBe("Mindgrab 0");
   expect(await second.title()).toBe("Mindgrab 0");
-  await second.close();
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await updateNow(page).click();
-  await updated();
-  expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Kept through Update now",
-  );
-  expect(await updateNotice(page).count()).toBe(0);
+  await Promise.all([updated(page), updated(second)]);
+  for (const target of [page, second]) {
+    expect(await target.locator("[data-node-id]").first().innerText()).toBe(
+      "Kept through Update now",
+    );
+    expect(await updateNotice(target).count()).toBe(0);
+  }
   await page
     .getByLabel("Offline application")
     .getByText("Ready to reopen offline", { exact: false })
     .waitFor();
   expect((await cacheKeys()).names).toHaveLength(1);
   await screenshot(page, "desktop-updated");
+  await second.close();
   await context.setOffline(true);
   await page.reload();
   await page.waitForSelector('[data-storage-ready="true"]');
@@ -624,44 +613,55 @@ test("an old tab and a tab opened beside it both offer the update, which waits f
   );
 });
 
-test("Update now warns and stays before it would lose a map with local saving off", async () => {
+test("Update now warns and stays before any tab would lose a map with local saving off", async () => {
   await load();
   await installed();
   await page.locator("[data-node-id]").first().dblclick();
-  await page.getByLabel("Node text").fill("Only in this tab");
+  await page.getByLabel("Node text").fill("Only in these tabs");
   await page.getByLabel("Node text").press("Enter");
-  await page.getByRole("button", { name: "Project menu" }).click();
-  await page
+  const second = await context.newPage();
+  second.on("pageerror", (error) => errors.push(error.message));
+  await second.goto(origin);
+  await second.waitForSelector('[data-storage-ready="true"]');
+  // Local saving is turned off in the other tab.
+  await second.getByRole("button", { name: "Project menu" }).click();
+  await second
     .getByRole("menuitem", { name: "Project preferences…" })
     .first()
     .click();
-  await page.getByRole("switch", { name: "Save locally", exact: true }).click();
-  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await second
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await second
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  await page.bringToFront();
   await release();
   await updateNow(page).click();
   const warning = updateNotice(page).getByRole("alert");
   await warning.getByText("Updating now would lose work").waitFor();
   expect(await warning.innerText()).toContain(
-    "A map with local saving off is not saved anywhere else yet.",
+    "In another tab: A map with local saving off is not saved anywhere else yet.",
   );
   await screenshot(page, "desktop-unsafe-warning");
   await updateNotice(page).getByRole("button", { name: "Not now" }).click();
   await updateNow(page).waitFor();
   expect(await page.title()).toBe("Mindgrab 0");
+  expect(await second.title()).toBe("Mindgrab 0");
   expect(
     await page.evaluate(async () =>
       Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
     ),
   ).toBe(true);
   expect(await page.locator("[data-node-id]").first().innerText()).toBe(
-    "Only in this tab",
+    "Only in these tabs",
   );
   // Confirming the loss is the only way past the warning.
   await updateNow(page).click();
   await updateNotice(page)
     .getByRole("button", { name: "Update and lose it" })
     .click();
-  await updated();
+  await Promise.all([updated(page), updated(second)]);
 });
 
 test("on a phone the update notice clears the menu and the selection toolbar and updates", async () => {
