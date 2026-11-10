@@ -613,6 +613,30 @@ test("an old tab and a tab opened beside it both offer the update, and one click
   );
 });
 
+test("a map name still being typed in another tab is kept through Update now", async () => {
+  await load();
+  await installed();
+  const second = await context.newPage();
+  second.on("pageerror", (error) => errors.push(error.message));
+  await second.goto(origin);
+  await second.waitForSelector('[data-storage-ready="true"]');
+  // Typed, but neither entered nor blurred.
+  await second
+    .getByRole("textbox", { name: "Project name" })
+    .fill("Typed in the other tab");
+  await page.bringToFront();
+  await release();
+  await updateNow(page).click();
+  await Promise.all([updated(page), updated(second)]);
+  for (const target of [page, second])
+    await target.waitForFunction(
+      () =>
+        document.querySelector<HTMLInputElement>(
+          'input[aria-label="Project name"]',
+        )?.value === "Typed in the other tab",
+    );
+});
+
 test("Update now warns and stays before any tab would lose a map with local saving off", async () => {
   await load();
   await installed();

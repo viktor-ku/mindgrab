@@ -3658,6 +3658,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       guardUpdate(async () => {
         if (parked.size)
           return "Changes to a map you closed are not saved yet.";
+        // Typing still in progress here (an idea's text or the map name)
+        // becomes part of the map first, as Save now does.
+        finishWriting();
+        finishProjectName();
         try {
           await localSave.save();
         } catch {
