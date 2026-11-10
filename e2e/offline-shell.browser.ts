@@ -664,6 +664,71 @@ test("Update now warns and stays before any tab would lose a map with local savi
   await Promise.all([updated(page), updated(second)]);
 });
 
+test("a tab that gains a risk after answering stays open and asks after the update goes ahead elsewhere", async () => {
+  await load();
+  await installed();
+  const second = await context.newPage();
+  second.on("pageerror", (error) => errors.push(error.message));
+  // The race: this tab answers "nothing at risk", and the person turns local
+  // saving off right after. Its answer is pinned to that earlier moment.
+  await second.addInitScript(() => {
+    const post = BroadcastChannel.prototype.postMessage;
+    BroadcastChannel.prototype.postMessage = function (message) {
+      return post.call(
+        this,
+        message?.type === "prepared" ? { ...message, risks: [] } : message,
+      );
+    };
+  });
+  await second.goto(origin);
+  await second.waitForSelector('[data-storage-ready="true"]');
+  await second.locator("[data-node-id]").first().dblclick();
+  await second.getByLabel("Node text").fill("Never confirmed");
+  await second.getByLabel("Node text").press("Enter");
+  await second.getByRole("button", { name: "Project menu" }).click();
+  await second
+    .getByRole("menuitem", { name: "Project preferences…" })
+    .first()
+    .click();
+  await second
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await second
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  await page.bringToFront();
+  await release();
+  await updateNow(page).click();
+  // Only this tab's own risk is known and confirmed here.
+  const warning = updateNotice(page).getByRole("alert");
+  await warning.getByText("Updating now would lose work").waitFor();
+  expect(await warning.innerText()).not.toContain("In another tab");
+  await updateNotice(page)
+    .getByRole("button", { name: "Update and lose it" })
+    .click();
+  await updated(page);
+  const stranded = updateNotice(second).getByRole("alert");
+  await stranded.getByText("Mindgrab was updated in another tab").waitFor();
+  expect(await stranded.innerText()).toContain(
+    "A map with local saving off is not saved anywhere else yet.",
+  );
+  await screenshot(second, "desktop-stranded-tab");
+  expect(await second.title()).toBe("Mindgrab 0");
+  expect(await second.locator("[data-node-id]").first().innerText()).toBe(
+    "Never confirmed",
+  );
+  // Checking again keeps it open while the risk remains.
+  await updateNotice(second)
+    .getByRole("button", { name: "Check again" })
+    .click();
+  await stranded.getByText("Mindgrab was updated in another tab").waitFor();
+  expect(await second.title()).toBe("Mindgrab 0");
+  await updateNotice(second)
+    .getByRole("button", { name: "Reload and lose it" })
+    .click();
+  await updated(second);
+});
+
 test("on a phone the update notice clears the menu and the selection toolbar and updates", async () => {
   await context.close();
   const { defaultBrowserType: _, ...phone } = devices["iPhone 13"];

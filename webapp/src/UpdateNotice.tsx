@@ -1,7 +1,14 @@
 import { makeEventListener } from "@solid-primitives/event-listener";
 import { createMutation, createQuery } from "@tanstack/solid-query";
 import { createEffect, For, Match, Show, Switch } from "solid-js";
-import { applyUpdate, otherWindows, pendingUpdate } from "./offline-shell";
+import {
+  applyUpdate,
+  follow,
+  otherWindows,
+  pendingUpdate,
+  reloadAnyway,
+  strandedRisks,
+} from "./offline-shell";
 
 const plural = (count: number, word: string) =>
   `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -34,6 +41,10 @@ export function UpdateNotice(props: { inline?: boolean }) {
     mutationKey: ["offline-shell", "apply-update"],
     mutationFn: (force: boolean) => applyUpdate(force),
   }));
+  const recheck = createMutation(() => ({
+    mutationKey: ["offline-shell", "follow-update"],
+    mutationFn: follow,
+  }));
   const others = () => windows.data ?? 0;
   const busy = () => update.isPending || update.data?.status === "reloading";
   // While saving and reloading, no input may reach the map: an edit made now
@@ -56,7 +67,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
 
   return (
     // Activation clears pendingUpdate just before the reload; stay until then.
-    <Show when={pendingUpdate() || busy()}>
+    <Show when={pendingUpdate() || busy() || strandedRisks()}>
       <Show when={busy()}>
         <div class="fixed inset-0 z-[60] cursor-progress bg-white/40" />
       </Show>
@@ -70,7 +81,10 @@ export function UpdateNotice(props: { inline?: boolean }) {
             ? "update-notice relative my-4 max-w-lg"
             : "update-notice fixed top-3 right-3 left-[4.5rem] z-30 sm:left-1/2 sm:right-auto sm:z-40 sm:w-max sm:max-w-[min(30rem,calc(100%-1.5rem))] sm:-translate-x-1/2"
         }
-        classList={{ "z-[61]!": busy(), warning: !!risks() }}
+        classList={{
+          "z-[61]!": busy(),
+          warning: !!risks() || !!strandedRisks(),
+        }}
       >
         <Switch
           fallback={
@@ -103,6 +117,39 @@ export function UpdateNotice(props: { inline?: boolean }) {
             </div>
           }
         >
+          <Match when={strandedRisks()}>
+            {(list) => (
+              <div role="alert" class="text-[0.8125rem]">
+                <p class="font-semibold">Mindgrab was updated in another tab</p>
+                <p class="mt-1 text-stone-700">
+                  This tab stays open because reloading it would lose work:
+                </p>
+                <ul class="mt-1 list-disc pl-5 text-stone-700">
+                  <For each={list()}>{(risk) => <li>{risk}</li>}</For>
+                </ul>
+                <p class="mt-1 text-stone-700">
+                  Export your maps or wait until they are saved, then reload.
+                </p>
+                <div class="mt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    class="map-control outlined"
+                    disabled={recheck.isPending}
+                    onClick={() => recheck.mutate()}
+                  >
+                    Check again
+                  </button>
+                  <button
+                    type="button"
+                    class="primary-button compact danger"
+                    onClick={reloadAnyway}
+                  >
+                    Reload and lose it
+                  </button>
+                </div>
+              </div>
+            )}
+          </Match>
           <Match when={busy()}>
             <div class="flex items-center gap-3">
               <span aria-hidden="true" class="update-dot pulsing" />
