@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import { Dialog } from "./Dialog";
+import { press } from "./press";
 
 // What the red save dot opens: why saving failed and how to act on it.
 export function SaveErrorDialog(props: {
@@ -34,7 +35,11 @@ export function SaveErrorDialog(props: {
           <div class="mt-2 flex flex-wrap gap-2 empty:hidden">
             <Show when={props.onRetryLocal}>
               {(retry) => (
-                <button type="button" class="primary-button" onClick={retry()}>
+                <button
+                  type="button"
+                  class="primary-button"
+                  {...press(retry())}
+                >
                   Retry local saving
                 </button>
               )}
@@ -50,7 +55,7 @@ export function SaveErrorDialog(props: {
                       ? "map-control outlined"
                       : "primary-button"
                   }
-                  onClick={retry()}
+                  {...press(retry())}
                 >
                   {props.onRetryLocal ? "Retry cloud saving" : "Retry"}
                 </button>

@@ -3,6 +3,7 @@ import { closeOnEscape } from "./escape-key";
 import { CloseIcon } from "./icons";
 import type { ProjectDocument } from "./project-document";
 import { bindTextarea } from "./text-binding";
+import { press } from "./press";
 
 // Details for the selected idea, opened deliberately so notes never cover the
 // map while writing. The textarea is bound to the shared note text, so remote
@@ -54,7 +55,7 @@ export function NotesPanel(props: {
           aria-label="Close notes"
           // Esc, not the Alt shortcut: the notes field keeps that key for typing.
           title="Close notes (Esc)"
-          onClick={props.onClose}
+          {...press(props.onClose)}
         >
           <CloseIcon class="size-4" />
         </button>

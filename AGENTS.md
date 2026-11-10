@@ -30,3 +30,17 @@
   retries, polls (`refetchInterval`) and refetches on focus and reconnect.
 - Shared defaults live in `webapp/src/query-client.ts`; override them per query
   rather than working around them.
+
+## Webapp presses
+
+- Controls act when the mouse button goes down, not on release. Spread
+  `press(handler)` from `webapp/src/press.ts` on buttons and other clickable
+  elements instead of writing `onClick`. It keeps Enter, Space and touch taps
+  working, and skips the click that follows a press.
+- Biome rejects `onClick` in the webapp (`webapp/lint/press-not-click.grit`).
+  Keep a release-only `onClick` only where a press starts something else, such as
+  a drag or pan, and suppress the rule there with
+  `// biome-ignore lint/plugin: <why>`.
+- Like a click, a press moves focus off whatever had it before the action runs,
+  and onto the control after, unless the action took focus itself (into a menu,
+  back to the map).

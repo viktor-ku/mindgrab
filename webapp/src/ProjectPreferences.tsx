@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import { Dialog } from "./Dialog";
 import type { SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
+import { press } from "./press";
 
 export function ProjectPreferences(props: {
   open: boolean;
@@ -72,13 +73,13 @@ export function ProjectPreferences(props: {
                 class="saving-switch"
                 aria-disabled={props.busy}
                 data-busy={props.busy ? "" : undefined}
-                onClick={() => {
+                {...press(() => {
                   if (props.busy) return;
                   props.onChange({
                     ...props.saving,
                     [option.key]: !props.saving[option.key],
                   });
-                }}
+                })}
               >
                 <span>{props.saving[option.key] ? "On" : "Off"}</span>
               </button>
@@ -94,7 +95,7 @@ export function ProjectPreferences(props: {
           <button
             type="button"
             class="map-control outlined mt-2"
-            onClick={() => props.onSignIn?.()}
+            {...press(() => props.onSignIn?.())}
           >
             Sign in
           </button>
@@ -113,7 +114,7 @@ export function ProjectPreferences(props: {
           <button
             type="button"
             class="map-control outlined mt-2"
-            onClick={props.onExport}
+            {...press(props.onExport)}
           >
             Export backup
           </button>
@@ -154,11 +155,11 @@ export function ProjectPreferences(props: {
           type="button"
           class="map-control outlined mt-2"
           disabled={props.busy}
-          onClick={() => {
+          {...press(() => {
             props.onChange(props.saving);
             // This button disables itself and then goes away.
             firstSwitch?.focus();
-          }}
+          })}
         >
           Retry
         </button>
@@ -167,7 +168,7 @@ export function ProjectPreferences(props: {
         <button
           type="button"
           class="map-control outlined mt-6"
-          onClick={() => props.onReviewAnalytics?.()}
+          {...press(() => props.onReviewAnalytics?.())}
         >
           Analytics choice…
         </button>

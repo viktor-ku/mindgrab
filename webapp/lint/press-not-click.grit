@@ -1,0 +1,6 @@
+language js
+
+JsxAttribute(name=$name) as $attr where {
+  $name <: `onClick`,
+  register_diagnostic(span=$attr, message="Act on the press: spread press(handler) from src/press.ts instead of onClick.", severity="error")
+}

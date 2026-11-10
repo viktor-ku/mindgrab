@@ -9,6 +9,7 @@ import {
   HEALTH_REFRESH_MS,
 } from "./health";
 import type { ComponentHealth, ComponentState, Overall } from "./health";
+import { press } from "./press";
 
 const routeApi = getRouteApi("/checkhealth");
 const REFRESH_MS = HEALTH_REFRESH_MS;
@@ -193,7 +194,7 @@ export function CheckHealth() {
           type="button"
           class="map-control outlined"
           disabled={refreshing()}
-          onClick={() => void refresh()}
+          {...press(() => void refresh())}
         >
           {refreshing() ? "Checking…" : "Refresh"}
         </button>

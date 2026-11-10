@@ -160,6 +160,7 @@ import { createLocalSave } from "./local-save";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
 import { panelEdges, panelInsets } from "./view-insets";
+import { press } from "./press";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
   new Map([
@@ -384,6 +385,7 @@ export function Node(props: {
       data-selected={props.selected}
       data-collapsed={props.collapsed}
       onPointerDown={props.onPointerDown}
+      // biome-ignore lint/plugin: A press already selects through onPointerDown; this click is Enter or Space on the idea's button.
       onClick={props.onSelect}
       onDblClick={props.onWrite}
       style={{
@@ -469,10 +471,10 @@ export function Node(props: {
                 : `Expand children (${ALT_LABEL}G)`
             }
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
+            {...press((e) => {
               e.stopPropagation();
               props.onToggleCollapse();
-            }}
+            })}
           >
             +{props.descendants} {props.descendants === 1 ? "idea" : "ideas"}
           </button>
@@ -4127,7 +4129,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         class="menu-item"
         aria-expanded={showLoad()}
         aria-controls="saved-projects"
-        onClick={() => (showLoad() ? setShowLoad(false) : void openLoad())}
+        {...press(() => (showLoad() ? setShowLoad(false) : void openLoad()))}
       >
         Open map…
         <ChevronRightIcon
@@ -4187,10 +4189,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   class="menu-item"
                   aria-label={`${project.name} · ${project.id.slice(0, 8)}`}
                   aria-current={project.id === doc().id ? "true" : undefined}
-                  onClick={() => {
+                  {...press(() => {
                     setMenuOpen(false);
                     load(project.id);
-                  }}
+                  })}
                 >
                   <span class="min-w-0 flex-1">
                     <span class="block truncate">{project.name}</span>
@@ -4293,7 +4295,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Project menu"
               aria-haspopup="dialog"
               aria-expanded={menuOpen()}
-              onClick={toggleProjectMenu}
+              {...press(toggleProjectMenu)}
             >
               <MenuIcon />
             </button>
@@ -4314,7 +4316,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               title="Project menu"
               aria-haspopup="menu"
               aria-expanded={menuOpen()}
-              onClick={toggleProjectMenu}
+              {...press(toggleProjectMenu)}
             >
               <ChevronDownIcon />
             </button>
@@ -4340,7 +4342,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   data-label="Couldn’t save · click for details"
                   aria-label="Save error details"
                   aria-haspopup="dialog"
-                  onClick={() => setSaveErrorOpen(true)}
+                  {...press(() => setSaveErrorOpen(true))}
                 />
               </Show>
             </fieldset>
@@ -4368,10 +4370,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   createNewProject();
-                }}
+                })}
               >
                 New map
               </button>
@@ -4380,10 +4382,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   importProjectFromFile();
-                }}
+                })}
               >
                 Import backup…
               </button>
@@ -4392,10 +4394,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   save();
-                }}
+                })}
               >
                 Save now
                 <kbd class="ml-auto">{MOD_LABEL}S</kbd>
@@ -4404,10 +4406,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   exportCurrentProject();
-                }}
+                })}
               >
                 Export backup (.json)
               </button>
@@ -4415,10 +4417,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 role="menuitem"
                 class="menu-item"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   void exportMarkdown();
-                }}
+                })}
               >
                 Export outline (.md)
               </button>
@@ -4428,12 +4430,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 role="menuitem"
                 class="menu-item"
                 aria-haspopup="dialog"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   finishWriting();
                   finishProjectName();
                   setShowShare(true);
-                }}
+                })}
               >
                 Share link…
               </button>
@@ -4442,13 +4444,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 role="menuitem"
                 class="menu-item"
                 aria-haspopup="dialog"
-                onClick={() => {
+                {...press(() => {
                   setMenuOpen(false);
                   finishWriting();
                   finishProjectName();
                   returnToShare = false;
                   setShowPreferences(true);
-                }}
+                })}
               >
                 Project preferences…
               </button>
@@ -4457,10 +4459,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   type="button"
                   role="menuitem"
                   class="menu-item"
-                  onClick={() => {
+                  {...press(() => {
                     setMenuOpen(false);
                     reviewConsent();
-                  }}
+                  })}
                 >
                   Analytics choice…
                 </button>
@@ -4505,10 +4507,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   class="icon-button size-8!"
                   aria-label="Dismiss"
                   title="Dismiss"
-                  onClick={() => {
+                  {...press(() => {
                     setStorageMessage("");
                     canvas.focus({ preventScroll: true });
-                  }}
+                  })}
                 >
                   <CloseIcon class="size-4" />
                 </button>
@@ -4519,7 +4521,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <button
                   type="button"
                   class="map-control outlined"
-                  onClick={retryLocal}
+                  {...press(retryLocal)}
                 >
                   Retry local saving
                 </button>
@@ -4546,7 +4548,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   aria-label="Undo"
                   title={`Undo (${MOD_LABEL}Z)`}
                   disabled={!canUndo()}
-                  onClick={undo}
+                  {...press(undo)}
                 >
                   <UndoIcon />
                 </button>
@@ -4556,7 +4558,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   aria-label="Redo"
                   title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
                   disabled={!canRedo()}
-                  onClick={redo}
+                  {...press(redo)}
                 >
                   <RedoIcon />
                 </button>
@@ -4568,9 +4570,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label="Search"
                 title={`Search (${MOD_LABEL}F)`}
                 aria-expanded={searchOpen()}
-                onClick={() =>
-                  searchOpen() ? closeSearch(false) : openSearch()
-                }
+                {...press(() =>
+                  searchOpen() ? closeSearch(false) : openSearch(),
+                )}
               >
                 <SearchIcon />
               </button>
@@ -4580,10 +4582,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 aria-label="Outline"
                 title={`Outline (${ALT_LABEL}O)`}
                 aria-expanded={outlineOpen()}
-                onClick={(e) => {
+                {...press((e) => {
                   setOutlineOpen((open) => !open);
                   backToCanvas(e);
-                }}
+                })}
               >
                 <OutlineIcon />
               </button>
@@ -4659,7 +4661,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 class="icon-button -mr-1"
                 aria-label="Close search"
                 title="Close search (Esc)"
-                onClick={() => closeSearch(false)}
+                {...press(() => closeSearch(false))}
               >
                 <CloseIcon class="size-4" />
               </button>
@@ -4680,7 +4682,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   }
                 >
                   {(result, index) => (
-                    // biome-ignore lint/a11y/useKeyWithClickEvents: The search field owns keyboard selection through aria-activedescendant.
                     <div
                       id={`search-result-${index()}`}
                       role="option"
@@ -4688,10 +4689,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       aria-selected={index() === searchIndex()}
                       class="search-result"
                       onPointerEnter={() => setSearchIndex(index())}
-                      onClick={() => {
+                      {...press(() => {
                         setSearchIndex(index());
                         closeSearch(true);
-                      }}
+                      })}
                     >
                       <span class="block truncate text-sm text-stone-800">
                         {result.text.slice(0, result.match[0])}
@@ -4791,7 +4792,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="map-control flex h-9 shrink-0 items-center gap-1.5"
               title="Show the whole map (Esc with nothing selected)"
-              onClick={exitFocus}
+              {...press(exitFocus)}
             >
               <ArrowLeftIcon class="size-4" />
               <span classList={{ "sr-only": crumbRoom() < 240 }}>
@@ -4818,7 +4819,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     <button
                       type="button"
                       class="map-control h-9 max-w-36 shrink-3 truncate"
-                      onClick={() => focusBranch(id)}
+                      {...press(() => focusBranch(id))}
                     >
                       {nodeLabel(id)}
                     </button>
@@ -4839,12 +4840,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="map-control flex h-9 min-w-0 items-center gap-1.5"
               title="Restore the view and folds from before the search"
-              onClick={() => {
+              {...press(() => {
                 const back = returnView();
                 setReturnView(undefined);
                 if (back) restoreView(back);
                 canvas.focus({ preventScroll: true });
-              }}
+              })}
             >
               <ArrowLeftIcon class="size-4 shrink-0" />
               <span class="truncate">Back to where you were</span>
@@ -4854,7 +4855,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               class="icon-button"
               aria-label="Stay here"
               title="Stay here"
-              onClick={() => setReturnView(undefined)}
+              {...press(() => setReturnView(undefined))}
             >
               <CloseIcon class="size-4" />
             </button>
@@ -4882,7 +4883,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   <button
                     type="button"
                     class="notice-action"
-                    onClick={() => {
+                    {...press(() => {
                       setNotice(undefined);
                       const undoing = action().run === undo;
                       action().run();
@@ -4891,7 +4892,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                           message: "Undone",
                           action: { label: "Redo", run: redo },
                         });
-                    }}
+                    })}
                   >
                     {action().label}
                   </button>
@@ -4981,7 +4982,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                           (selectedNode()?.color ?? "blue") === color.value
                         }
                         title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
-                        onClick={() => colorSelectedNode(color.value)}
+                        {...press(() => colorSelectedNode(color.value))}
                       >
                         <span
                           aria-hidden="true"
@@ -5023,7 +5024,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="tool-button"
               title="Add a child idea (Tab)"
-              onClick={() => add("child")}
+              {...press(() => add("child"))}
             >
               <ChildIcon />
               <span class="max-sm:sr-only">Child</span>
@@ -5034,7 +5035,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               // Enter on a central idea adds a child instead.
               title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
               disabled={selectedId() === focusId()}
-              onClick={() => add("sibling")}
+              {...press(() => add("sibling"))}
             >
               <SiblingIcon />
               <span class="max-sm:sr-only">Sibling</span>
@@ -5046,10 +5047,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Color"
               title="Color"
               aria-expanded={colorOpen()}
-              onClick={(e) => {
+              {...press((e) => {
                 setColorOpen((open) => !open);
                 if (!colorOpen()) backToCanvas(e);
-              }}
+              })}
             >
               <span
                 aria-hidden="true"
@@ -5062,7 +5063,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Notes"
               title={`Notes (${ALT_LABEL}N)`}
               aria-expanded={notesOpen()}
-              onClick={() => toggleNotes()}
+              {...press(() => toggleNotes())}
             >
               <NoteIcon />
               <Show
@@ -5086,7 +5087,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     : "Collapse children"
                 }
                 title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
-                onClick={() => toggleCollapse(selectedId() as string)}
+                {...press(() => toggleCollapse(selectedId() as string))}
               >
                 <Show
                   when={collapsedIds().has(selectedId() ?? "")}
@@ -5105,9 +5106,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 }
                 title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
                 aria-pressed={focusId() === selectedId()}
-                onClick={() =>
-                  focusId() === selectedId() ? exitFocus() : focusBranch()
-                }
+                {...press(() =>
+                  focusId() === selectedId() ? exitFocus() : focusBranch(),
+                )}
               >
                 <FocusIcon />
               </button>
@@ -5119,7 +5120,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               title="More actions"
               aria-haspopup="menu"
               aria-expanded={!!contextMenu()?.above}
-              onClick={(e) => {
+              {...press((e) => {
                 if (contextMenu()?.above) {
                   setContextMenu(undefined);
                   backToCanvas(e);
@@ -5136,7 +5137,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   nodeId: id,
                   above: true,
                 });
-              }}
+              })}
             >
               <MoreIcon />
             </button>
@@ -5270,7 +5271,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="primary-button"
-            onClick={() => add("root")}
+            {...press(() => add("root"))}
           >
             Create an idea
           </button>
@@ -5315,11 +5316,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   type="button"
                   role="menuitem"
                   class="menu-item"
-                  onClick={() => {
+                  {...press(() => {
                     const position = menu().rootPosition;
                     setContextMenu(undefined);
                     add("root", position);
-                  }}
+                  })}
                 >
                   New central idea
                 </button>
@@ -5339,7 +5340,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       type="button"
                       role="menuitem"
                       class="menu-item"
-                      onClick={run(() => add("child"))}
+                      {...press(run(() => add("child")))}
                     >
                       Add child idea
                       <kbd class="ml-auto">Tab</kbd>
@@ -5349,7 +5350,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       role="menuitem"
                       class="menu-item"
                       disabled={nodeId() === focusId()}
-                      onClick={run(() => add("sibling"))}
+                      {...press(run(() => add("sibling")))}
                     >
                       Add sibling idea
                       {/* Enter on a central idea adds a child instead. */}
@@ -5362,7 +5363,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       role="menuitem"
                       class="menu-item"
                       disabled={nodeId() === focusId()}
-                      onClick={run(insertParent)}
+                      {...press(run(insertParent))}
                     >
                       Insert parent
                       <kbd class="ml-auto">{SHIFT_LABEL}Tab</kbd>
@@ -5373,7 +5374,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       role="menuitem"
                       class="menu-item"
                       disabled={siblings()[0]?.id === nodeId()}
-                      onClick={run(indentSelected)}
+                      {...press(run(indentSelected))}
                     >
                       Move under idea above
                       <kbd class="ml-auto">{ALT_LABEL}→</kbd>
@@ -5386,7 +5387,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         !details().get(nodeId())?.parent ||
                         nodeId() === focusId()
                       }
-                      onClick={run(outdentSelected)}
+                      {...press(run(outdentSelected))}
                     >
                       Move out to parent level
                       <kbd class="ml-auto">{ALT_LABEL}←</kbd>
@@ -5395,7 +5396,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       type="button"
                       role="menuitem"
                       class="menu-item"
-                      onClick={run(() => toggleNotes(true))}
+                      {...press(run(() => toggleNotes(true)))}
                     >
                       {view().note(nodeId()).trim()
                         ? "Open notes"
@@ -5407,7 +5408,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         type="button"
                         role="menuitem"
                         class="menu-item"
-                        onClick={run(() => resetPlacement(nodeId()))}
+                        {...press(run(() => resetPlacement(nodeId())))}
                       >
                         Reset placement
                       </button>
@@ -5418,10 +5419,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         type="button"
                         role="menuitem"
                         class="menu-item"
-                        onClick={() => {
+                        {...press(() => {
                           setContextMenu(undefined);
                           toggleCollapse(nodeId());
-                        }}
+                        })}
                       >
                         {collapsedIds().has(nodeId())
                           ? "Expand children"
@@ -5432,8 +5433,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         type="button"
                         role="menuitem"
                         class="menu-item"
-                        onClick={run(() =>
-                          focusId() === nodeId() ? exitFocus() : focusBranch(),
+                        {...press(
+                          run(() =>
+                            focusId() === nodeId()
+                              ? exitFocus()
+                              : focusBranch(),
+                          ),
                         )}
                       >
                         {focusId() === nodeId()
@@ -5446,7 +5451,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       type="button"
                       role="menuitem"
                       class="menu-item"
-                      onClick={run(() => fitSelection(nodeId()))}
+                      {...press(run(() => fitSelection(nodeId())))}
                     >
                       Fit selection
                       <kbd class="ml-auto">{ALT_LABEL}2</kbd>
@@ -5456,7 +5461,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       type="button"
                       role="menuitem"
                       class="menu-item text-rose-700!"
-                      onClick={run(removeSelected)}
+                      {...press(run(removeSelected))}
                     >
                       Delete
                       <kbd class="ml-auto">{DELETE_LABEL}</kbd>
@@ -5482,10 +5487,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom out"
               title={`Zoom out (${MOD_LABEL}−)`}
               disabled={zoom() <= ZOOM_MIN}
-              onClick={(e) => {
+              {...press((e) => {
                 changeZoom(zoom() / 1.2);
                 backToCanvas(e);
-              }}
+              })}
             >
               <MinusIcon />
             </button>
@@ -5494,10 +5499,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
               aria-label="Zoom to 100%"
               title={`Zoom to 100% (${MOD_LABEL}0)`}
-              onClick={(e) => {
+              {...press((e) => {
                 changeZoom(1);
                 backToCanvas(e);
-              }}
+              })}
             >
               {Math.round(zoom() * 100)}%
             </button>
@@ -5507,10 +5512,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Zoom in"
               title={`Zoom in (${MOD_LABEL}+)`}
               disabled={zoom() >= ZOOM_MAX}
-              onClick={(e) => {
+              {...press((e) => {
                 changeZoom(zoom() * 1.2);
                 backToCanvas(e);
-              }}
+              })}
             >
               <PlusIcon />
             </button>
@@ -5521,10 +5526,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               aria-label="Fit map"
               title={`Fit map (${ALT_LABEL}1)`}
               disabled={!forest().length}
-              onClick={(e) => {
+              {...press((e) => {
                 fitMap();
                 backToCanvas(e);
-              }}
+              })}
             >
               <FitMapIcon />
             </button>
@@ -5536,7 +5541,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Shortcuts and navigation"
             title="Shortcuts and navigation (? with nothing selected)"
             aria-haspopup="dialog"
-            onClick={() => setShowHelp(true)}
+            {...press(() => setShowHelp(true))}
           >
             <HelpIcon />
           </button>
@@ -5568,7 +5573,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="panel-status"
               aria-haspopup="dialog"
-              onClick={fromPanel(() => setSaveErrorOpen(true))}
+              {...press(fromPanel(() => setSaveErrorOpen(true)))}
             >
               <span aria-hidden="true" class="save-state" data-tone="error" />
               {saveDot().label}
@@ -5581,7 +5586,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="panel-pair"
                 disabled={!canUndo()}
-                onClick={fromPanel(undo)}
+                {...press(fromPanel(undo))}
               >
                 <UndoIcon />
                 Undo
@@ -5590,7 +5595,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="panel-pair"
                 disabled={!canRedo()}
-                onClick={fromPanel(redo)}
+                {...press(fromPanel(redo))}
               >
                 <RedoIcon />
                 Redo
@@ -5600,7 +5605,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            onClick={fromPanel(openSearch)}
+            {...press(fromPanel(openSearch))}
           >
             <SearchIcon />
             Search
@@ -5608,7 +5613,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           <button
             type="button"
             class="menu-item"
-            onClick={fromPanel(() => setOutlineOpen(true))}
+            {...press(fromPanel(() => setOutlineOpen(true)))}
           >
             <OutlineIcon />
             Outline
@@ -5617,7 +5622,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             type="button"
             class="menu-item"
             disabled={!forest().length}
-            onClick={fromPanel(fitMap)}
+            {...press(fromPanel(fitMap))}
           >
             <FitMapIcon />
             Fit map
@@ -5627,7 +5632,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              onClick={fromPanel(createNewProject)}
+              {...press(fromPanel(createNewProject))}
             >
               New map
             </button>
@@ -5636,7 +5641,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="menu-item"
               aria-haspopup="dialog"
-              onClick={fromPanel(() => setShowShare(true))}
+              {...press(fromPanel(() => setShowShare(true)))}
             >
               Share link…
             </button>
@@ -5644,7 +5649,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="menu-item"
               aria-expanded={showBackup()}
-              onClick={() => setShowBackup((open) => !open)}
+              {...press(() => setShowBackup((open) => !open))}
             >
               Backup and export
               <ChevronRightIcon
@@ -5656,21 +5661,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 <button
                   type="button"
                   class="menu-item"
-                  onClick={fromPanel(importProjectFromFile)}
+                  {...press(fromPanel(importProjectFromFile))}
                 >
                   Import backup…
                 </button>
                 <button
                   type="button"
                   class="menu-item"
-                  onClick={fromPanel(exportCurrentProject)}
+                  {...press(fromPanel(exportCurrentProject))}
                 >
                   Export backup (.json)
                 </button>
                 <button
                   type="button"
                   class="menu-item"
-                  onClick={fromPanel(() => void exportMarkdown())}
+                  {...press(fromPanel(() => void exportMarkdown()))}
                 >
                   Export outline (.md)
                 </button>
@@ -5680,10 +5685,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="menu-item"
               aria-haspopup="dialog"
-              onClick={fromPanel(() => {
-                returnToShare = false;
-                setShowPreferences(true);
-              })}
+              {...press(
+                fromPanel(() => {
+                  returnToShare = false;
+                  setShowPreferences(true);
+                }),
+              )}
             >
               Project preferences…
             </button>
@@ -5691,7 +5698,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               type="button"
               class="menu-item"
               aria-haspopup="dialog"
-              onClick={fromPanel(() => setShowHelp(true))}
+              {...press(fromPanel(() => setShowHelp(true)))}
             >
               Help
             </button>

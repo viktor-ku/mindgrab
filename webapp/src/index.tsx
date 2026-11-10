@@ -1,5 +1,6 @@
 /* @refresh reload */
 import { QueryClientProvider } from "@tanstack/solid-query";
+import { press } from "./press";
 import { queryClient, executeMutation } from "./query-client";
 import { RouterProvider } from "@tanstack/solid-router";
 import { Show } from "solid-js";
@@ -32,7 +33,7 @@ render(
             <button
               type="button"
               class="primary-button"
-              onClick={() => window.location.reload()}
+              {...press(() => window.location.reload())}
             >
               Retry opening
             </button>

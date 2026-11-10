@@ -3,6 +3,7 @@ import { createSignal, onMount, Show } from "solid-js";
 import { backendEndpoint } from "./backend";
 import type { SessionState } from "./auth-session";
 import { menuArrowKeys, transientLayer } from "./transient-layer";
+import { press } from "./press";
 
 export function AccountControls(props: {
   state: SessionState;
@@ -119,7 +120,7 @@ export function AccountControls(props: {
                       type="button"
                       class="map-control"
                       disabled={navigating()}
-                      onClick={() => navigate("logout")}
+                      {...press(() => navigate("logout"))}
                     >
                       Sign out
                     </button>
@@ -148,7 +149,7 @@ export function AccountControls(props: {
                   title={name()}
                   aria-haspopup="menu"
                   aria-expanded={menuOpen()}
-                  onClick={() => setMenuOpen((open) => !open)}
+                  {...press(() => setMenuOpen((open) => !open))}
                 >
                   {avatar}
                   <span class="sr-only">{name()}</span>
@@ -177,10 +178,10 @@ export function AccountControls(props: {
                       role="menuitem"
                       class="menu-item"
                       disabled={navigating()}
-                      onClick={() => {
+                      {...press(() => {
                         setMenuOpen(false);
                         navigate("logout");
-                      }}
+                      })}
                     >
                       Sign out
                     </button>
@@ -211,7 +212,7 @@ export function AccountControls(props: {
                   : "primary-button compact"
             }
             disabled={navigating()}
-            onClick={() => void navigate("login")}
+            {...press(() => void navigate("login"))}
           >
             {props.state.user ? "Sign in again" : "Sign in"}
           </button>
@@ -230,7 +231,7 @@ export function AccountControls(props: {
           type="button"
           // Starts where the message above it starts.
           class="map-control outlined mb-1 ml-2 self-start"
-          onClick={props.onRetry}
+          {...press(props.onRetry)}
         >
           Check account again
         </button>

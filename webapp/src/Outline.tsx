@@ -3,6 +3,7 @@ import { closeOnEscape } from "./escape-key";
 import { ChevronRightIcon, CloseIcon } from "./icons";
 import { ALT_LABEL } from "./ShortcutsDialog";
 import type { MindMapNode } from "./mind-map";
+import { press } from "./press";
 
 // A synchronized tree view of the map. It shares selection and folding with
 // the canvas and follows the W3C tree pattern: one tab stop, arrow keys move,
@@ -120,12 +121,11 @@ export function Outline(props: {
                 props.onSelect(node.id, "keyboard");
             }}
           >
-            {/* biome-ignore lint/a11y/useKeyWithClickEvents: The tree handles keyboard selection on the focused treeitem. */}
             {/* biome-ignore lint/a11y/noStaticElementInteractions: Pointer selection for the row; the treeitem carries the semantics. */}
             <div
               class="outline-row"
               style={{ "padding-left": `${(branch.level - 1) * 14 + 4}px` }}
-              onClick={() => props.onSelect(node.id, "pointer")}
+              {...press(() => props.onSelect(node.id, "pointer"))}
               onDblClick={() => props.onEdit(node.id)}
             >
               <Show
@@ -137,10 +137,10 @@ export function Outline(props: {
                   tabIndex={-1}
                   aria-hidden="true"
                   class="outline-toggle"
-                  onClick={(e) => {
+                  {...press((e) => {
                     e.stopPropagation();
                     props.onToggle(node.id);
-                  }}
+                  })}
                 >
                   <ChevronRightIcon
                     class={`size-3.5 transition-transform ${open() ? "rotate-90" : ""}`}
@@ -190,7 +190,7 @@ export function Outline(props: {
               ? "Close outline"
               : `Close outline (${ALT_LABEL}O)`
           }
-          onClick={props.onClose}
+          {...press(props.onClose)}
         >
           <CloseIcon class="size-4" />
         </button>
