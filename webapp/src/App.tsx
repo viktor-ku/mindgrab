@@ -516,6 +516,9 @@ interface ContextMenuState {
   above?: boolean;
 }
 
+// How long Update now waits for a cloud-only map to finish uploading.
+const CLOUD_SAVE_BEFORE_UPDATE_MS = 10_000;
+
 export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const deployment = backendDeployment();
   const queryClient = useQueryClient();
@@ -3648,8 +3651,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
     };
     makeEventListener(window, "beforeunload", beforeUnload);
-    // "Update now" reloads only after every pending write is stored and
-    // nothing would be lost, or after the person confirms what would be.
+    // "Update now" saves on the person's behalf first: pending browser
+    // writes, and the upload of a map kept only in the cloud. It reloads only
+    // when nothing would be lost, or after the person confirms what would be.
     onCleanup(
       guardUpdate(async () => {
         if (parked.size)
@@ -3659,6 +3663,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         } catch {
           return "Recent changes could not be saved in this browser.";
         }
+        // Offline, the upload cannot finish, so there is nothing to wait for.
+        if (
+          !view().saving().local &&
+          view().saving().cloud &&
+          cloudStatus()?.status === "saving" &&
+          navigator.onLine
+        )
+          await cloud?.syncNow(CLOUD_SAVE_BEFORE_UPDATE_MS);
         return unsavedWork();
       }),
     );

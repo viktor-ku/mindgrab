@@ -541,6 +541,19 @@ export class CloudWorkspace {
       },
     });
   }
+  /** Uploads the open map now. Gives up waiting after `timeout` ms. */
+  async syncNow(timeout: number) {
+    const run = this.#active?.syncNow();
+    if (!run) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      run.catch(() => {}),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeout);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
   detach() {
     this.#active?.destroy();
     this.#active = undefined;

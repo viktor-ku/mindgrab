@@ -82,7 +82,7 @@ function activated(worker: ServiceWorker) {
 }
 
 // Saves pending work in this window and returns what a reload would lose.
-async function checkGuards() {
+export async function checkGuards() {
   const risks: string[] = [];
   for (const guard of guards) {
     const risk = await guard().catch((error: unknown) =>

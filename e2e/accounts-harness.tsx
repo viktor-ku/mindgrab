@@ -10,6 +10,7 @@ import {
   storageNames,
 } from "../webapp/src/project-repository";
 import * as project from "../webapp/src/project-document";
+import { checkGuards } from "../webapp/src/offline-shell";
 import "../webapp/src/index.css";
 
 let current: ProjectDocument;
@@ -198,6 +199,10 @@ const accountHarness = {
   },
   messages() {
     return [...messages];
+  },
+  // What Update now would report after saving on the person's behalf.
+  updateRisks() {
+    return checkGuards();
   },
   failAuthWrites(value: boolean) {
     authWritesFail = value;

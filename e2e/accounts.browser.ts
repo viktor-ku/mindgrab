@@ -48,6 +48,9 @@ class Backend {
   nextUser = A;
   meStatus?: number;
   meGate?: ReturnType<typeof deferred>;
+  // Holds uploads, as a slow connection would.
+  mergeGate?: ReturnType<typeof deferred>;
+  mergeStarted = false;
   catalogGate?: ReturnType<typeof deferred>;
   catalogStarted = false;
   // Holds a new browser's first open, which asks for the recent projects.
@@ -208,6 +211,8 @@ class Backend {
     if (operation === "/api/getProjectSnapshot.php")
       return route.fulfill({ json: response() });
     if (operation === "/api/mergeProject.php") {
+      this.mergeStarted = true;
+      await this.mergeGate?.promise;
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       const before = record.doc.version();
       record.doc.merge(bytes);
@@ -1978,4 +1983,32 @@ test("a memory-only anonymous map stays reachable after New map under an account
   await page.getByRole("menuitem", { name }).click();
   await eventually(async () => (await call("id")) === id, "the map to reopen");
   await page.getByText("Only in memory", { exact: true }).waitFor();
+});
+
+test("Update now finishes the upload of a cloud-only map before it decides", async () => {
+  await login();
+  await rename("Cloud only before update");
+  await cloudSaved();
+  await projectMenu("Project preferences…");
+  await page.getByRole("switch", { name: "Save locally", exact: true }).click();
+  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await cloudSaved();
+  backend.mergeGate = deferred();
+  backend.mergeStarted = false;
+  await edit("Uploaded before the update");
+  await eventually(async () => backend.mergeStarted, "the upload to start");
+  // Mid-upload, nothing is in the cloud yet: the check waits for it.
+  const risks = call("updateRisks");
+  await Bun.sleep(300);
+  backend.mergeGate.resolve();
+  backend.mergeGate = undefined;
+  expect(await risks).toEqual([]);
+  await cloudSaved();
+  // A map kept nowhere else is still reported.
+  await context.setOffline(true);
+  await edit("Not uploaded yet");
+  expect(await call("updateRisks")).toEqual([
+    "A map with local saving off is not saved anywhere else yet.",
+  ]);
+  await context.setOffline(false);
 });
