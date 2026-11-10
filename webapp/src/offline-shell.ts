@@ -52,8 +52,13 @@ export function guardUpdate(guard: UpdateGuard) {
 let leaving = false;
 export const leavingForUpdate = () => leaving;
 
+// The risks a warning showed: this tab's, and each other tab's by its id.
+export interface Confirmation {
+  own: string[];
+  tabs: Record<string, string[]>;
+}
 export type UpdateOutcome =
-  | { status: "unsafe"; risks: string[] }
+  | { status: "unsafe"; risks: string[]; confirmation: Confirmation }
   | { status: "reloading" };
 
 /** Other open Mindgrab windows, which update along with this one. */
@@ -100,9 +105,10 @@ export async function checkGuards() {
 // person confirmed; anything new keeps it open and asks here.
 type TabMessage =
   | { type: "prepare"; id: string }
+  | { type: "preparing"; id: string; tab: string }
   | { type: "prepared"; id: string; tab: string; risks: string[] }
   | { type: "commit"; id: string; accepted: Record<string, string[]> }
-  | { type: "committed"; id: string }
+  | { type: "committed"; id: string; tab: string }
   | { type: "reload" };
 let tabs: BroadcastChannel | undefined;
 const tab = crypto.randomUUID();
@@ -136,13 +142,16 @@ function listenToTabs() {
   const send = (message: TabMessage) => channel.postMessage(message);
   channel.addEventListener("message", (event: MessageEvent<TabMessage>) => {
     const message = event.data;
-    if (message?.type === "prepare")
+    if (message?.type === "prepare") {
+      // Answers at once, so the asking tab knows to wait for the saves.
+      send({ type: "preparing", id: message.id, tab });
       void checkGuards().then((risks) =>
         send({ type: "prepared", id: message.id, tab, risks }),
       );
+    }
     if (message?.type === "commit") {
       accepted = message.accepted[tab] ?? [];
-      send({ type: "committed", id: message.id });
+      send({ type: "committed", id: message.id, tab });
     }
     if (message?.type === "reload") void follow();
   });
@@ -152,39 +161,77 @@ function listenToTabs() {
   });
 }
 
-const PREPARE_TIMEOUT_MS = 5000;
-// Sends a request to the other windows and gathers the replies to it, until
-// `expected` have answered or the time runs out.
-function gather<T extends TabMessage>(
-  request: TabMessage & { id: string },
-  replyType: T["type"],
-  expected: number,
-) {
+// A tab that does not acknowledge within this time is frozen or gone. One
+// that did gets longer to finish saving (a cloud upload waits up to 10 s).
+const ANSWER_TIMEOUT_MS = 3000;
+const PREPARE_TIMEOUT_MS = 15_000;
+type Prepared = Extract<TabMessage, { type: "prepared" }>;
+// Asks the other windows to save, and gathers what their reload would lose.
+function prepareOthers(id: string, expected: number) {
   const channel = tabs;
-  if (!expected || !channel) return Promise.resolve<T[]>([]);
-  return new Promise<T[]>((resolve) => {
-    const replies: T[] = [];
+  if (!expected || !channel) return Promise.resolve<Prepared[]>([]);
+  return new Promise<Prepared[]>((resolve) => {
+    const answering = new Set<string>();
+    const prepared = new Map<string, Prepared>();
+    let answered = false;
+    const finish = () => {
+      clearTimeout(answerTimer);
+      clearTimeout(prepareTimer);
+      channel.removeEventListener("message", reply);
+      resolve([...prepared.values()]);
+    };
+    const done = () =>
+      prepared.size >= expected ||
+      (answered && [...answering].every((tab) => prepared.has(tab)));
+    const reply = ({ data }: MessageEvent<TabMessage>) => {
+      if (!data || !("id" in data) || data.id !== id) return;
+      if (data.type === "preparing") answering.add(data.tab);
+      if (data.type === "prepared") {
+        answering.add(data.tab);
+        prepared.set(data.tab, data);
+      }
+      if (done()) finish();
+    };
+    const answerTimer = setTimeout(() => {
+      answered = true;
+      if (done()) finish();
+    }, ANSWER_TIMEOUT_MS);
+    const prepareTimer = setTimeout(finish, PREPARE_TIMEOUT_MS);
+    channel.addEventListener("message", reply);
+    channel.postMessage({ type: "prepare", id } satisfies TabMessage);
+  });
+}
+// Tells the prepared windows what the person accepted for each of them, and
+// waits until they have heard it.
+function commitOthers(id: string, accepted: Record<string, string[]>) {
+  const channel = tabs;
+  const expected = Object.keys(accepted).length;
+  if (!expected || !channel) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const heard = new Set<string>();
     const finish = () => {
       clearTimeout(timer);
       channel.removeEventListener("message", reply);
-      resolve(replies);
+      resolve();
     };
     const reply = ({ data }: MessageEvent<TabMessage>) => {
-      if (data?.type !== replyType || !("id" in data) || data.id !== request.id)
-        return;
-      replies.push(data as T);
-      if (replies.length >= expected) finish();
+      if (data?.type !== "committed" || data.id !== id) return;
+      heard.add(data.tab);
+      if (heard.size >= expected) finish();
     };
-    const timer = setTimeout(finish, PREPARE_TIMEOUT_MS);
+    const timer = setTimeout(finish, ANSWER_TIMEOUT_MS);
     channel.addEventListener("message", reply);
-    channel.postMessage(request);
+    channel.postMessage({ type: "commit", id, accepted } satisfies TabMessage);
   });
 }
 
 // "Update now", which the person clicks for every open Mindgrab tab. Each tab
 // saves first; the new build takes over only when no tab would lose work, or
-// after the person confirms what would be lost (force).
-export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
+// when the person confirmed every risk found now. A risk the warning did not
+// show (a new tab, a new map) shows the warning again.
+export async function applyUpdate(
+  confirmed?: Confirmation,
+): Promise<UpdateOutcome> {
   const worker = pendingUpdate();
   if (!worker) throw new Error("No update is waiting.");
   // Ends text editing, so typed text reaches the map before it is saved.
@@ -195,11 +242,7 @@ export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
     checkGuards(),
     otherWindows(worker),
   ]);
-  const prepared = await gather<Extract<TabMessage, { type: "prepared" }>>(
-    { type: "prepare", id },
-    "prepared",
-    expected,
-  );
+  const prepared = await prepareOthers(id, expected);
   // A tab that does not answer (frozen in the background) accepts nothing,
   // so it reloads only if nothing there would be lost.
   const risks = [
@@ -210,17 +253,18 @@ export async function applyUpdate(force: boolean): Promise<UpdateOutcome> {
       ),
     ]),
   ];
-  if (risks.length && !force) return { status: "unsafe", risks };
+  const found: Confirmation = {
+    own,
+    tabs: Object.fromEntries(prepared.map((p) => [p.tab, p.risks])),
+  };
+  const covered =
+    own.every((risk) => confirmed?.own.includes(risk)) &&
+    prepared.every((p) =>
+      p.risks.every((risk) => confirmed?.tabs[p.tab]?.includes(risk)),
+    );
+  if (!covered) return { status: "unsafe", risks, confirmation: found };
   // Before anything activates, every tab learns what the person accepted.
-  await gather(
-    {
-      type: "commit",
-      id,
-      accepted: Object.fromEntries(prepared.map((p) => [p.tab, p.risks])),
-    },
-    "committed",
-    prepared.length,
-  );
+  await commitOthers(id, found.tabs);
   initiating = true;
   try {
     await ask(worker, "MINDGRAB_ACTIVATE", "The update did not answer.");

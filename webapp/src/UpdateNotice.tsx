@@ -2,6 +2,7 @@ import { makeEventListener } from "@solid-primitives/event-listener";
 import { createMutation, createQuery } from "@tanstack/solid-query";
 import { createEffect, For, Match, Show, Switch } from "solid-js";
 import {
+  type Confirmation,
   applyUpdate,
   follow,
   otherWindows,
@@ -39,7 +40,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
   });
   const update = createMutation(() => ({
     mutationKey: ["offline-shell", "apply-update"],
-    mutationFn: (force: boolean) => applyUpdate(force),
+    mutationFn: (confirmed?: Confirmation) => applyUpdate(confirmed),
   }));
   const recheck = createMutation(() => ({
     mutationKey: ["offline-shell", "follow-update"],
@@ -110,7 +111,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
               <button
                 type="button"
                 class="primary-button compact shrink-0"
-                onClick={() => update.mutate(false)}
+                onClick={() => update.mutate(undefined)}
               >
                 Update now
               </button>
@@ -188,7 +189,10 @@ export function UpdateNotice(props: { inline?: boolean }) {
                   <button
                     type="button"
                     class="primary-button compact danger"
-                    onClick={() => update.mutate(true)}
+                    onClick={() =>
+                      update.data?.status === "unsafe" &&
+                      update.mutate(update.data.confirmation)
+                    }
                   >
                     Update and lose it
                   </button>

@@ -658,10 +658,44 @@ test("Update now warns and stays before any tab would lose a map with local savi
   );
   // Confirming the loss is the only way past the warning.
   await updateNow(page).click();
+  await warning.getByText("Updating now would lose work").waitFor();
+  // A tab opened while the warning shows brings a risk nobody saw yet, so
+  // confirming shows the warning again instead of updating.
+  const third = await context.newPage();
+  third.on("pageerror", (error) => errors.push(error.message));
+  await third.goto(origin);
+  await third.waitForSelector('[data-storage-ready="true"]');
+  await third.getByRole("button", { name: "Project menu" }).click();
+  await third
+    .getByRole("menuitem", { name: "Project preferences…" })
+    .first()
+    .click();
+  await third
+    .getByRole("switch", { name: "Save locally", exact: true })
+    .click();
+  await third
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  await page.bringToFront();
   await updateNotice(page)
     .getByRole("button", { name: "Update and lose it" })
     .click();
-  await Promise.all([updated(page), updated(second)]);
+  await page.getByText("Saving your work and updating…").waitFor({
+    state: "hidden",
+  });
+  await warning.getByText("Updating now would lose work").waitFor();
+  await Bun.sleep(1000);
+  for (const target of [page, second, third])
+    expect(await target.title()).toBe("Mindgrab 0");
+  expect(
+    await page.evaluate(async () =>
+      Boolean((await navigator.serviceWorker.getRegistration())?.waiting),
+    ),
+  ).toBe(true);
+  await updateNotice(page)
+    .getByRole("button", { name: "Update and lose it" })
+    .click();
+  await Promise.all([updated(page), updated(second), updated(third)]);
 });
 
 test("a tab that gains a risk after answering stays open and asks after the update goes ahead elsewhere", async () => {
