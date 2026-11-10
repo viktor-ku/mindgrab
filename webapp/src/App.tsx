@@ -157,6 +157,7 @@ import { backendDeployment } from "./backend";
 import { CloudWorkspace, openLatestCloudProject } from "./project-sync";
 import type { CloudStatus } from "./project-sync";
 import { createLocalSave } from "./local-save";
+import { guardUpdate, leavingForUpdate } from "./offline-shell";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
 import { panelEdges, panelInsets } from "./view-insets";
@@ -514,6 +515,9 @@ interface ContextMenuState {
   // Opens upward from (x, y), for menus anchored to the bottom toolbar.
   above?: boolean;
 }
+
+// How long Update now waits for a cloud-only map to finish uploading.
+const CLOUD_SAVE_BEFORE_UPDATE_MS = 10_000;
 
 export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const deployment = backendDeployment();
@@ -3626,20 +3630,54 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       for (const recovery of parked) void recovery.repository.close();
     });
 
-    const beforeUnload = (event: BeforeUnloadEvent) => {
+    // What leaving this page now would lose, if anything.
+    const unsavedWork = () => {
+      if (recoveryPending())
+        return "Edits from the previous account are not saved yet.";
+      if (!activeHandle && doc().version() !== draftVersion)
+        return "Your newest edits are not saved yet.";
       if (
-        recoveryPending() ||
-        (!activeHandle && doc().version() !== draftVersion) ||
         repository.hasMemoryOnlyProjects() ||
         anonymousRepo()?.hasMemoryOnlyProjects() ||
         (!view().saving().local &&
           (!view().saving().cloud || cloudStatus()?.status !== "saved"))
-      ) {
+      )
+        return "A map with local saving off is not saved anywhere else yet.";
+    };
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (!leavingForUpdate() && unsavedWork()) {
         event.preventDefault();
         event.returnValue = "";
       }
     };
     makeEventListener(window, "beforeunload", beforeUnload);
+    // "Update now" saves on the person's behalf first: pending browser
+    // writes, and the upload of a map kept only in the cloud. It reloads only
+    // when nothing would be lost, or after the person confirms what would be.
+    onCleanup(
+      guardUpdate(async () => {
+        if (parked.size)
+          return "Changes to a map you closed are not saved yet.";
+        // Typing still in progress here (an idea's text or the map name)
+        // becomes part of the map first, as Save now does.
+        finishWriting();
+        finishProjectName();
+        try {
+          await localSave.save();
+        } catch {
+          return "Recent changes could not be saved in this browser.";
+        }
+        // Offline, the upload cannot finish, so there is nothing to wait for.
+        if (
+          !view().saving().local &&
+          view().saving().cloud &&
+          cloudStatus()?.status === "saving" &&
+          navigator.onLine
+        )
+          await cloud?.syncNow(CLOUD_SAVE_BEFORE_UPDATE_MS);
+        return unsavedWork();
+      }),
+    );
     const keydown = (e: KeyboardEvent) => {
       if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))
         contextKeyAt = performance.now();

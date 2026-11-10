@@ -177,7 +177,18 @@ export class ProjectSync {
     if (!this.destroyed) {
       this.#status = status;
       this.#options.onStatus?.(status);
+      if (status.status !== "saving") {
+        for (const settle of this.#settling) settle();
+        this.#settling.clear();
+      }
     }
+  }
+  readonly #settling = new Set<() => void>();
+  /** Resolves once this map is no longer saving: saved, failed or paused. */
+  settled() {
+    if (this.destroyed || this.#status.status !== "saving")
+      return Promise.resolve();
+    return new Promise<void>((resolve) => this.#settling.add(resolve));
   }
   #pause(status: CloudStatus & { message: string }) {
     this.#paused = true;
@@ -363,6 +374,8 @@ export class ProjectSync {
   }
   destroy() {
     if (this.destroyed) return;
+    for (const settle of this.#settling) settle();
+    this.#settling.clear();
     this.#abort.abort();
     this.handle.doc.off("snapshot", this.#onSnapshot);
     this.#provider?.destroy();
@@ -540,6 +553,22 @@ export class CloudWorkspace {
         else this.#onStatus(status);
       },
     });
+  }
+  /** Uploads the open map now. Gives up waiting after `timeout` ms. */
+  // Stops waiting as soon as the upload succeeds or fails; a failing cloud
+  // retries in the background and is no reason to hold an update.
+  async syncNow(timeout: number) {
+    const active = this.#active;
+    if (!active) return;
+    void active.syncNow().catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      active.settled(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeout);
+      }),
+    ]);
+    clearTimeout(timer);
   }
   detach() {
     this.#active?.destroy();
