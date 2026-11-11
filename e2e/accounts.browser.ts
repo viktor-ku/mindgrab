@@ -1351,38 +1351,51 @@ test("the shared view has editor-sized islands, plain tooltips and a retry that 
   );
 });
 
-test("opening the outline in the shared view keeps the selected idea clear of its notes", async () => {
+test("in the shared view, an idea's notes open in the side panel, clear of the idea", async () => {
   const doc = createProjectDocument(crypto.randomUUID(), "Shared", {
     text: "Root",
   });
   createChild(doc, doc.view().roots[0], { text: "Child", note: "A note" });
   backend.shared = { projectId: doc.id, data: base64(doc.snapshot()) };
   doc.destroy();
+  await page.setViewportSize({ width: 900, height: 700 });
   await page.routeWebSocket(/\/sync\/share\//, () => {});
   await page.goto(new URL("/s/token", appUrl).href);
-  await page.locator("[data-node-id]").filter({ hasText: "Child" }).click();
-  await page.getByRole("complementary", { name: "Notes" }).waitFor();
-  // The docked outline narrows the map, which pans the idea under the notes
-  // until the map centres it beside them.
-  await page.getByRole("button", { name: "Outline", exact: true }).click();
-  await page.getByRole("complementary", { name: "Outline" }).waitFor();
-  // Checked only once the drawer and the map have stopped moving: before the
-  // drawer opens, the idea is clear of the notes too.
+  const idea = page.locator("[data-node-id]").filter({ hasText: "Child" });
+  await idea.click();
+  // Selecting an idea with notes opens them, titled by the idea.
+  const notes = page.getByRole("complementary", { name: "Notes" });
+  await notes.waitFor();
+  expect(await notes.getByRole("heading").innerText()).toBe("Child");
+  expect(await notes.getByText("A note").count()).toBe(1);
+  // The panel would cover the idea, so the map moves it aside once settled.
   await page.waitForFunction(() => {
-    const moving = [".outline-dock", ".map-layer"].some(
+    const moving = [".side-drawer", ".map-layer"].some(
       (selector) => document.querySelector(selector)?.getAnimations().length,
     );
     const idea = [...document.querySelectorAll("[data-node-id]")].find((node) =>
       node.textContent?.includes("Child"),
     );
-    const notes = document.querySelector('aside[aria-label="Notes"]');
+    const panel = document.querySelector(".side-panel");
     return (
       !moving &&
       !!idea &&
-      !!notes &&
-      idea.getBoundingClientRect().right < notes.getBoundingClientRect().left
+      !!panel &&
+      idea.getBoundingClientRect().right < panel.getBoundingClientRect().left
     );
   });
+  // The outline is the same panel's other tab.
+  await page.getByRole("button", { name: "Outline", exact: true }).click();
+  await page.getByRole("complementary", { name: "Outline" }).waitFor();
+  expect(
+    await page
+      .getByRole("tab", { name: "Outline" })
+      .getAttribute("aria-selected"),
+  ).toBe("true");
+  await page.getByRole("tab", { name: "Notes" }).click();
+  await notes
+    .getByRole("button", { name: "Show on map" })
+    .click({ trial: true });
 });
 
 test("an unknown address shows a page with a way back", async () => {

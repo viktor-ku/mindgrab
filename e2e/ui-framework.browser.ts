@@ -980,12 +980,15 @@ describe("dialogs, panels and search", () => {
     expect(await selected()).toBe(root);
     expect(await activeLabel()).toBe("Mind map canvas");
 
-    // A press on a panel's title keeps focus in the panel, so Esc closes it.
-    await page.keyboard.press("Alt+o");
-    await page.keyboard.press("Alt+n");
+    // A press on the panel's plain content keeps focus in the panel, so Esc
+    // closes it: the notes' title, and the outline tab's header.
     const notes = page.getByRole("complementary", { name: "Notes" });
-    for (const panel of [notes, outline]) {
-      await panel.getByRole("heading").click();
+    for (const [key, panel, target] of [
+      ["Alt+n", notes, notes.getByRole("heading")],
+      ["Alt+o", outline, outline.getByRole("tablist")],
+    ] as const) {
+      await page.keyboard.press(key);
+      await target.click({ position: { x: 150, y: 10 } });
       await page.keyboard.press("Escape");
       await panel.waitFor({ state: "hidden" });
       expect(await selected()).toBe(root);
@@ -994,7 +997,6 @@ describe("dialogs, panels and search", () => {
   });
 
   test("F6 enters panels at their content and reaches the zoom island", async () => {
-    await page.keyboard.press("Alt+o");
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("complementary", { name: "Notes" });
     await notes.getByRole("textbox").waitFor();
@@ -1010,20 +1012,27 @@ describe("dialogs, panels and search", () => {
     await page.locator('[aria-label="Mind map canvas"]').focus();
 
     // Where focus lands in each region, until the cycle returns to the map.
-    const stops: string[] = [];
-    for (let presses = 0; presses < 12; presses++) {
-      await page.keyboard.press("F6");
-      const stop = await page.evaluate(() => {
-        const active = document.activeElement;
-        const region = active?.closest("[data-toolbar][aria-label]");
-        return `${region?.getAttribute("aria-label") ?? "canvas"}: ${active?.getAttribute("role") ?? active?.tagName.toLowerCase()}`;
-      });
-      if (stop.startsWith("canvas")) break;
-      stops.push(stop);
-    }
+    const cycle = async () => {
+      const stops: string[] = [];
+      for (let presses = 0; presses < 12; presses++) {
+        await page.keyboard.press("F6");
+        const stop = await page.evaluate(() => {
+          const active = document.activeElement;
+          const region = active?.closest("[data-toolbar][aria-label]");
+          return `${region?.getAttribute("aria-label") ?? "canvas"}: ${active?.getAttribute("role") ?? active?.tagName.toLowerCase()}`;
+        });
+        if (stop.startsWith("canvas")) break;
+        stops.push(stop);
+      }
+      return stops;
+    };
+    const stops = await cycle();
     expect(stops).toContain("Notes: textarea");
-    expect(stops).toContain("Outline: treeitem");
     expect(stops).toContain("View and help: button");
+    // The panel shows one tab at a time; on the outline it enters the tree.
+    await page.keyboard.press("Alt+o");
+    await page.locator('[aria-label="Mind map canvas"]').focus();
+    expect(await cycle()).toContain("Outline: treeitem");
   });
 
   test("ideas are not tab stops, and an arrow key selects the first idea", async () => {
@@ -1451,60 +1460,41 @@ describe("islands and stacking", () => {
     expect(Math.abs((await edges(toolbar)).center - 512)).toBeLessThan(1);
   });
 
-  // The outline docks with an animation, then the map eases to keep the
-  // selection in view.
-  async function docked() {
-    for (const selector of [".outline-dock", ".map-layer"]) {
-      await page.evaluate(
-        (selector) =>
-          Promise.all(
-            (document.querySelector(selector)?.getAnimations() ?? []).map(
-              (animation) => animation.finished.catch(() => undefined),
-            ),
-          ),
-        selector,
-      );
-      await settle();
-    }
-  }
+  // The side panel's drawer and its tabs: the outline, or the selected idea's
+  // notes.
+  const panel = () => page.locator(".side-panel");
 
-  test("the top bars stay left of the docked outline, which holds the notes", async () => {
+  test("the top bars stay left of the side panel", async () => {
     await page.setViewportSize({ width: 1024, height: 700 });
     const { c } = await chain();
     await page.keyboard.press("Alt+o");
-    await docked();
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(c).click();
     await page.keyboard.press("Alt+f");
-    await notesButton().click();
     const crumbs = page.getByRole("navigation", { name: "Branch focus" });
     const between = async (bar: ReturnType<typeof region>) => {
       const bounds = await edges(bar);
       expect(bounds.left).toBeGreaterThanOrEqual(12);
-      expect(bounds.right).toBeLessThan((await edges(outline())).left);
+      expect(bounds.right).toBeLessThan((await edges(panel())).left);
       return bounds;
     };
     await between(crumbs);
-    // The notes join the outline's column, under the tree.
-    const tree = await edges(outline());
-    const notesBox = await edges(notes());
-    expect(Math.abs(notesBox.left - tree.left)).toBeLessThan(1);
-    expect(Math.abs(notesBox.right - tree.right)).toBeLessThan(1);
-    expect(notesBox.top).toBeGreaterThanOrEqual(tree.bottom - 1);
-    // The panels' own controls stay in reach.
+    // The notes open in the same panel, on their own tab.
+    const drawer = await edges(panel());
+    await notesButton().click();
+    await notes().waitFor();
+    expect(await edges(notes())).toEqual(drawer);
     await page.getByRole("button", { name: "Close notes" }).click({
-      trial: true,
-    });
-    await page.getByRole("button", { name: "Close outline" }).click({
       trial: true,
     });
 
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.fill("needle");
+    // Search steps aside for the panel it would cover.
     expect(
       (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
-    ).toBeLessThan(tree.left);
+    ).toBeLessThan(drawer.left);
     await field.press("Enter");
     const back = await between(
       page.getByRole("navigation", { name: "Return from search" }),
@@ -1532,35 +1522,59 @@ describe("islands and stacking", () => {
     }
   });
 
-  test("the outline docks beside the map, which pans left to make room", async () => {
+  test("the outline and the notes are tabs of one drawer over the map", async () => {
     await page.setViewportSize({ width: 1280, height: 720 });
     const root = await rootId();
+    await node(root).click();
+    const start = await box(root);
     const toggle = page.getByRole("button", { name: "Outline", exact: true });
     const cross = toggle.locator("[data-open]");
-    const canvas = page.getByRole("region", { name: "Mind map canvas" });
-    const start = await box(root);
     expect(await cross.count()).toBe(0);
     await toggle.click();
     await outline().waitFor();
-    await docked();
     expect(await cross.count()).toBe(1);
     expect(await toggle.getAttribute("title")).toContain("Close outline");
-    // Full height at the right edge, with the map's canvas narrowed beside it.
-    const dock = await edges(page.locator(".outline-dock"));
-    expect(dock).toMatchObject({ top: 0, bottom: 720, right: 1280 });
-    expect(Math.round(dock.right - dock.left)).toBe(448);
-    expect(Math.abs((await edges(canvas)).right - dock.left)).toBeLessThan(1);
-    // The toolbar that toggles it moves along with the canvas edge.
-    expect((await edges(toggle)).right).toBeLessThan(dock.left);
-    // The map keeps its centre in the narrower canvas: it pans half the way.
-    expect(Math.abs(start.x - (await box(root)).x - 224)).toBeLessThan(1);
+    // At the right edge under the toolbar, over the map, which stays put.
+    const drawer = await edges(panel());
+    expect(Math.abs(drawer.right - (1280 - 12))).toBeLessThan(1);
+    expect(Math.round(drawer.right - drawer.left)).toBe(448);
+    expect(drawer.top).toBeGreaterThan((await edges(toggle)).bottom);
+    expect(await box(root)).toEqual(start);
+    const tab = (name: string) => page.getByRole("tab", { name });
+    expect(await tab("Outline").getAttribute("aria-selected")).toBe("true");
 
-    await page.getByRole("button", { name: "Close outline" }).click();
-    await page.locator(".outline-dock").waitFor({ state: "detached" });
-    await settle();
+    // The notes open the same drawer on their tab, titled by the idea, and
+    // the outline toggle is no longer a cross.
+    await notesButton().click();
+    await notes().waitFor();
+    expect(await edges(panel())).toEqual(drawer);
+    expect(await tab("Notes").getAttribute("aria-selected")).toBe("true");
+    expect(await notes().getByRole("heading").innerText()).toBe(
+      await node(root).innerText(),
+    );
     expect(await cross.count()).toBe(0);
-    expect((await edges(canvas)).right).toBe(1280);
-    expect(Math.abs((await box(root)).x - start.x)).toBeLessThan(1);
+    // Arrow keys move between the tabs.
+    await tab("Notes").focus();
+    await page.keyboard.press("ArrowLeft");
+    await outline().waitFor();
+    expect(await activeLabel()).toBe(null);
+    await page.keyboard.press("ArrowRight");
+    await notes().waitFor();
+
+    // "Show on map" brings the idea back, centred beside the drawer.
+    await page.mouse.move(200, 200);
+    await page.mouse.wheel(300, 300);
+    await settle();
+    expect((await box(root)).x).not.toBe(start.x);
+    await notes().getByRole("button", { name: "Show on map" }).click();
+    await settle();
+    const shown = await box(root);
+    const room = (24 + drawer.left - 16) / 2;
+    expect(Math.abs(shown.x + shown.width / 2 - room)).toBeLessThan(2);
+
+    await page.getByRole("button", { name: "Close notes" }).click();
+    await panel().waitFor({ state: "detached" });
+    expect(await cross.count()).toBe(0);
   });
 
   test("a panel that opens over the selected idea moves the map aside", async () => {
@@ -1569,22 +1583,19 @@ describe("islands and stacking", () => {
     await node(leaf).click();
     const before = await box(leaf);
     await notesButton().click();
-    const panel = await edges(notes());
-    expect(before.x + before.width).toBeGreaterThan(panel.left);
+    const drawer = await edges(notes());
+    expect(before.x + before.width).toBeGreaterThan(drawer.left);
     const after = await box(leaf);
-    expect(after.x + after.width).toBeLessThan(panel.left);
+    expect(after.x + after.width).toBeLessThan(drawer.left);
     await page.getByRole("button", { name: "Close notes" }).click();
+    await panel().waitFor({ state: "detached" });
 
-    // The docked outline narrows the map past the idea; once docked, the map
-    // follows it back into view.
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(leaf).click();
     await page.keyboard.press("Alt+o");
-    await docked();
-    const dock = await edges(outline());
-    expect(before.x + before.width).toBeGreaterThan(dock.left);
-    const beside = await box(leaf);
-    expect(beside.x + beside.width).toBeLessThan(dock.left);
+    expect((await box(leaf)).x + (await box(leaf)).width).toBeLessThan(
+      (await edges(outline())).left,
+    );
   });
 });
 

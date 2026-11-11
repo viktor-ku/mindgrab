@@ -17,7 +17,6 @@ import { Node } from "./App";
 import { track } from "./analytics";
 import {
   BrandMark,
-  CloseIcon,
   FitMapIcon,
   MinusIcon,
   OutlineIcon,
@@ -33,6 +32,7 @@ import {
 } from "./mind-map";
 import type { NodeSize } from "./mind-map";
 import { NODE_COLORS } from "./node-colors";
+import { NoteHeading } from "./NotesPanel";
 import { Outline } from "./Outline";
 import { createPresence } from "./presence";
 import {
@@ -46,7 +46,8 @@ import {
   SharedProjectError,
   sharedProjectSocket,
 } from "./shared-project";
-import { panelInsets } from "./view-insets";
+import { type SideTab, SidePanel } from "./SidePanel";
+import { panelEdges, panelInsets } from "./view-insets";
 import { press } from "./press";
 
 const ZOOM_MIN = 0.1;
@@ -249,17 +250,14 @@ export function SharedProject(props: { token: string }) {
   );
 
   const [selectedId, setSelectedId] = createSignal<string>();
-  const [notesDismissed, setNotesDismissed] = createSignal(false);
-  const [outlineOpen, setOutlineOpen] = createSignal(false);
-  // The docked outline stays while it slides out. Once it has opened and the
-  // map has made room, the selected idea is centred in what is left beside
-  // the notes, so they never cover it.
-  const outlineDrawer = createPresence(outlineOpen, {
+  // The side panel, as in the editor: the outline or the selected idea's
+  // notes. Selecting an idea with notes opens it on its notes.
+  const [sideTab, setSideTab] = createSignal<SideTab>();
+  const sideOpen = () => sideTab() !== undefined;
+  const outlineOpen = () => sideTab() === "outline";
+  // The panel stays while it slides out.
+  const sidePanel = createPresence(sideOpen, {
     restoreFocus: () => canvas.focus({ preventScroll: true }),
-    onShown: () => {
-      const id = selectedId();
-      if (id) centerOn(id);
-    },
   });
   const selectedNote = () => {
     const id = selectedId();
@@ -268,7 +266,7 @@ export function SharedProject(props: { token: string }) {
   function select(id?: string) {
     batch(() => {
       setSelectedId(id);
-      setNotesDismissed(false);
+      if (selectedNote() && !sideOpen()) setSideTab("notes");
     });
   }
   // Ideas the owner deletes stop being selected.
@@ -298,13 +296,33 @@ export function SharedProject(props: { token: string }) {
     y: NODE_MIN_HEIGHT / 2,
   });
 
-  // Fit map and outline picks work in the room beside the open panels, as in
+  // Fit map and outline picks work in the room beside the open panel, as in
   // the editor.
-  const viewInsets = () =>
-    panelInsets(
-      window.innerWidth,
-      !!selectedNote() && !notesDismissed() && !outlineOpen(),
-    );
+  const viewInsets = () => panelInsets(canvas.clientWidth, sideOpen());
+  // A panel that opens over the selected idea moves the map aside.
+  createEffect(
+    on(
+      sideOpen,
+      (open) => {
+        const id = selectedId();
+        if (!open || !id || canvas.clientWidth < 640) return;
+        const box = canvas
+          .querySelector(`[data-node-id="${CSS.escape(id)}"]`)
+          ?.getBoundingClientRect();
+        const room =
+          canvas.getBoundingClientRect().right -
+          panelEdges(canvas.clientWidth, true).right;
+        if (box && box.right > room) centerOn(id);
+      },
+      { defer: true },
+    ),
+  );
+  // "Show on map" in the notes. On phones the panel covers the map, so it
+  // closes first.
+  function showOnMap(id: string) {
+    if (canvas.clientWidth < 640) setSideTab(undefined);
+    centerOn(id);
+  }
   function fitMap() {
     const nodes = layout().nodes;
     if (!nodes.length) return;
@@ -462,347 +480,343 @@ export function SharedProject(props: { token: string }) {
     </div>
   );
 
-  // The selected idea's notes: over the map's right edge, or under the
-  // outline while it is docked.
-  const notesPanel = () => (
-    <aside
-      data-toolbar
-      aria-label="Notes"
-      class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
+  // The Notes tab: the selected idea's title and its notes, read only.
+  const notesTab = () => (
+    <Show
+      when={selectedId()}
+      fallback={
+        <p class="p-4 text-sm text-stone-500">
+          Select an idea to read its notes.
+        </p>
+      }
     >
-      <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
-        <div class="min-w-0">
-          <h2 class="panel-title">Notes</h2>
-          <p class="truncate text-xs text-stone-500">
-            {view()?.text(selectedId() ?? "") || "New idea"}
-          </p>
-        </div>
-        <button
-          type="button"
-          class="icon-button size-8!"
-          aria-label="Close notes"
-          title="Close notes (Esc)"
-          {...press(() => {
-            setNotesDismissed(true);
-            canvas.focus({ preventScroll: true });
-          })}
-        >
-          <CloseIcon class="size-4" />
-        </button>
-      </header>
-      <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
-        {selectedNote()}
-      </p>
-    </aside>
+      {(id) => (
+        <>
+          <NoteHeading
+            title={view()?.text(id()).trim() || "New idea"}
+            onShowOnMap={() => showOnMap(id())}
+          />
+          <Show
+            when={selectedNote()}
+            fallback={
+              <p class="p-4 text-sm text-stone-500">This idea has no notes.</p>
+            }
+          >
+            <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
+              {selectedNote()}
+            </p>
+          </Show>
+        </>
+      )}
+    </Show>
   );
 
   return (
-    <div class="relative flex h-screen w-screen overflow-hidden">
-      <section
-        ref={canvas}
-        tabIndex={-1}
-        aria-label="Shared mind map"
-        onPointerDown={startPointer}
-        onPointerMove={movePointer}
-        onPointerUp={stopPointer}
-        onPointerCancel={stopPointer}
-        // biome-ignore lint/plugin: A press on the background may start a pan, so only a release without one clears the selection.
-        onClick={(e) => {
-          if (suppressClick) {
-            suppressClick = false;
-            return;
-          }
-          if (
-            e.target instanceof Element &&
-            !e.target.closest("[data-node-id], [data-toolbar]")
-          )
-            select(undefined);
-        }}
-        onKeyDown={(e) => {
-          // The outline closes on Esc from inside it, as in the editor.
-          if (e.key === "Escape") {
-            if (selectedNote() && !notesDismissed()) {
-              setNotesDismissed(true);
-              // The notes close button goes away while it holds focus.
-              if (e.target.closest('[aria-label="Notes"]'))
-                canvas.focus({ preventScroll: true });
-            } else select(undefined);
-          }
-        }}
-        class="map-canvas overflow-clip h-full min-w-0 flex-1 text-stone-900 relative touch-none select-none outline-none"
-        style={{ cursor: panning() ? "grabbing" : "grab" }}
-      >
-        <Show when={status() === "ready"}>
-          <div
-            class="map-layer absolute w-full h-full origin-top-left"
-            classList={{ "map-layer-easing": easing() }}
-            style={{
-              left: "50%",
-              top: "50%",
-              transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
-            }}
+    <section
+      ref={canvas}
+      tabIndex={-1}
+      aria-label="Shared mind map"
+      onPointerDown={startPointer}
+      onPointerMove={movePointer}
+      onPointerUp={stopPointer}
+      onPointerCancel={stopPointer}
+      // biome-ignore lint/plugin: A press on the background may start a pan, so only a release without one clears the selection.
+      onClick={(e) => {
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
+        if (
+          e.target instanceof Element &&
+          !e.target.closest("[data-node-id], [data-toolbar]")
+        )
+          select(undefined);
+      }}
+      onKeyDown={(e) => {
+        // The side panel closes on Esc from inside it, as in the editor.
+        // On the map, Esc closes the notes that opened with the selection,
+        // then clears the selection.
+        if (e.key === "Escape") {
+          if (sideTab() === "notes") setSideTab(undefined);
+          else select(undefined);
+        }
+      }}
+      class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
+      style={{ cursor: panning() ? "grabbing" : "grab" }}
+    >
+      <Show when={status() === "ready"}>
+        <div
+          class="map-layer absolute w-full h-full origin-top-left"
+          classList={{ "map-layer-easing": easing() }}
+          style={{
+            left: "50%",
+            top: "50%",
+            transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
+          }}
+        >
+          <svg
+            class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
+            aria-hidden="true"
           >
-            <svg
-              class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
-              aria-hidden="true"
-            >
-              <For each={nodeIds()}>
-                {(id) => (
-                  <Show when={connections().get(id)}>
-                    {(connection) => (
-                      <path
-                        d={connectionPath(connection())}
-                        fill="none"
-                        class={
-                          (
-                            NODE_COLORS.find(
-                              (option) =>
-                                option.value === connection().to.color,
-                            ) ?? NODE_COLORS[0]
-                          ).lineClass
-                        }
-                      />
-                    )}
-                  </Show>
-                )}
-              </For>
-            </svg>
             <For each={nodeIds()}>
-              {(id) => {
-                const node = () => positioned().get(id)!;
-                return (
-                  <Show when={doc()}>
-                    {(current) => (
-                      <Node
-                        doc={current()}
-                        readOnly
-                        id={id}
-                        text={view()?.text(id) ?? ""}
-                        color={node().color}
-                        x={node().x}
-                        y={node().y}
-                        selected={selectedId() === id}
-                        writing={false}
-                        dragging={false}
-                        root={!details().get(id)?.parent}
-                        note={!!view()?.note(id).trim()}
-                        descendants={details().get(id)?.descendants ?? 0}
-                        collapsed={collapsedIds().has(id)}
-                        onToggleCollapse={() => toggleCollapse(id)}
-                        onSize={(size) => measureNode(id, size)}
-                        onSelect={() => {
-                          if (!suppressClick) select(id);
-                        }}
-                        onWrite={() => {}}
-                        onFinish={() => {}}
-                        onTab={() => {}}
-                        onSelectionChange={() => {}}
-                        onPointerDown={() => {}}
-                      />
-                    )}
-                  </Show>
-                );
-              }}
+              {(id) => (
+                <Show when={connections().get(id)}>
+                  {(connection) => (
+                    <path
+                      d={connectionPath(connection())}
+                      fill="none"
+                      class={
+                        (
+                          NODE_COLORS.find(
+                            (option) => option.value === connection().to.color,
+                          ) ?? NODE_COLORS[0]
+                        ).lineClass
+                      }
+                    />
+                  )}
+                </Show>
+              )}
             </For>
-          </div>
-          <Show when={!forest().length}>
-            {centered(() => (
-              <p class="font-display text-xl font-semibold">
-                This map is empty
-              </p>
-            ))}
-          </Show>
-        </Show>
-
-        <Show when={status() === "loading"}>
+          </svg>
+          <For each={nodeIds()}>
+            {(id) => {
+              const node = () => positioned().get(id)!;
+              return (
+                <Show when={doc()}>
+                  {(current) => (
+                    <Node
+                      doc={current()}
+                      readOnly
+                      id={id}
+                      text={view()?.text(id) ?? ""}
+                      color={node().color}
+                      x={node().x}
+                      y={node().y}
+                      selected={selectedId() === id}
+                      writing={false}
+                      dragging={false}
+                      root={!details().get(id)?.parent}
+                      note={!!view()?.note(id).trim()}
+                      descendants={details().get(id)?.descendants ?? 0}
+                      collapsed={collapsedIds().has(id)}
+                      onToggleCollapse={() => toggleCollapse(id)}
+                      onSize={(size) => measureNode(id, size)}
+                      onSelect={() => {
+                        if (!suppressClick) select(id);
+                      }}
+                      onWrite={() => {}}
+                      onFinish={() => {}}
+                      onTab={() => {}}
+                      onSelectionChange={() => {}}
+                      onPointerDown={() => {}}
+                    />
+                  )}
+                </Show>
+              );
+            }}
+          </For>
+        </div>
+        <Show when={!forest().length}>
           {centered(() => (
-            <p role="status" class="text-sm text-stone-500">
-              Opening shared map…
-            </p>
+            <p class="font-display text-xl font-semibold">This map is empty</p>
           ))}
         </Show>
-        <Show when={status() === "missing"}>
-          {centered(() => (
-            <>
-              {/* An alert, so the failure is announced like the loading text
+      </Show>
+
+      <Show when={status() === "loading"}>
+        {centered(() => (
+          <p role="status" class="text-sm text-stone-500">
+            Opening shared map…
+          </p>
+        ))}
+      </Show>
+      <Show when={status() === "missing"}>
+        {centered(() => (
+          <>
+            {/* An alert, so the failure is announced like the loading text
                 it replaces. It lays out as the column around it does. */}
-              <div role="alert" class="flex flex-col items-center gap-3">
-                <p class="font-display text-2xl font-semibold">
-                  This link isn’t shared anymore
-                </p>
-                <p class="text-sm leading-6 text-stone-600">
-                  The owner turned off sharing or removed the map. Ask them for
-                  a new link.
-                </p>
-              </div>
-              <a href="/" class="primary-button">
-                Open Mindgrab
-              </a>
-            </>
-          ))}
-        </Show>
-        <Show when={status() === "error"}>
-          {centered(() => (
-            <>
-              <div role="alert" class="flex flex-col items-center gap-3">
-                <p class="font-display text-2xl font-semibold">
-                  Couldn’t open this map
-                </p>
-                <p class="text-sm leading-6 text-stone-600">
-                  Check your connection and try again.
-                </p>
-              </div>
-              <button
-                type="button"
-                class="primary-button"
-                disabled={snapshot.isFetching}
-                {...press(() => {
-                  refetch();
-                  // This button disables itself and then goes away.
-                  canvas.focus({ preventScroll: true });
-                })}
-              >
-                Retry
-              </button>
-            </>
-          ))}
-        </Show>
-
-        <div class="pointer-events-none absolute top-3 right-3 left-3 z-30 flex items-start justify-between gap-2">
-          <section
-            data-toolbar
-            aria-label="Shared map"
-            class="map-toolbar pointer-events-auto flex min-h-11 min-w-0 items-center gap-1 cursor-default"
-          >
-            <a
-              href="/"
-              class="shrink-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-              aria-label="Mindgrab"
-              title="Mindgrab"
-            >
-              <BrandMark class="mx-1 size-6" />
+            <div role="alert" class="flex flex-col items-center gap-3">
+              <p class="font-display text-2xl font-semibold">
+                This link isn’t shared anymore
+              </p>
+              <p class="text-sm leading-6 text-stone-600">
+                The owner turned off sharing or removed the map. Ask them for a
+                new link.
+              </p>
+            </div>
+            <a href="/" class="primary-button">
+              Open Mindgrab
             </a>
-            <Show when={status() === "ready"}>
-              <h1 class="project-name truncate hover:bg-transparent!">
-                {name()}
-              </h1>
-              <span class="shrink-0 rounded-md bg-stone-100 px-1.5 py-0.5 text-[11px] font-semibold text-stone-600">
-                View only
-              </span>
-              <Show when={!live()}>
-                <span
-                  role="status"
-                  class="shrink-0 px-1 text-[11px] text-stone-500"
-                >
-                  Reconnecting…
-                </span>
-              </Show>
-              <span class="toolbar-divider" />
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Outline"
-                title={outlineOpen() ? "Close outline" : "Outline"}
-                aria-expanded={outlineOpen()}
-                {...press(() => setOutlineOpen((open) => !open))}
-              >
-                <OutlineIcon open={outlineOpen()} />
-              </button>
-            </Show>
-          </section>
+          </>
+        ))}
+      </Show>
+      <Show when={status() === "error"}>
+        {centered(() => (
+          <>
+            <div role="alert" class="flex flex-col items-center gap-3">
+              <p class="font-display text-2xl font-semibold">
+                Couldn’t open this map
+              </p>
+              <p class="text-sm leading-6 text-stone-600">
+                Check your connection and try again.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="primary-button"
+              disabled={snapshot.isFetching}
+              {...press(() => {
+                refetch();
+                // This button disables itself and then goes away.
+                canvas.focus({ preventScroll: true });
+              })}
+            >
+              Retry
+            </button>
+          </>
+        ))}
+      </Show>
+
+      <div class="pointer-events-none absolute top-3 right-3 left-3 z-30 flex items-start justify-between gap-2">
+        <section
+          data-toolbar
+          aria-label="Shared map"
+          class="map-toolbar pointer-events-auto flex min-h-11 min-w-0 items-center gap-1 cursor-default"
+        >
           <a
             href="/"
-            data-toolbar
-            class="primary-button account-signin pointer-events-auto inline-flex shrink-0 items-center max-sm:hidden"
+            class="shrink-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            aria-label="Mindgrab"
+            title="Mindgrab"
           >
-            Make your own map
+            <BrandMark class="mx-1 size-6" />
           </a>
-        </div>
-
-        <Show
-          when={selectedNote() && !notesDismissed() && !outlineDrawer.mounted()}
-        >
-          <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-            {notesPanel()}
-          </div>
-        </Show>
-
-        <Show when={status() === "ready"}>
-          <fieldset
-            data-toolbar
-            aria-label="Canvas zoom"
-            class="map-toolbar absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
-          >
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Zoom out"
-              title="Zoom out"
-              disabled={zoom() <= ZOOM_MIN}
-              {...press(() => changeZoom(zoom() / 1.2))}
-            >
-              <MinusIcon />
-            </button>
-            <button
-              type="button"
-              class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
-              aria-label="Zoom to 100%"
-              title="Zoom to 100%"
-              {...press(() => changeZoom(1))}
-            >
-              {Math.round(zoom() * 100)}%
-            </button>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Zoom in"
-              title="Zoom in"
-              disabled={zoom() >= ZOOM_MAX}
-              {...press(() => changeZoom(zoom() * 1.2))}
-            >
-              <PlusIcon />
-            </button>
+          <Show when={status() === "ready"}>
+            <h1 class="project-name truncate hover:bg-transparent!">
+              {name()}
+            </h1>
+            <span class="shrink-0 rounded-md bg-stone-100 px-1.5 py-0.5 text-[11px] font-semibold text-stone-600">
+              View only
+            </span>
+            <Show when={!live()}>
+              <span
+                role="status"
+                class="shrink-0 px-1 text-[11px] text-stone-500"
+              >
+                Reconnecting…
+              </span>
+            </Show>
             <span class="toolbar-divider" />
             <button
               type="button"
               class="icon-button"
-              aria-label="Fit map"
-              title="Fit map"
-              disabled={!forest().length}
-              {...press(fitMap)}
+              aria-label="Outline"
+              title={outlineOpen() ? "Close outline" : "Outline"}
+              aria-expanded={outlineOpen()}
+              {...press(() =>
+                setSideTab(outlineOpen() ? undefined : "outline"),
+              )}
             >
-              <FitMapIcon />
+              <OutlineIcon open={outlineOpen()} />
             </button>
-          </fieldset>
-        </Show>
-      </section>
-      {/* The outline docks beside the map, as in the editor. */}
-      <Show when={status() === "ready" && outlineDrawer.mounted()}>
-        <div ref={outlineDrawer.ref} class="outline-dock">
-          <Outline
-            roots={forest()}
-            text={(id) => view()?.text(id) ?? ""}
-            selectedId={selectedId()}
-            collapsed={collapsedIds()}
-            onSelect={(id, via) => {
-              select(id);
-              centerOn(id);
-              // On phones the outline covers the map. The window decides:
-              // beside the docked outline the canvas is narrower than it.
-              if (via === "pointer" && window.innerWidth < 640)
-                setOutlineOpen(false);
-            }}
-            onToggle={toggleCollapse}
-            onEdit={centerOn}
-            shortcut={false}
+          </Show>
+        </section>
+        <a
+          href="/"
+          data-toolbar
+          class="primary-button account-signin pointer-events-auto inline-flex shrink-0 items-center max-sm:hidden"
+        >
+          Make your own map
+        </a>
+      </div>
+
+      {/* The side panel, a drawer over the map's right edge, as in the
+            editor. */}
+      <Show when={status() === "ready" && sidePanel.mounted()}>
+        <div
+          ref={sidePanel.ref}
+          class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+        >
+          <SidePanel
+            tab={sideTab() ?? "outline"}
+            onTab={setSideTab}
             onClose={() => {
-              setOutlineOpen(false);
+              setSideTab(undefined);
               canvas.focus({ preventScroll: true });
             }}
+            // The shared view has no shortcuts, so its tooltips name none.
+            closeTitle={(tab) =>
+              tab === "outline" ? "Close outline" : "Close notes"
+            }
+            outline={
+              <Outline
+                roots={forest()}
+                text={(id) => view()?.text(id) ?? ""}
+                selectedId={selectedId()}
+                collapsed={collapsedIds()}
+                onSelect={(id, via) => {
+                  select(id);
+                  centerOn(id);
+                  if (via === "pointer" && canvas.clientWidth < 640)
+                    setSideTab(undefined);
+                }}
+                onToggle={toggleCollapse}
+                onEdit={centerOn}
+              />
+            }
+            notes={notesTab()}
           />
-          <Show when={selectedNote() && !notesDismissed()}>{notesPanel()}</Show>
         </div>
       </Show>
-    </div>
+
+      <Show when={status() === "ready"}>
+        <fieldset
+          data-toolbar
+          aria-label="Canvas zoom"
+          class="map-toolbar absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
+        >
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Zoom out"
+            title="Zoom out"
+            disabled={zoom() <= ZOOM_MIN}
+            {...press(() => changeZoom(zoom() / 1.2))}
+          >
+            <MinusIcon />
+          </button>
+          <button
+            type="button"
+            class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
+            aria-label="Zoom to 100%"
+            title="Zoom to 100%"
+            {...press(() => changeZoom(1))}
+          >
+            {Math.round(zoom() * 100)}%
+          </button>
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Zoom in"
+            title="Zoom in"
+            disabled={zoom() >= ZOOM_MAX}
+            {...press(() => changeZoom(zoom() * 1.2))}
+          >
+            <PlusIcon />
+          </button>
+          <span class="toolbar-divider" />
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Fit map"
+            title="Fit map"
+            disabled={!forest().length}
+            {...press(fitMap)}
+          >
+            <FitMapIcon />
+          </button>
+        </fieldset>
+      </Show>
+    </section>
   );
 }

@@ -1,19 +1,20 @@
 import { createEffect, createSignal, on, onCleanup, Show } from "solid-js";
-import { closeOnEscape } from "./escape-key";
-import { CloseIcon } from "./icons";
+import { LocateIcon } from "./icons";
 import type { ProjectDocument } from "./project-document";
 import { bindTextarea } from "./text-binding";
 import { press } from "./press";
 
-// Details for the selected idea, opened deliberately so notes never cover the
-// map while writing. The textarea is bound to the shared note text, so remote
-// edits merge while typing and undo works like it does for idea titles.
+// The selected idea's notes, shown in the side panel's Notes tab, so they
+// never cover the map while writing. The idea's title heads them, with a way
+// to find the idea on the map. The textarea is bound to the shared note text,
+// so remote edits merge while typing and undo works like it does for idea
+// titles.
 export function NotesPanel(props: {
   doc: ProjectDocument;
   id?: string;
   title: string;
   onFocusChange: () => void;
-  onClose: () => void;
+  onShowOnMap: () => void;
 }) {
   let input: HTMLTextAreaElement | undefined;
   const [length, setLength] = createSignal(0);
@@ -32,56 +33,45 @@ export function NotesPanel(props: {
   );
 
   return (
-    <aside
-      data-no-pan
-      data-toolbar
-      aria-label="Notes"
-      // Focusable, so a press on the header or footer keeps focus in the
-      // panel, where Esc closes it, instead of handing it to the map.
-      tabIndex={-1}
-      class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default outline-none"
-      ref={(el) => closeOnEscape(el, () => props.onClose())}
-    >
-      <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
-        <div class="min-w-0">
-          <h2 class="panel-title">Notes</h2>
-          <p class="truncate text-xs text-stone-500">
-            {props.id ? props.title : "No idea selected"}
-          </p>
-        </div>
-        <button
-          type="button"
-          class="icon-button size-8!"
-          aria-label="Close notes"
-          // Esc, not the Alt shortcut: the notes field keeps that key for typing.
-          title="Close notes (Esc)"
-          {...press(props.onClose)}
-        >
-          <CloseIcon class="size-4" />
-        </button>
-      </header>
-      <Show
-        when={props.id}
-        fallback={
-          <p class="p-4 text-sm text-stone-500">
-            Select an idea to read or write its notes.
-          </p>
-        }
-      >
-        <textarea
-          ref={input}
-          aria-label="Idea notes"
-          placeholder="Add details, links, or context…"
-          class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset"
-          onFocus={props.onFocusChange}
-          onBlur={props.onFocusChange}
-        />
-        <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
-          {length()
-            ? `${length().toLocaleString()} characters · saved with the map`
-            : "Notes are saved with the map and included in exports."}
+    <Show
+      when={props.id}
+      fallback={
+        <p class="p-4 text-sm text-stone-500">
+          Select an idea to read or write its notes.
         </p>
-      </Show>
-    </aside>
+      }
+    >
+      <NoteHeading title={props.title} onShowOnMap={props.onShowOnMap} />
+      <textarea
+        ref={input}
+        aria-label="Idea notes"
+        placeholder="Add details, links, or context…"
+        class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset"
+        onFocus={props.onFocusChange}
+        onBlur={props.onFocusChange}
+      />
+      <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
+        {length()
+          ? `${length().toLocaleString()} characters · saved with the map`
+          : "Notes are saved with the map and included in exports."}
+      </p>
+    </Show>
+  );
+}
+
+// The idea's title as the notes' title, and the way back to the idea.
+export function NoteHeading(props: { title: string; onShowOnMap: () => void }) {
+  return (
+    <div class="flex items-start gap-3 border-b border-stone-100 px-3.5 pt-3 pb-3">
+      <h2 class="note-title min-w-0 flex-1">{props.title}</h2>
+      <button
+        type="button"
+        class="map-control outlined flex shrink-0 items-center gap-1.5"
+        {...press(props.onShowOnMap)}
+      >
+        <LocateIcon class="size-4" />
+        Show on map
+      </button>
+    </div>
   );
 }

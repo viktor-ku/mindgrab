@@ -1,13 +1,12 @@
 import { createEffect, For, Show } from "solid-js";
-import { closeOnEscape } from "./escape-key";
-import { ChevronRightIcon, CloseIcon } from "./icons";
-import { ALT_LABEL } from "./ShortcutsDialog";
+import { ChevronRightIcon } from "./icons";
 import type { MindMapNode } from "./mind-map";
 import { press } from "./press";
 
-// A synchronized tree view of the map. It shares selection and folding with
-// the canvas and follows the W3C tree pattern: one tab stop, arrow keys move,
-// Left/Right fold and unfold, Enter edits on the map.
+// A synchronized tree view of the map, shown in the side panel's Outline tab.
+// It shares selection and folding with the canvas and follows the W3C tree
+// pattern: one tab stop, arrow keys move, Left/Right fold and unfold, Enter
+// edits on the map.
 export function Outline(props: {
   roots: readonly MindMapNode[];
   text: (id: string) => string;
@@ -17,9 +16,6 @@ export function Outline(props: {
   onSelect: (id: string, via: "pointer" | "keyboard") => void;
   onToggle: (id: string) => void;
   onEdit: (id: string) => void;
-  onClose: () => void;
-  // False where Alt+O does nothing: the read-only shared view.
-  shortcut?: boolean;
 }) {
   let tree!: HTMLDivElement;
   // Items in display order, honoring folds, for keyboard movement.
@@ -169,41 +165,14 @@ export function Outline(props: {
   );
 
   return (
-    <aside
-      data-no-pan
-      data-toolbar
-      aria-label="Outline"
-      // Focusable, so a press on the header keeps focus in the panel, where
-      // Esc closes it, instead of handing it to the map.
-      tabIndex={-1}
-      class="map-toolbar outline-panel pointer-events-auto flex flex-col cursor-default outline-none"
-      ref={(el) => closeOnEscape(el, () => props.onClose())}
+    <div
+      ref={tree}
+      role="tree"
+      aria-label="Map outline"
+      class="min-h-0 flex-1 overflow-y-auto p-1 text-sm"
+      onKeyDown={keydown}
     >
-      <header class="flex items-center justify-between border-b border-stone-100 py-1.5 pr-1.5 pl-3.5">
-        <h2 class="panel-title">Outline</h2>
-        <button
-          type="button"
-          class="icon-button size-8!"
-          aria-label="Close outline"
-          title={
-            props.shortcut === false
-              ? "Close outline"
-              : `Close outline (${ALT_LABEL}O)`
-          }
-          {...press(props.onClose)}
-        >
-          <CloseIcon class="size-4" />
-        </button>
-      </header>
-      <div
-        ref={tree}
-        role="tree"
-        aria-label="Map outline"
-        class="min-h-0 flex-1 overflow-y-auto p-1 text-sm"
-        onKeyDown={keydown}
-      >
-        <Branch nodes={props.roots} level={1} />
-      </div>
-    </aside>
+      <Branch nodes={props.roots} level={1} />
+    </div>
   );
 }

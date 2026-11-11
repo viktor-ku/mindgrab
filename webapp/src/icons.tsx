@@ -182,6 +182,15 @@ export const OutlineIcon = (props: IconProps & { open?: boolean }) => (
   </Icon>
 );
 
+// A target: find this idea on the map.
+export const LocateIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <circle cx="10" cy="10" r="5" />
+    <path d="M10 2.5V5M10 15v2.5M2.5 10H5M15 10h2.5" />
+    <circle cx="10" cy="10" r="1.25" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
 export const NoteIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <path d="M5 3.5h7l3 3v10H5z" />

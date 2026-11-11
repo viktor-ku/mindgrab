@@ -160,6 +160,7 @@ import { createLocalSave } from "./local-save";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
 import { createPresence } from "./presence";
+import { type SideTab, SidePanel } from "./SidePanel";
 import { panelEdges, panelInsets } from "./view-insets";
 import { press } from "./press";
 
@@ -1972,20 +1973,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   let suppressClick = false;
 
   // Read from a ResizeObserver so following the selection while typing never
-  // forces a synchronous layout of the whole map. The docked outline makes
-  // the canvas narrower than the window, whose width still picks the
-  // breakpoints, so both are kept.
+  // forces a synchronous layout of the whole map.
   const [canvasSize, setCanvasSize] = createSignal({
     width: window.innerWidth,
     height: window.innerHeight,
-    viewport: window.innerWidth,
   });
   onMount(() => {
     const observer = new ResizeObserver(([entry]) =>
       setCanvasSize({
         width: entry.contentRect.width,
         height: entry.contentRect.height,
-        viewport: window.innerWidth,
       }),
     );
     observer.observe(canvas);
@@ -2394,8 +2391,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
   }
 
-  const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
-  const [notesOpen, setNotesOpen] = createSignal(false);
+  // The side panel on the right, open on one of its tabs: the outline or the
+  // selected idea's notes.
+  const [sideTab, setSideTab] = createSignal<SideTab | undefined>(
+    storedFlag(OUTLINE_KEY) ? "outline" : undefined,
+  );
+  const sideOpen = () => sideTab() !== undefined;
+  const outlineOpen = () => sideTab() === "outline";
+  const notesOpen = () => sideTab() === "notes";
+  // Opening a tab shows it in the panel; closing it closes the panel only
+  // while that tab is showing.
+  const showTab = (tab: SideTab, open: boolean) => {
+    if (open) setSideTab(tab);
+    else if (sideTab() === tab) setSideTab(undefined);
+  };
+  const setOutlineOpen = (open: boolean | ((open: boolean) => boolean)) =>
+    showTab("outline", typeof open === "function" ? open(outlineOpen()) : open);
   // A field can be in use before anything is typed into it.
   const [fieldFocused, setFieldFocused] = createSignal(false);
   const isTextField = (target: EventTarget) =>
@@ -2437,7 +2448,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Opening notes from the keyboard moves focus into them; closing returns it.
   function toggleNotes(open = !notesOpen()) {
     finishWriting();
-    setNotesOpen(open);
+    showTab("notes", open);
     if (open && selectedId())
       queueMicrotask(() =>
         document
@@ -2449,38 +2460,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else canvas.focus({ preventScroll: true });
   }
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
-  // The docked outline stays while it slides out. Once it has opened and the
-  // map has made room, the selection stays in view; the resize is read now,
-  // since it may not have been observed yet.
-  const outlineDrawer = createPresence(outlineOpen, {
+  // The panel stays while it slides out.
+  const sidePanel = createPresence(sideOpen, {
     restoreFocus: () => canvas.focus({ preventScroll: true }),
-    onShown: () => {
-      setCanvasSize({
-        width: canvas.clientWidth,
-        height: canvas.clientHeight,
-        viewport: window.innerWidth,
-      });
-      const id = selectedId();
-      if (id && !isPhone()) keepInView(id);
-    },
   });
-  // With the outline docked, the notes join it under the tree; otherwise
-  // they float over the map's right edge.
-  const notesFloating = () => notesOpen() && !outlineDrawer.mounted();
-  const viewInsets = () => panelInsets(canvasSize().viewport, notesFloating());
-  // Notes that open over the selected idea move the map aside, as selecting
-  // that idea with the notes already open would. The outline does the same
-  // once it has docked.
+  const viewInsets = () => panelInsets(canvasSize().width, sideOpen());
+  // A panel that opens over the selected idea moves the map aside, as
+  // selecting that idea with the panel already open would.
   createEffect(
     on(
-      notesOpen,
+      sideOpen,
       (open) => {
         const id = selectedId();
-        if (id && open && notesFloating() && !isPhone()) keepInView(id);
+        if (id && open && !isPhone()) keepInView(id);
       },
       { defer: true },
     ),
   );
+  // "Show on map" in the notes: the idea, unfolded and centred beside the
+  // panel. On phones the panel covers the map, so it closes first.
+  function showOnMap(id: string) {
+    if (isPhone()) setSideTab(undefined);
+    revealNode(id);
+    queueMicrotask(() => centerOn(id));
+  }
   // Centred chrome sits in a strip of the canvas, given as its distance from
   // the left and right edges.
   interface Strip {
@@ -2494,7 +2497,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // The top bars keep to the strip between the open panels, 8px clear of
   // each, so they never cover a panel's header.
   const panelStrip = (): Strip => {
-    const edges = panelEdges(canvasSize().viewport, notesFloating());
+    const edges = panelEdges(canvasSize().width, sideOpen());
     return {
       left: edges.left ? edges.left + 8 : 12,
       right: edges.right ? edges.right + 8 : 12,
@@ -2513,7 +2516,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // 12px margin and an 8px gap.
   const bottomStrip = (): Strip => {
     const width = canvasSize().width;
-    return { left: 12, right: !isPhone() && width < 900 ? 261 : 12 };
+    return { left: 12, right: width >= 640 && width < 900 ? 261 : 12 };
   };
   // The notice stays centred over the toolbar and narrows until it is clear
   // of the open panels. Where that leaves too little to read, it centres
@@ -2659,10 +2662,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const regions: HTMLElement[] = [
       canvas,
       ...Array.from(
-        // The frame, so the outline docked beside the canvas counts too.
-        (canvas.parentElement ?? canvas).querySelectorAll<HTMLElement>(
-          "[data-toolbar][aria-label]",
-        ),
+        canvas.querySelectorAll<HTMLElement>("[data-toolbar][aria-label]"),
       ).filter(
         (region) =>
           !region.parentElement?.closest("[data-toolbar][aria-label]") &&
@@ -4237,1547 +4237,1546 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   );
 
   return (
-    <div class="relative flex h-screen w-screen overflow-hidden">
-      <section
-        ref={canvas}
-        tabIndex={-1}
-        aria-label="Mind map canvas"
-        data-storage-ready={storageReady()}
-        onFocusIn={(e) => setFieldFocused(isTextField(e.target))}
-        onFocusOut={(e) => {
-          if (isTextField(e.target)) setFieldFocused(false);
+    <section
+      ref={canvas}
+      tabIndex={-1}
+      aria-label="Mind map canvas"
+      data-storage-ready={storageReady()}
+      onFocusIn={(e) => setFieldFocused(isTextField(e.target))}
+      onFocusOut={(e) => {
+        if (isTextField(e.target)) setFieldFocused(false);
+      }}
+      onPointerDown={(e) => {
+        if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
+          return;
+        startPointer(e);
+      }}
+      onPointerMove={movePointer}
+      onPointerUp={(e) => stopPointer(e, true)}
+      onPointerCancel={(e) => stopPointer(e, false)}
+      onLostPointerCapture={(e) => {
+        // Touch gives the idea under the finger an implicit capture; moving it
+        // to the canvas when a drag starts is not a cancellation.
+        if (e.target === canvas) stopPointer(e, false);
+      }}
+      onContextMenu={openContextMenu}
+      class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
+      style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
+    >
+      <ProjectPreferences
+        open={showPreferences()}
+        onClose={() => setShowPreferences(false)}
+        saving={view().saving()}
+        onChange={(value) => {
+          if (!savingMutation.isPending) savingMutation.mutate(value);
         }}
-        onPointerDown={(e) => {
-          if (e.target instanceof Element && e.target.closest("[data-no-pan]"))
-            return;
-          startPointer(e);
+        busy={savingMutation.isPending}
+        error={preferencesError()}
+        cloudStatus={cloudStatus()}
+        signedIn={account().status === "authenticated"}
+        onExport={exportCurrentProject}
+        onSignIn={signInFrom(setShowPreferences)}
+        onReviewAnalytics={
+          isPhone() && analyticsEnabled
+            ? () => {
+                returnToShare = false;
+                setShowPreferences(false);
+                reviewConsent();
+              }
+            : undefined
+        }
+      />
+      <ShareDialog
+        open={showShare()}
+        onClose={() => setShowShare(false)}
+        projectId={doc().id}
+        ownerId={
+          account().status === "authenticated" ? account().user?.id : undefined
+        }
+        cloud={view().saving().cloud}
+        onOpenPreferences={() => {
+          returnToShare = true;
+          setShowShare(false);
+          setShowPreferences(true);
         }}
-        onPointerMove={movePointer}
-        onPointerUp={(e) => stopPointer(e, true)}
-        onPointerCancel={(e) => stopPointer(e, false)}
-        onLostPointerCapture={(e) => {
-          // Touch gives the idea under the finger an implicit capture; moving it
-          // to the canvas when a drag starts is not a cancellation.
-          if (e.target === canvas) stopPointer(e, false);
-        }}
-        onContextMenu={openContextMenu}
-        class="map-canvas overflow-clip h-full min-w-0 flex-1 text-stone-900 relative touch-none select-none outline-none"
-        style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
-      >
-        <ProjectPreferences
-          open={showPreferences()}
-          onClose={() => setShowPreferences(false)}
-          saving={view().saving()}
-          onChange={(value) => {
-            if (!savingMutation.isPending) savingMutation.mutate(value);
-          }}
-          busy={savingMutation.isPending}
-          error={preferencesError()}
-          cloudStatus={cloudStatus()}
-          signedIn={account().status === "authenticated"}
-          onExport={exportCurrentProject}
-          onSignIn={signInFrom(setShowPreferences)}
-          onReviewAnalytics={
-            isPhone() && analyticsEnabled
-              ? () => {
-                  returnToShare = false;
-                  setShowPreferences(false);
-                  reviewConsent();
-                }
-              : undefined
-          }
-        />
-        <ShareDialog
-          open={showShare()}
-          onClose={() => setShowShare(false)}
-          projectId={doc().id}
-          ownerId={
-            account().status === "authenticated"
-              ? account().user?.id
-              : undefined
-          }
-          cloud={view().saving().cloud}
-          onOpenPreferences={() => {
-            returnToShare = true;
-            setShowShare(false);
-            setShowPreferences(true);
-          }}
-          onSignIn={signInFrom(setShowShare)}
-          onShared={(enabled) => track("share_link_changed", { enabled })}
-        />
-        {/* On desktop the two top columns hold the menus and the search results,
+        onSignIn={signInFrom(setShowShare)}
+        onShared={(enabled) => track("share_link_changed", { enabled })}
+      />
+      {/* On desktop the two top columns hold the menus and the search results,
           which open over the bottom chrome in a small window. */}
-        <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2 sm:z-40">
-          <span role="status" class="sr-only">
-            {saveDot().label}
-          </span>
-          <Show
-            when={!isPhone()}
-            fallback={
-              <button
-                type="button"
-                data-no-pan
-                data-toolbar
-                class="map-toolbar phone-menu-button pointer-events-auto"
-                data-problem={saveDot().tone === "error" ? "" : undefined}
-                aria-label="Project menu"
-                aria-haspopup="dialog"
-                aria-expanded={menuOpen()}
-                {...press(toggleProjectMenu)}
-              >
-                <MenuIcon />
-              </button>
-            }
-          >
-            <section
-              data-no-pan
-              data-toolbar
-              aria-label="Project"
-              class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
-            >
-              <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
-              <ProjectNameInput />
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Project menu"
-                title="Project menu"
-                aria-haspopup="menu"
-                aria-expanded={menuOpen()}
-                {...press(toggleProjectMenu)}
-              >
-                <ChevronDownIcon />
-              </button>
-              <fieldset
-                aria-label="Project actions"
-                class="flex min-w-0 items-center pr-2 pl-1 text-xs text-stone-500"
-              >
-                <Show
-                  when={saveDot().tone === "error"}
-                  fallback={
-                    <span
-                      aria-hidden="true"
-                      class="save-state"
-                      data-tone={saveDot().tone}
-                      data-label={saveDot().label}
-                    />
-                  }
-                >
-                  <button
-                    type="button"
-                    class="save-state"
-                    data-tone="error"
-                    data-label="Couldn’t save · click for details"
-                    aria-label="Save error details"
-                    aria-haspopup="dialog"
-                    {...press(() => setSaveErrorOpen(true))}
-                  />
-                </Show>
-              </fieldset>
-            </section>
-          </Show>
-          <Show when={menuOpen() && !isPhone()}>
-            <div
-              ref={(el) => {
-                projectMenu = el;
-                transientLayer(el, {
-                  trigger: projectMenuButton,
-                  close: () => setMenuOpen(false),
-                });
-              }}
-              data-no-pan
-              data-toolbar
-              role="menu"
-              aria-label="Project menu"
-              // A long menu scrolls itself rather than run off a short window.
-              class="map-toolbar menu-panel pointer-events-auto max-h-[calc(100dvh-5rem)] w-72 overflow-y-auto cursor-default outline-none"
-              onKeyDown={menuArrowKeys}
-            >
-              <fieldset disabled={fileBusy()} class="contents">
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    createNewProject();
-                  })}
-                >
-                  New map
-                </button>
-                <OpenMapItems />
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    importProjectFromFile();
-                  })}
-                >
-                  Import backup…
-                </button>
-                <div class="menu-divider" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    save();
-                  })}
-                >
-                  Save now
-                  <kbd class="ml-auto">{MOD_LABEL}S</kbd>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    exportCurrentProject();
-                  })}
-                >
-                  Export backup (.json)
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    void exportMarkdown();
-                  })}
-                >
-                  Export outline (.md)
-                </button>
-                <div class="menu-divider" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  aria-haspopup="dialog"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    finishWriting();
-                    finishProjectName();
-                    setShowShare(true);
-                  })}
-                >
-                  Share link…
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  aria-haspopup="dialog"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    finishWriting();
-                    finishProjectName();
-                    returnToShare = false;
-                    setShowPreferences(true);
-                  })}
-                >
-                  Project preferences…
-                </button>
-                <Show when={analyticsEnabled}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="menu-item"
-                    {...press(() => {
-                      setMenuOpen(false);
-                      reviewConsent();
-                    })}
-                  >
-                    Analytics choice…
-                  </button>
-                </Show>
-              </fieldset>
-            </div>
-          </Show>
-          <Show when={storageMessage() || !storageReady() || memoryOnly()}>
-            <div
-              data-no-pan
-              data-toolbar
-              class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
-            >
-              <Show when={memoryOnly()}>
-                <p role="status" class="text-amber-800">
-                  In memory only · Export before closing this tab.
-                </p>
-              </Show>
-              <div class="flex items-start gap-2 has-[p:empty]:hidden">
-                <p
-                  role="status"
-                  data-storage-message
-                  class="min-w-0 flex-1 self-center"
-                >
-                  {storageMessage()}
-                </p>
-                {/* While local saving is unavailable the message explains the
-                  retry button below, so it stays. */}
-                <Show when={storageMessage() && storageReady()}>
-                  <button
-                    type="button"
-                    class="icon-button size-8!"
-                    aria-label="Dismiss"
-                    title="Dismiss"
-                    {...press(() => {
-                      setStorageMessage("");
-                      canvas.focus({ preventScroll: true });
-                    })}
-                  >
-                    <CloseIcon class="size-4" />
-                  </button>
-                </Show>
-              </div>
-              <Show when={!storageReady()}>
-                <div class="flex flex-wrap gap-1">
-                  <button
-                    type="button"
-                    class="map-control outlined"
-                    {...press(retryLocal)}
-                  >
-                    Retry local saving
-                  </button>
-                </div>
-              </Show>
-            </div>
-          </Show>
-        </div>
-        <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2 sm:z-40">
-          <Show when={!isPhone()}>
-            <div class="flex items-start gap-2">
-              <nav
-                data-no-pan
-                data-toolbar
-                aria-label="Editing"
-                class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
-              >
-                {/* Undo and redo appear with the first edit. They sit at the far end
-                so the buttons already on screen stay where they are. */}
-                <Show when={canUndo() || canRedo()}>
-                  <button
-                    type="button"
-                    class="icon-button"
-                    aria-label="Undo"
-                    title={`Undo (${MOD_LABEL}Z)`}
-                    disabled={!canUndo()}
-                    {...press(undo)}
-                  >
-                    <UndoIcon />
-                  </button>
-                  <button
-                    type="button"
-                    class="icon-button"
-                    aria-label="Redo"
-                    title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
-                    disabled={!canRedo()}
-                    {...press(redo)}
-                  >
-                    <RedoIcon />
-                  </button>
-                  <span class="toolbar-divider" />
-                </Show>
-                <button
-                  type="button"
-                  class="icon-button"
-                  aria-label="Search"
-                  title={`Search (${MOD_LABEL}F)`}
-                  aria-expanded={searchOpen()}
-                  {...press(() =>
-                    searchOpen() ? closeSearch(false) : openSearch(),
-                  )}
-                >
-                  <SearchIcon />
-                </button>
-                <button
-                  type="button"
-                  class="icon-button"
-                  aria-label="Outline"
-                  title={`${outlineOpen() ? "Close outline" : "Outline"} (${ALT_LABEL}O)`}
-                  aria-expanded={outlineOpen()}
-                  {...press((e) => {
-                    setOutlineOpen((open) => !open);
-                    backToCanvas(e);
-                  })}
-                >
-                  <OutlineIcon open={outlineOpen()} />
-                </button>
-              </nav>
-              <AccountControls
-                state={account()}
-                beforeNavigate={saveBeforeAuth}
-                onRetry={() => void auth.check()}
-                signInRef={(start) => {
-                  signIn = start;
-                }}
-              />
-            </div>
-          </Show>
-          <Show when={searchOpen()}>
-            <search
-              data-no-pan
-              data-toolbar
-              aria-label="Search ideas"
-              // The field fills the island, so the island carries its focus ring.
-              class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
-              // Beside the notes, not over their header: previews select ideas,
-              // and their notes follow.
-              classList={{
-                "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
-                  notesFloating() && !isPhone(),
-              }}
-              ref={(el) => closeOnEscape(el, () => closeSearch(false))}
-            >
-              <div class="flex items-center gap-2 px-2">
-                <SearchIcon class="size-4 shrink-0 text-stone-400" />
-                <input
-                  ref={searchInput}
-                  type="search"
-                  aria-label="Search ideas"
-                  aria-controls="search-results"
-                  aria-activedescendant={
-                    searchResults()[searchIndex()]
-                      ? `search-result-${searchIndex()}`
-                      : undefined
-                  }
-                  placeholder={
-                    focusId() ? "Search this branch" : "Search this map"
-                  }
-                  class="search-field min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-500"
-                  value={searchQuery()}
-                  onInput={(e) => {
-                    batch(() => {
-                      setSearchQuery(e.currentTarget.value);
-                      setSearchIndex(0);
-                    });
-                  }}
-                  onKeyDown={(e) => {
-                    const count = searchResults().length;
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      closeSearch(count > 0);
-                    } else if (
-                      count &&
-                      (e.key === "ArrowDown" || e.key === "ArrowUp")
-                    ) {
-                      e.preventDefault();
-                      setSearchIndex(
-                        (index) =>
-                          (index + (e.key === "ArrowDown" ? 1 : -1) + count) %
-                          count,
-                      );
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  class="icon-button -mr-1"
-                  aria-label="Close search"
-                  title="Close search (Esc)"
-                  {...press(() => closeSearch(false))}
-                >
-                  <CloseIcon class="size-4" />
-                </button>
-              </div>
-              <Show when={searchQuery().trim()}>
-                <div
-                  id="search-results"
-                  role="listbox"
-                  aria-label="Search results"
-                  class="max-h-80 overflow-y-auto border-t border-stone-100 p-1"
-                >
-                  <For
-                    each={searchResults()}
-                    fallback={
-                      <p class="px-2 py-3 text-center text-xs text-stone-500">
-                        No ideas match “{truncate(searchQuery().trim(), 24)}”
-                      </p>
-                    }
-                  >
-                    {(result, index) => (
-                      <div
-                        id={`search-result-${index()}`}
-                        role="option"
-                        tabIndex={-1}
-                        aria-selected={index() === searchIndex()}
-                        class="search-result"
-                        onPointerEnter={() => setSearchIndex(index())}
-                        {...press(() => {
-                          setSearchIndex(index());
-                          closeSearch(true);
-                        })}
-                      >
-                        <span class="block truncate text-sm text-stone-800">
-                          {result.text.slice(0, result.match[0])}
-                          <mark>
-                            {result.text.slice(
-                              result.match[0],
-                              result.match[1],
-                            )}
-                          </mark>
-                          {result.text.slice(result.match[1])}
-                        </span>
-                        <Show when={result.path.length}>
-                          <span class="block truncate text-xs text-stone-500">
-                            {/* The nearest parents matter most; earlier ones collapse. */}
-                            {[
-                              ...(result.path.length > 3 ? ["…"] : []),
-                              ...result.path
-                                .slice(-3)
-                                .map((part) => truncate(part, 20)),
-                            ].join(" › ")}
-                          </span>
-                        </Show>
-                      </div>
-                    )}
-                  </For>
-                </div>
-                <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
-                  {/* One line: when both don't fit, the hint wraps out of view. */}
-                  <span class="flex h-[1lh] flex-wrap justify-between gap-x-2 overflow-hidden">
-                    <span class="whitespace-nowrap">
-                      {searchResults().length}
-                      {searchHits().length > SEARCH_LIMIT ? "+" : ""}{" "}
-                      {searchResults().length === 1 ? "match" : "matches"} in{" "}
-                      {focusId() ? "this branch" : "this map"}
-                    </span>
-                    <span class="keyboard-hint whitespace-nowrap">
-                      ↑↓ preview · Enter go · Esc back
-                    </span>
-                  </span>
-                </p>
-              </Show>
-            </search>
-          </Show>
-        </div>
-        <Show when={notesFloating()}>
-          <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-            <NotesPanel
-              doc={session().doc}
-              id={selectedId()}
-              title={nodeLabel(selectedId() ?? "")}
-              onFocusChange={() => session().undo.finishGroup()}
-              onClose={() => toggleNotes(false)}
-            />
-          </div>
-        </Show>
-        <AnalyticsConsent />
-        {/* One column, so these stack instead of covering each other. */}
-        <div
-          class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
-          style={stripStyle(panelStrip())}
-        >
-          <Show when={focusId()}>
-            <nav
-              data-no-pan
-              data-toolbar
-              aria-label="Branch focus"
-              // Clipped, so nothing can spill over the panels beside it. The
-              // minimum keeps the way out in reach.
-              class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 overflow-hidden text-sm cursor-default"
-            >
-              <button
-                type="button"
-                class="map-control flex h-9 shrink-0 items-center gap-1.5"
-                title="Show the whole map (Esc with nothing selected)"
-                {...press(exitFocus)}
-              >
-                <ArrowLeftIcon class="size-4" />
-                <span classList={{ "sr-only": crumbRoom() < 240 }}>
-                  Whole map
-                </span>
-              </button>
-              <For each={crumbs()}>
-                {(id, index) => (
-                  <>
-                    <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
-                    <Show
-                      when={index() < crumbs().length - 1}
-                      fallback={
-                        <span
-                          aria-current="location"
-                          class="max-w-48 truncate px-2 font-medium text-stone-800"
-                        >
-                          {nodeLabel(id)}
-                        </span>
-                      }
-                    >
-                      {/* The steps above give way first, so where you are stays
-                        readable. */}
-                      <button
-                        type="button"
-                        class="map-control h-9 max-w-36 shrink-3 truncate"
-                        {...press(() => focusBranch(id))}
-                      >
-                        {nodeLabel(id)}
-                      </button>
-                    </Show>
-                  </>
-                )}
-              </For>
-            </nav>
-          </Show>
-          <Show when={returnView()}>
-            <nav
-              data-no-pan
-              data-toolbar
-              aria-label="Return from search"
-              class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 text-sm cursor-default"
-            >
-              <button
-                type="button"
-                class="map-control flex h-9 min-w-0 items-center gap-1.5"
-                title="Restore the view and folds from before the search"
-                {...press(() => {
-                  const back = returnView();
-                  setReturnView(undefined);
-                  if (back) restoreView(back);
-                  canvas.focus({ preventScroll: true });
-                })}
-              >
-                <ArrowLeftIcon class="size-4 shrink-0" />
-                <span class="truncate">Back to where you were</span>
-              </button>
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Stay here"
-                title="Stay here"
-                {...press(() => setReturnView(undefined))}
-              >
-                <CloseIcon class="size-4" />
-              </button>
-            </nav>
-          </Show>
-        </div>
-        {/* The notice keeps its place above the selection toolbar's slot, so the
-          toolbar reappearing (when an edit ends on press) never moves it from
-          under the pointer. */}
-        <div
-          class="pointer-events-none absolute bottom-[4.25rem] z-30 flex justify-center"
-          style={stripStyle(noticeStrip())}
-        >
-          <Show when={notice()}>
-            {(current) => (
-              <div
-                role="status"
-                data-no-pan
-                data-toolbar
-                class="notice pointer-events-auto flex min-w-0 items-center gap-3 cursor-default"
-              >
-                <span class="min-w-0 truncate">{current().message}</span>
-                <Show when={current().action}>
-                  {(action) => (
-                    <button
-                      type="button"
-                      class="notice-action"
-                      {...press(() => {
-                        setNotice(undefined);
-                        const undoing = action().run === undo;
-                        action().run();
-                        if (undoing)
-                          showNotice({
-                            message: "Undone",
-                            action: { label: "Redo", run: redo },
-                          });
-                      })}
-                    >
-                      {action().label}
-                    </button>
-                  )}
-                </Show>
-              </div>
-            )}
-          </Show>
-        </div>
-        {/* Level with the notice and after it, so the color popover, which opens
-          into the notice's slot, paints over it. */}
-        <div
-          class="pointer-events-none absolute bottom-3 z-30 flex flex-col items-center gap-2"
-          style={stripStyle(bottomStrip())}
-        >
-          <Show when={selectedId() && !writing() && !drag()}>
-            <section
-              data-no-pan
-              data-toolbar
-              aria-label="Selected idea"
-              class="map-toolbar pointer-events-auto relative flex items-center gap-0.5 cursor-default"
-            >
-              <Show when={colorOpen()}>
-                <section
-                  aria-label="Selected node color controls"
-                  class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2 outline-none"
-                  // Opaque: it opens over the notice and the analytics banner,
-                  // and inside the toolbar its own blur cannot hide them.
-                  style={{ background: "var(--surface)" }}
-                  ref={(el) =>
-                    transientLayer(el, {
-                      trigger: () =>
-                        document.querySelector<HTMLButtonElement>(
-                          'button[aria-label="Color"]',
-                        ),
-                      close: () => setColorOpen(false),
-                    })
-                  }
-                >
-                  <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
-                    <legend class="sr-only">Apply color to</legend>
-                    <label
-                      class="color-scope"
-                      classList={{
-                        "color-scope-selected": colorScope() === "node",
-                      }}
-                    >
-                      <input
-                        class="sr-only"
-                        type="radio"
-                        name="node-color-scope"
-                        value="node"
-                        checked={colorScope() === "node"}
-                        onChange={() => setColorScope("node")}
-                      />
-                      <span>This idea</span>
-                    </label>
-                    <label
-                      class="color-scope"
-                      classList={{
-                        "color-scope-selected": colorScope() === "branch",
-                      }}
-                    >
-                      <input
-                        class="sr-only"
-                        type="radio"
-                        name="node-color-scope"
-                        value="branch"
-                        checked={colorScope() === "branch"}
-                        onChange={() => setColorScope("branch")}
-                      />
-                      <span>This branch</span>
-                    </label>
-                  </fieldset>
-                  <fieldset class="grid grid-cols-4 gap-1 px-1">
-                    <legend class="sr-only">
-                      Choose a color for{" "}
-                      {colorScope() === "node" ? "this idea" : "this branch"}
-                    </legend>
-                    <For each={NODE_COLORS}>
-                      {(color) => (
-                        <button
-                          type="button"
-                          class="color-choice"
-                          aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
-                          aria-pressed={
-                            (selectedNode()?.color ?? "blue") === color.value
-                          }
-                          title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
-                          {...press(() => colorSelectedNode(color.value))}
-                        >
-                          <span
-                            aria-hidden="true"
-                            class={`grid size-7 place-items-center rounded-full border-2 ${color.swatchClass}`}
-                          >
-                            <Show
-                              when={
-                                (selectedNode()?.color ?? "blue") ===
-                                color.value
-                              }
-                            >
-                              <svg
-                                viewBox="0 0 20 20"
-                                fill="none"
-                                class="size-4 text-slate-950"
-                                aria-hidden="true"
-                              >
-                                <path
-                                  d="m4 10 4 4 8-8"
-                                  stroke="currentColor"
-                                  stroke-linecap="round"
-                                  stroke-linejoin="round"
-                                  stroke-width="2.5"
-                                />
-                              </svg>
-                            </Show>
-                          </span>
-                        </button>
-                      )}
-                    </For>
-                  </fieldset>
-                  <p class="px-2 pb-1 text-xs text-stone-500">
-                    {colorScope() === "node"
-                      ? "Changes only the selected idea."
-                      : "Changes this idea and everything under it."}
-                  </p>
-                </section>
-              </Show>
-              <button
-                type="button"
-                class="tool-button"
-                title="Add a child idea (Tab)"
-                {...press(() => add("child"))}
-              >
-                <ChildIcon />
-                <span class="max-sm:sr-only">Child</span>
-              </button>
-              <button
-                type="button"
-                class="tool-button"
-                // Enter on a central idea adds a child instead.
-                title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
-                disabled={selectedId() === focusId()}
-                {...press(() => add("sibling"))}
-              >
-                <SiblingIcon />
-                <span class="max-sm:sr-only">Sibling</span>
-              </button>
-              <span class="toolbar-divider" />
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Color"
-                title="Color"
-                aria-expanded={colorOpen()}
-                {...press((e) => {
-                  setColorOpen((open) => !open);
-                  if (!colorOpen()) backToCanvas(e);
-                })}
-              >
-                <span
-                  aria-hidden="true"
-                  class={`size-4.5 rounded-full border-2 ${(NODE_COLORS.find((color) => color.value === (selectedNode()?.color ?? "blue")) ?? NODE_COLORS[0]).swatchClass}`}
-                />
-              </button>
-              <button
-                type="button"
-                class="icon-button relative"
-                aria-label="Notes"
-                title={`Notes (${ALT_LABEL}N)`}
-                aria-expanded={notesOpen()}
-                {...press(() => toggleNotes())}
-              >
-                <NoteIcon />
-                <Show
-                  when={view()
-                    .note(selectedId() ?? "")
-                    .trim()}
-                >
-                  <span
-                    aria-hidden="true"
-                    class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-accent"
-                  />
-                </Show>
-              </button>
-              <Show when={details().get(selectedId() ?? "")?.descendants}>
-                <button
-                  type="button"
-                  class="icon-button"
-                  aria-label={
-                    collapsedIds().has(selectedId() ?? "")
-                      ? "Expand children"
-                      : "Collapse children"
-                  }
-                  title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
-                  {...press(() => toggleCollapse(selectedId() as string))}
-                >
-                  <Show
-                    when={collapsedIds().has(selectedId() ?? "")}
-                    fallback={<FoldIcon />}
-                  >
-                    <UnfoldIcon />
-                  </Show>
-                </button>
-                <button
-                  type="button"
-                  class="icon-button narrow-hide"
-                  aria-label={
-                    focusId() === selectedId()
-                      ? "Leave focus"
-                      : "Focus on this branch"
-                  }
-                  title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
-                  aria-pressed={focusId() === selectedId()}
-                  {...press(() =>
-                    focusId() === selectedId() ? exitFocus() : focusBranch(),
-                  )}
-                >
-                  <FocusIcon />
-                </button>
-              </Show>
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="More actions"
-                title="More actions"
-                aria-haspopup="menu"
-                aria-expanded={!!contextMenu()?.above}
-                {...press((e) => {
-                  if (contextMenu()?.above) {
-                    setContextMenu(undefined);
-                    backToCanvas(e);
-                    return;
-                  }
-                  const bounds = e.currentTarget.getBoundingClientRect();
-                  const id = selectedId();
-                  setContextMenu({
-                    x: Math.max(
-                      8,
-                      Math.min(bounds.left, window.innerWidth - 232),
-                    ),
-                    y: bounds.top - 8,
-                    nodeId: id,
-                    above: true,
-                  });
-                })}
-              >
-                <MoreIcon />
-              </button>
-            </section>
-          </Show>
-        </div>
-        <div
-          class="map-layer absolute w-full h-full origin-top-left"
-          classList={{ "map-layer-easing": easingView() }}
-          data-dropping={dropTarget() ? "" : undefined}
-          style={{
-            left: "50%",
-            top: "50%",
-            transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
-          }}
-        >
-          <svg
-            class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
-            aria-hidden="true"
-          >
-            {/* Keyed by child id so a layout change updates path data in place
-              instead of recreating every connection. */}
-            <For each={nodeIds()}>
-              {(id) => (
-                <Show when={connections().get(id)}>
-                  {(connection) => (
-                    <path
-                      d={connectionPath(connection())}
-                      fill="none"
-                      class={
-                        (
-                          NODE_COLORS.find(
-                            (option) => option.value === connection().to.color,
-                          ) ?? NODE_COLORS[0]
-                        ).lineClass
-                      }
-                    />
-                  )}
-                </Show>
-              )}
-            </For>
-          </svg>
-          <For each={nodeIds()}>
-            {(id) => {
-              const node = () => positionedNodes().get(id)!;
-              return (
-                <Node
-                  doc={session().doc}
-                  id={id}
-                  text={view().text(id)}
-                  color={node().color}
-                  x={node().x}
-                  y={node().y}
-                  selected={selectedId() === id}
-                  writing={selectedId() === id && writing()}
-                  dragging={draggingId() === id}
-                  root={!details().get(id)?.parent || focusId() === id}
-                  note={!!view().note(id).trim()}
-                  descendants={details().get(id)?.descendants ?? 0}
-                  collapsed={collapsedIds().has(id)}
-                  onToggleCollapse={() => {
-                    select(id);
-                    toggleCollapse(id);
-                  }}
-                  onSize={(size) => measureNode(id, size)}
-                  onSelect={() => select(id)}
-                  onWrite={() => write(id)}
-                  onFinish={() => {
-                    if (selectedId() === id) finishWriting();
-                  }}
-                  onTab={(shift) => (shift ? insertParent() : add("child"))}
-                  onSelectionChange={recordEditorSelection}
-                  onPointerDown={(e) => startPointer(e, id)}
-                />
-              );
-            }}
-          </For>
-          <Show when={dropTarget()}>
-            {(target) => (
-              <Show when={positionedNodes().get(target().id)}>
-                {(rect) => (
-                  <div
-                    aria-hidden="true"
-                    class="drop-indicator"
-                    data-kind={target().kind}
-                    style={{
-                      transform: `translate(${rect().x}px, ${
-                        target().kind === "before"
-                          ? rect().y - 8
-                          : target().kind === "after"
-                            ? rect().y + rect().height + 5
-                            : rect().y
-                      }px)`,
-                      width: `${rect().width}px`,
-                      height:
-                        target().kind === "inside"
-                          ? `${rect().height}px`
-                          : undefined,
-                    }}
-                  />
-                )}
-              </Show>
-            )}
-          </Show>
-        </div>
-        <Show when={drag() && dragPointer()}>
-          <div
-            aria-hidden="true"
-            class="drag-label"
-            style={{
-              left: `${(dragPointer()?.x ?? 0) + 14}px`,
-              top: `${(dragPointer()?.y ?? 0) - 40}px`,
-            }}
-          >
-            {dragLabel()}
-          </div>
-        </Show>
-        <Show when={!forest().length}>
-          <div
-            data-no-pan
-            data-toolbar
-            class="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 text-center cursor-default"
-          >
-            <p class="font-display text-2xl font-semibold text-stone-900">
-              Your canvas is empty
-            </p>
-            <p class="max-w-64 text-sm text-stone-500">
-              Start with the central idea. Press <kbd>Enter</kbd> anytime to add
-              one.
-            </p>
+      <div class="pointer-events-none absolute top-3 left-3 z-30 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2 sm:z-40">
+        <span role="status" class="sr-only">
+          {saveDot().label}
+        </span>
+        <Show
+          when={!isPhone()}
+          fallback={
             <button
               type="button"
-              class="primary-button"
-              {...press(() => add("root"))}
-            >
-              Create an idea
-            </button>
-          </div>
-        </Show>
-        <Show when={contextMenu()}>
-          {(menu) => (
-            <div
-              ref={(el) => {
-                contextMenuElement = el;
-                const moreActions = () =>
-                  document.querySelector<HTMLButtonElement>(
-                    'button[aria-label="More actions"]',
-                  );
-                transientLayer(el, {
-                  trigger: moreActions,
-                  close: () => setContextMenu(undefined),
-                  // A right-click menu has no trigger; it came from the map.
-                  returnFocus: () =>
-                    (contextMenu()?.above && moreActions()) || canvas,
-                });
-              }}
               data-no-pan
               data-toolbar
-              data-context-menu
-              role="menu"
-              aria-label={menu().nodeId ? "Idea actions" : "Canvas actions"}
-              class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default outline-none"
-              style={{
-                left: `${menu().x}px`,
-                top: `${menu().y}px`,
-                transform: menu().above ? "translateY(-100%)" : undefined,
-              }}
-              onPointerDown={(e) => e.stopPropagation()}
-              onContextMenu={(e) => e.preventDefault()}
-              onKeyDown={menuArrowKeys}
+              class="map-toolbar phone-menu-button pointer-events-auto"
+              data-problem={saveDot().tone === "error" ? "" : undefined}
+              aria-label="Project menu"
+              aria-haspopup="dialog"
+              aria-expanded={menuOpen()}
+              {...press(toggleProjectMenu)}
             >
-              <Show
-                when={menu().nodeId}
-                fallback={
-                  <button
-                    type="button"
-                    role="menuitem"
-                    class="menu-item"
-                    {...press(() => {
-                      const position = menu().rootPosition;
-                      setContextMenu(undefined);
-                      add("root", position);
-                    })}
-                  >
-                    New central idea
-                  </button>
-                }
-              >
-                {(nodeId) => {
-                  const run = (action: () => void) => () => {
-                    setContextMenu(undefined);
-                    setSelectedId(nodeId());
-                    action();
-                  };
-                  const siblings = () =>
-                    childrenOf(details().get(nodeId())?.parent);
-                  return (
-                    <>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        {...press(run(() => add("child")))}
-                      >
-                        Add child idea
-                        <kbd class="ml-auto">Tab</kbd>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        disabled={nodeId() === focusId()}
-                        {...press(run(() => add("sibling")))}
-                      >
-                        Add sibling idea
-                        {/* Enter on a central idea adds a child instead. */}
-                        <Show when={details().get(nodeId())?.parent}>
-                          <kbd class="ml-auto">Enter</kbd>
-                        </Show>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        disabled={nodeId() === focusId()}
-                        {...press(run(insertParent))}
-                      >
-                        Insert parent
-                        <kbd class="ml-auto">{SHIFT_LABEL}Tab</kbd>
-                      </button>
-                      <div class="menu-divider" />
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        disabled={siblings()[0]?.id === nodeId()}
-                        {...press(run(indentSelected))}
-                      >
-                        Move under idea above
-                        <kbd class="ml-auto">{ALT_LABEL}→</kbd>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        disabled={
-                          !details().get(nodeId())?.parent ||
-                          nodeId() === focusId()
-                        }
-                        {...press(run(outdentSelected))}
-                      >
-                        Move out to parent level
-                        <kbd class="ml-auto">{ALT_LABEL}←</kbd>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        {...press(run(() => toggleNotes(true)))}
-                      >
-                        {view().note(nodeId()).trim()
-                          ? "Open notes"
-                          : "Add notes"}
-                        <kbd class="ml-auto">{ALT_LABEL}N</kbd>
-                      </button>
-                      <Show when={placedIds(nodeId()).length}>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="menu-item"
-                          {...press(run(() => resetPlacement(nodeId())))}
-                        >
-                          Reset placement
-                        </button>
-                      </Show>
-                      <Show when={details().get(nodeId())?.descendants}>
-                        <div class="menu-divider" />
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="menu-item"
-                          {...press(() => {
-                            setContextMenu(undefined);
-                            toggleCollapse(nodeId());
-                          })}
-                        >
-                          {collapsedIds().has(nodeId())
-                            ? "Expand children"
-                            : "Collapse children"}
-                          <kbd class="ml-auto">{ALT_LABEL}G</kbd>
-                        </button>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          class="menu-item"
-                          {...press(
-                            run(() =>
-                              focusId() === nodeId()
-                                ? exitFocus()
-                                : focusBranch(),
-                            ),
-                          )}
-                        >
-                          {focusId() === nodeId()
-                            ? "Leave focus"
-                            : "Focus on this branch"}
-                          <kbd class="ml-auto">{ALT_LABEL}F</kbd>
-                        </button>
-                      </Show>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item"
-                        {...press(run(() => fitSelection(nodeId())))}
-                      >
-                        Fit selection
-                        <kbd class="ml-auto">{ALT_LABEL}2</kbd>
-                      </button>
-                      <div class="menu-divider" />
-                      <button
-                        type="button"
-                        role="menuitem"
-                        class="menu-item text-rose-700!"
-                        {...press(run(removeSelected))}
-                      >
-                        Delete
-                        <kbd class="ml-auto">{DELETE_LABEL}</kbd>
-                      </button>
-                    </>
-                  );
-                }}
-              </Show>
-            </div>
-          )}
-        </Show>
-        <Show when={!isPhone()}>
+              <MenuIcon />
+            </button>
+          }
+        >
           <section
             data-no-pan
             data-toolbar
-            aria-label="View and help"
-            class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
+            aria-label="Project"
+            class="map-toolbar pointer-events-auto flex max-w-full items-center gap-0.5 cursor-default"
           >
-            <fieldset
-              aria-label="Canvas zoom"
-              class="flex items-center gap-0.5"
-            >
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Zoom out"
-                title={`Zoom out (${MOD_LABEL}−)`}
-                disabled={zoom() <= ZOOM_MIN}
-                {...press((e) => {
-                  changeZoom(zoom() / 1.2);
-                  backToCanvas(e);
-                })}
-              >
-                <MinusIcon />
-              </button>
-              <button
-                type="button"
-                class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
-                aria-label="Zoom to 100%"
-                title={`Zoom to 100% (${MOD_LABEL}0)`}
-                {...press((e) => {
-                  changeZoom(1);
-                  backToCanvas(e);
-                })}
-              >
-                {Math.round(zoom() * 100)}%
-              </button>
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Zoom in"
-                title={`Zoom in (${MOD_LABEL}+)`}
-                disabled={zoom() >= ZOOM_MAX}
-                {...press((e) => {
-                  changeZoom(zoom() * 1.2);
-                  backToCanvas(e);
-                })}
-              >
-                <PlusIcon />
-              </button>
-              <span class="toolbar-divider" />
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Fit map"
-                title={`Fit map (${ALT_LABEL}1)`}
-                disabled={!forest().length}
-                {...press((e) => {
-                  fitMap();
-                  backToCanvas(e);
-                })}
-              >
-                <FitMapIcon />
-              </button>
-            </fieldset>
-            <span class="toolbar-divider" />
+            <BrandMark class="mx-1 size-6 shrink-0 max-sm:hidden" />
+            <ProjectNameInput />
             <button
               type="button"
               class="icon-button"
-              aria-label="Shortcuts and navigation"
-              title="Shortcuts and navigation (? with nothing selected)"
-              aria-haspopup="dialog"
-              {...press(() => setShowHelp(true))}
+              aria-label="Project menu"
+              title="Project menu"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen()}
+              {...press(toggleProjectMenu)}
             >
-              <HelpIcon />
+              <ChevronDownIcon />
             </button>
-          </section>
-        </Show>
-        <Show when={isPhone()}>
-          <Dialog
-            variant="panel"
-            open={menuOpen()}
-            onClose={() => setMenuOpen(false)}
-            title="Project menu"
-            closeLabel="Close project menu"
-            heading={<ProjectNameInput />}
-          >
-            <Show
-              when={saveDot().tone === "error"}
-              fallback={
-                <p class="panel-status">
+            <fieldset
+              aria-label="Project actions"
+              class="flex min-w-0 items-center pr-2 pl-1 text-xs text-stone-500"
+            >
+              <Show
+                when={saveDot().tone === "error"}
+                fallback={
                   <span
                     aria-hidden="true"
                     class="save-state"
                     data-tone={saveDot().tone}
+                    data-label={saveDot().label}
                   />
-                  {saveDot().label}
-                </p>
-              }
-            >
-              <button
-                type="button"
-                class="panel-status"
-                aria-haspopup="dialog"
-                {...press(fromPanel(() => setSaveErrorOpen(true)))}
+                }
               >
-                <span aria-hidden="true" class="save-state" data-tone="error" />
-                {saveDot().label}
-                <ChevronRightIcon class="ml-auto size-4" />
-              </button>
-            </Show>
-            <Show when={canUndo() || canRedo()}>
-              <div class="grid grid-cols-2 gap-2 py-2">
                 <button
                   type="button"
-                  class="panel-pair"
-                  disabled={!canUndo()}
-                  {...press(fromPanel(undo))}
-                >
-                  <UndoIcon />
-                  Undo
-                </button>
-                <button
-                  type="button"
-                  class="panel-pair"
-                  disabled={!canRedo()}
-                  {...press(fromPanel(redo))}
-                >
-                  <RedoIcon />
-                  Redo
-                </button>
-              </div>
-            </Show>
-            <button
-              type="button"
-              class="menu-item"
-              {...press(fromPanel(openSearch))}
-            >
-              <SearchIcon />
-              Search
-            </button>
-            <button
-              type="button"
-              class="menu-item"
-              {...press(fromPanel(() => setOutlineOpen(true)))}
-            >
-              <OutlineIcon />
-              Outline
-            </button>
-            <button
-              type="button"
-              class="menu-item"
-              disabled={!forest().length}
-              {...press(fromPanel(fitMap))}
-            >
-              <FitMapIcon />
-              Fit map
-            </button>
-            <div class="menu-divider" />
+                  class="save-state"
+                  data-tone="error"
+                  data-label="Couldn’t save · click for details"
+                  aria-label="Save error details"
+                  aria-haspopup="dialog"
+                  {...press(() => setSaveErrorOpen(true))}
+                />
+              </Show>
+            </fieldset>
+          </section>
+        </Show>
+        <Show when={menuOpen() && !isPhone()}>
+          <div
+            ref={(el) => {
+              projectMenu = el;
+              transientLayer(el, {
+                trigger: projectMenuButton,
+                close: () => setMenuOpen(false),
+              });
+            }}
+            data-no-pan
+            data-toolbar
+            role="menu"
+            aria-label="Project menu"
+            // A long menu scrolls itself rather than run off a short window.
+            class="map-toolbar menu-panel pointer-events-auto max-h-[calc(100dvh-5rem)] w-72 overflow-y-auto cursor-default outline-none"
+            onKeyDown={menuArrowKeys}
+          >
             <fieldset disabled={fileBusy()} class="contents">
               <button
                 type="button"
+                role="menuitem"
                 class="menu-item"
-                {...press(fromPanel(createNewProject))}
+                {...press(() => {
+                  setMenuOpen(false);
+                  createNewProject();
+                })}
               >
                 New map
               </button>
               <OpenMapItems />
               <button
                 type="button"
+                role="menuitem"
+                class="menu-item"
+                {...press(() => {
+                  setMenuOpen(false);
+                  importProjectFromFile();
+                })}
+              >
+                Import backup…
+              </button>
+              <div class="menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                {...press(() => {
+                  setMenuOpen(false);
+                  save();
+                })}
+              >
+                Save now
+                <kbd class="ml-auto">{MOD_LABEL}S</kbd>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                {...press(() => {
+                  setMenuOpen(false);
+                  exportCurrentProject();
+                })}
+              >
+                Export backup (.json)
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                {...press(() => {
+                  setMenuOpen(false);
+                  void exportMarkdown();
+                })}
+              >
+                Export outline (.md)
+              </button>
+              <div class="menu-divider" />
+              <button
+                type="button"
+                role="menuitem"
                 class="menu-item"
                 aria-haspopup="dialog"
-                {...press(fromPanel(() => setShowShare(true)))}
+                {...press(() => {
+                  setMenuOpen(false);
+                  finishWriting();
+                  finishProjectName();
+                  setShowShare(true);
+                })}
               >
                 Share link…
               </button>
               <button
                 type="button"
-                class="menu-item"
-                aria-expanded={showBackup()}
-                {...press(() => setShowBackup((open) => !open))}
-              >
-                Backup and export
-                <ChevronRightIcon
-                  class={`ml-auto size-4 transition-transform duration-100 ${showBackup() ? "rotate-90" : ""}`}
-                />
-              </button>
-              <Show when={showBackup()}>
-                <div class="mx-1 mb-1 rounded-lg bg-stone-50 p-1">
-                  <button
-                    type="button"
-                    class="menu-item"
-                    {...press(fromPanel(importProjectFromFile))}
-                  >
-                    Import backup…
-                  </button>
-                  <button
-                    type="button"
-                    class="menu-item"
-                    {...press(fromPanel(exportCurrentProject))}
-                  >
-                    Export backup (.json)
-                  </button>
-                  <button
-                    type="button"
-                    class="menu-item"
-                    {...press(fromPanel(() => void exportMarkdown()))}
-                  >
-                    Export outline (.md)
-                  </button>
-                </div>
-              </Show>
-              <button
-                type="button"
+                role="menuitem"
                 class="menu-item"
                 aria-haspopup="dialog"
-                {...press(
-                  fromPanel(() => {
-                    returnToShare = false;
-                    setShowPreferences(true);
-                  }),
-                )}
+                {...press(() => {
+                  setMenuOpen(false);
+                  finishWriting();
+                  finishProjectName();
+                  returnToShare = false;
+                  setShowPreferences(true);
+                })}
               >
                 Project preferences…
               </button>
+              <Show when={analyticsEnabled}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  {...press(() => {
+                    setMenuOpen(false);
+                    reviewConsent();
+                  })}
+                >
+                  Analytics choice…
+                </button>
+              </Show>
+            </fieldset>
+          </div>
+        </Show>
+        <Show when={storageMessage() || !storageReady() || memoryOnly()}>
+          <div
+            data-no-pan
+            data-toolbar
+            class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
+          >
+            <Show when={memoryOnly()}>
+              <p role="status" class="text-amber-800">
+                In memory only · Export before closing this tab.
+              </p>
+            </Show>
+            <div class="flex items-start gap-2 has-[p:empty]:hidden">
+              <p
+                role="status"
+                data-storage-message
+                class="min-w-0 flex-1 self-center"
+              >
+                {storageMessage()}
+              </p>
+              {/* While local saving is unavailable the message explains the
+                  retry button below, so it stays. */}
+              <Show when={storageMessage() && storageReady()}>
+                <button
+                  type="button"
+                  class="icon-button size-8!"
+                  aria-label="Dismiss"
+                  title="Dismiss"
+                  {...press(() => {
+                    setStorageMessage("");
+                    canvas.focus({ preventScroll: true });
+                  })}
+                >
+                  <CloseIcon class="size-4" />
+                </button>
+              </Show>
+            </div>
+            <Show when={!storageReady()}>
+              <div class="flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  class="map-control outlined"
+                  {...press(retryLocal)}
+                >
+                  Retry local saving
+                </button>
+              </div>
+            </Show>
+          </div>
+        </Show>
+      </div>
+      <div class="pointer-events-none absolute top-3 right-3 z-30 flex flex-col items-end gap-2 sm:z-40">
+        <Show when={!isPhone()}>
+          <div class="flex items-start gap-2">
+            <nav
+              data-no-pan
+              data-toolbar
+              aria-label="Editing"
+              class="map-toolbar pointer-events-auto flex items-center gap-0.5 cursor-default"
+            >
+              {/* Undo and redo appear with the first edit. They sit at the far end
+                so the buttons already on screen stay where they are. */}
+              <Show when={canUndo() || canRedo()}>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Undo"
+                  title={`Undo (${MOD_LABEL}Z)`}
+                  disabled={!canUndo()}
+                  {...press(undo)}
+                >
+                  <UndoIcon />
+                </button>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label="Redo"
+                  title={`Redo (${MOD_LABEL}${SHIFT_LABEL}Z)`}
+                  disabled={!canRedo()}
+                  {...press(redo)}
+                >
+                  <RedoIcon />
+                </button>
+                <span class="toolbar-divider" />
+              </Show>
               <button
                 type="button"
-                class="menu-item"
-                aria-haspopup="dialog"
-                {...press(fromPanel(() => setShowHelp(true)))}
+                class="icon-button"
+                aria-label="Search"
+                title={`Search (${MOD_LABEL}F)`}
+                aria-expanded={searchOpen()}
+                {...press(() =>
+                  searchOpen() ? closeSearch(false) : openSearch(),
+                )}
               >
-                Help
+                <SearchIcon />
               </button>
-            </fieldset>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Outline"
+                title={`${outlineOpen() ? "Close outline" : "Outline"} (${ALT_LABEL}O)`}
+                aria-expanded={outlineOpen()}
+                {...press((e) => {
+                  setOutlineOpen((open) => !open);
+                  backToCanvas(e);
+                })}
+              >
+                <OutlineIcon open={outlineOpen()} />
+              </button>
+            </nav>
             <AccountControls
-              inline
               state={account()}
               beforeNavigate={saveBeforeAuth}
               onRetry={() => void auth.check()}
-              onAuthError={() => setMenuOpen(true)}
-              shownElsewhere={saveDot().label}
+              signInRef={(start) => {
+                signIn = start;
+              }}
             />
-          </Dialog>
+          </div>
         </Show>
-        <SaveErrorDialog
-          open={saveErrorOpen()}
-          onClose={() => {
-            setSaveErrorOpen(false);
-            canvas.focus({ preventScroll: true });
-          }}
-          problems={saveProblems()}
-          safeInBrowser={
-            view().saving().local &&
-            storageReady() &&
-            !localSave.message() &&
-            !recoveryPending()
-          }
-          retryingAlone={
-            !!localSave.message() || cloudStatus()?.status === "retrying"
-          }
-          onRetryLocal={
-            localSave.message() || recoveryPending() ? retryLocal : undefined
-          }
-          onRetryCloud={cloudProblem() ? retryCloud : undefined}
-        />
-        <ShortcutsDialog
-          open={showHelp()}
-          onClose={() => {
-            setShowHelp(false);
-            canvas.focus({ preventScroll: true });
-          }}
-          wheelMode={wheelMode()}
-          onWheelMode={setWheelMode}
-        />
-      </section>
-      {/* The outline docks beside the map: the map narrows, so it pans
-          left with its centre. Open notes join it underneath. On phones it
-          covers the map. */}
-      <Show when={outlineDrawer.mounted()}>
-        <div ref={outlineDrawer.ref} class="outline-dock">
-          <Outline
-            roots={scopeForest()}
-            text={(id) => view().text(id)}
-            selectedId={selectedId()}
-            collapsed={collapsedIds()}
-            onSelect={(id, via) => {
-              finishWriting();
-              setColorScope("node");
-              setSelectedId(id);
-              // On narrow screens the outline covers the map, so picking an idea
-              // by tap returns to the map; arrow keys keep browsing the outline.
-              if (via === "pointer" && isPhone()) setOutlineOpen(false);
+        <Show when={searchOpen()}>
+          <search
+            data-no-pan
+            data-toolbar
+            aria-label="Search ideas"
+            // The field fills the island, so the island carries its focus ring.
+            class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
+            // Beside the side panel, not over its header: previews select
+            // ideas, and the outline and notes follow.
+            classList={{
+              "mr-[25rem] max-w-[calc(100vw-26.5rem)]! xl:mr-[29rem]":
+                sideOpen() && !isPhone(),
             }}
-            onToggle={(id) => toggleCollapse(id, false)}
-            onEdit={write}
+            ref={(el) => closeOnEscape(el, () => closeSearch(false))}
+          >
+            <div class="flex items-center gap-2 px-2">
+              <SearchIcon class="size-4 shrink-0 text-stone-400" />
+              <input
+                ref={searchInput}
+                type="search"
+                aria-label="Search ideas"
+                aria-controls="search-results"
+                aria-activedescendant={
+                  searchResults()[searchIndex()]
+                    ? `search-result-${searchIndex()}`
+                    : undefined
+                }
+                placeholder={
+                  focusId() ? "Search this branch" : "Search this map"
+                }
+                class="search-field min-w-0 flex-1 bg-transparent py-2 text-sm outline-none placeholder:text-stone-500"
+                value={searchQuery()}
+                onInput={(e) => {
+                  batch(() => {
+                    setSearchQuery(e.currentTarget.value);
+                    setSearchIndex(0);
+                  });
+                }}
+                onKeyDown={(e) => {
+                  const count = searchResults().length;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    closeSearch(count > 0);
+                  } else if (
+                    count &&
+                    (e.key === "ArrowDown" || e.key === "ArrowUp")
+                  ) {
+                    e.preventDefault();
+                    setSearchIndex(
+                      (index) =>
+                        (index + (e.key === "ArrowDown" ? 1 : -1) + count) %
+                        count,
+                    );
+                  }
+                }}
+              />
+              <button
+                type="button"
+                class="icon-button -mr-1"
+                aria-label="Close search"
+                title="Close search (Esc)"
+                {...press(() => closeSearch(false))}
+              >
+                <CloseIcon class="size-4" />
+              </button>
+            </div>
+            <Show when={searchQuery().trim()}>
+              <div
+                id="search-results"
+                role="listbox"
+                aria-label="Search results"
+                class="max-h-80 overflow-y-auto border-t border-stone-100 p-1"
+              >
+                <For
+                  each={searchResults()}
+                  fallback={
+                    <p class="px-2 py-3 text-center text-xs text-stone-500">
+                      No ideas match “{truncate(searchQuery().trim(), 24)}”
+                    </p>
+                  }
+                >
+                  {(result, index) => (
+                    <div
+                      id={`search-result-${index()}`}
+                      role="option"
+                      tabIndex={-1}
+                      aria-selected={index() === searchIndex()}
+                      class="search-result"
+                      onPointerEnter={() => setSearchIndex(index())}
+                      {...press(() => {
+                        setSearchIndex(index());
+                        closeSearch(true);
+                      })}
+                    >
+                      <span class="block truncate text-sm text-stone-800">
+                        {result.text.slice(0, result.match[0])}
+                        <mark>
+                          {result.text.slice(result.match[0], result.match[1])}
+                        </mark>
+                        {result.text.slice(result.match[1])}
+                      </span>
+                      <Show when={result.path.length}>
+                        <span class="block truncate text-xs text-stone-500">
+                          {/* The nearest parents matter most; earlier ones collapse. */}
+                          {[
+                            ...(result.path.length > 3 ? ["…"] : []),
+                            ...result.path
+                              .slice(-3)
+                              .map((part) => truncate(part, 20)),
+                          ].join(" › ")}
+                        </span>
+                      </Show>
+                    </div>
+                  )}
+                </For>
+              </div>
+              <p class="border-t border-stone-100 px-3 py-1.5 text-[11px] text-stone-500">
+                {/* One line: when both don't fit, the hint wraps out of view. */}
+                <span class="flex h-[1lh] flex-wrap justify-between gap-x-2 overflow-hidden">
+                  <span class="whitespace-nowrap">
+                    {searchResults().length}
+                    {searchHits().length > SEARCH_LIMIT ? "+" : ""}{" "}
+                    {searchResults().length === 1 ? "match" : "matches"} in{" "}
+                    {focusId() ? "this branch" : "this map"}
+                  </span>
+                  <span class="keyboard-hint whitespace-nowrap">
+                    ↑↓ preview · Enter go · Esc back
+                  </span>
+                </span>
+              </p>
+            </Show>
+          </search>
+        </Show>
+      </div>
+      {/* The side panel: a drawer over the map's right edge, under the
+            toolbar that opens it. On phones it covers the map. */}
+      <Show when={sidePanel.mounted()}>
+        <div
+          ref={sidePanel.ref}
+          class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+        >
+          <SidePanel
+            tab={sideTab() ?? "outline"}
+            onTab={(tab) => {
+              finishWriting();
+              setSideTab(tab);
+            }}
             onClose={() => {
-              setOutlineOpen(false);
+              setSideTab(undefined);
               canvas.focus({ preventScroll: true });
             }}
+            closeTitle={(tab) =>
+              tab === "outline"
+                ? `Close outline (${ALT_LABEL}O)`
+                : // Esc, not the Alt shortcut: the notes field keeps that
+                  // key for typing.
+                  "Close notes (Esc)"
+            }
+            outline={
+              <Outline
+                roots={scopeForest()}
+                text={(id) => view().text(id)}
+                selectedId={selectedId()}
+                collapsed={collapsedIds()}
+                onSelect={(id, via) => {
+                  finishWriting();
+                  setColorScope("node");
+                  setSelectedId(id);
+                  // On narrow screens the outline covers the map, so picking an idea
+                  // by tap returns to the map; arrow keys keep browsing the outline.
+                  if (via === "pointer" && canvasSize().width < 640)
+                    setOutlineOpen(false);
+                }}
+                onToggle={(id) => toggleCollapse(id, false)}
+                onEdit={write}
+              />
+            }
+            notes={
+              <NotesPanel
+                doc={session().doc}
+                id={selectedId()}
+                title={nodeLabel(selectedId() ?? "")}
+                onFocusChange={() => session().undo.finishGroup()}
+                onShowOnMap={() => {
+                  const id = selectedId();
+                  if (id) showOnMap(id);
+                }}
+              />
+            }
           />
-          {/* The selected idea's notes, under its row in the tree. */}
-          <Show when={notesOpen()}>
-            <NotesPanel
-              doc={session().doc}
-              id={selectedId()}
-              title={nodeLabel(selectedId() ?? "")}
-              onFocusChange={() => session().undo.finishGroup()}
-              onClose={() => toggleNotes(false)}
-            />
-          </Show>
         </div>
       </Show>
-    </div>
+      <AnalyticsConsent />
+      {/* One column, so these stack instead of covering each other. */}
+      <div
+        class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
+        style={stripStyle(panelStrip())}
+      >
+        <Show when={focusId()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Branch focus"
+            // Clipped, so nothing can spill over the panels beside it. The
+            // minimum keeps the way out in reach.
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 overflow-hidden text-sm cursor-default"
+          >
+            <button
+              type="button"
+              class="map-control flex h-9 shrink-0 items-center gap-1.5"
+              title="Show the whole map (Esc with nothing selected)"
+              {...press(exitFocus)}
+            >
+              <ArrowLeftIcon class="size-4" />
+              <span classList={{ "sr-only": crumbRoom() < 240 }}>
+                Whole map
+              </span>
+            </button>
+            <For each={crumbs()}>
+              {(id, index) => (
+                <>
+                  <ChevronRightIcon class="size-3.5 shrink-0 text-stone-400" />
+                  <Show
+                    when={index() < crumbs().length - 1}
+                    fallback={
+                      <span
+                        aria-current="location"
+                        class="max-w-48 truncate px-2 font-medium text-stone-800"
+                      >
+                        {nodeLabel(id)}
+                      </span>
+                    }
+                  >
+                    {/* The steps above give way first, so where you are stays
+                        readable. */}
+                    <button
+                      type="button"
+                      class="map-control h-9 max-w-36 shrink-3 truncate"
+                      {...press(() => focusBranch(id))}
+                    >
+                      {nodeLabel(id)}
+                    </button>
+                  </Show>
+                </>
+              )}
+            </For>
+          </nav>
+        </Show>
+        <Show when={returnView()}>
+          <nav
+            data-no-pan
+            data-toolbar
+            aria-label="Return from search"
+            class="map-toolbar pointer-events-auto flex max-w-full min-w-36 items-center gap-0.5 text-sm cursor-default"
+          >
+            <button
+              type="button"
+              class="map-control flex h-9 min-w-0 items-center gap-1.5"
+              title="Restore the view and folds from before the search"
+              {...press(() => {
+                const back = returnView();
+                setReturnView(undefined);
+                if (back) restoreView(back);
+                canvas.focus({ preventScroll: true });
+              })}
+            >
+              <ArrowLeftIcon class="size-4 shrink-0" />
+              <span class="truncate">Back to where you were</span>
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Stay here"
+              title="Stay here"
+              {...press(() => setReturnView(undefined))}
+            >
+              <CloseIcon class="size-4" />
+            </button>
+          </nav>
+        </Show>
+      </div>
+      {/* The notice keeps its place above the selection toolbar's slot, so the
+          toolbar reappearing (when an edit ends on press) never moves it from
+          under the pointer. */}
+      <div
+        class="pointer-events-none absolute bottom-[4.25rem] z-30 flex justify-center"
+        style={stripStyle(noticeStrip())}
+      >
+        <Show when={notice()}>
+          {(current) => (
+            <div
+              role="status"
+              data-no-pan
+              data-toolbar
+              class="notice pointer-events-auto flex min-w-0 items-center gap-3 cursor-default"
+            >
+              <span class="min-w-0 truncate">{current().message}</span>
+              <Show when={current().action}>
+                {(action) => (
+                  <button
+                    type="button"
+                    class="notice-action"
+                    {...press(() => {
+                      setNotice(undefined);
+                      const undoing = action().run === undo;
+                      action().run();
+                      if (undoing)
+                        showNotice({
+                          message: "Undone",
+                          action: { label: "Redo", run: redo },
+                        });
+                    })}
+                  >
+                    {action().label}
+                  </button>
+                )}
+              </Show>
+            </div>
+          )}
+        </Show>
+      </div>
+      {/* Level with the notice and after it, so the color popover, which opens
+          into the notice's slot, paints over it. */}
+      <div
+        class="pointer-events-none absolute bottom-3 z-30 flex flex-col items-center gap-2"
+        style={stripStyle(bottomStrip())}
+      >
+        <Show when={selectedId() && !writing() && !drag()}>
+          <section
+            data-no-pan
+            data-toolbar
+            aria-label="Selected idea"
+            class="map-toolbar pointer-events-auto relative flex items-center gap-0.5 cursor-default"
+          >
+            <Show when={colorOpen()}>
+              <section
+                aria-label="Selected node color controls"
+                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2 outline-none"
+                // Opaque: it opens over the notice and the analytics banner,
+                // and inside the toolbar its own blur cannot hide them.
+                style={{ background: "var(--surface)" }}
+                ref={(el) =>
+                  transientLayer(el, {
+                    trigger: () =>
+                      document.querySelector<HTMLButtonElement>(
+                        'button[aria-label="Color"]',
+                      ),
+                    close: () => setColorOpen(false),
+                  })
+                }
+              >
+                <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
+                  <legend class="sr-only">Apply color to</legend>
+                  <label
+                    class="color-scope"
+                    classList={{
+                      "color-scope-selected": colorScope() === "node",
+                    }}
+                  >
+                    <input
+                      class="sr-only"
+                      type="radio"
+                      name="node-color-scope"
+                      value="node"
+                      checked={colorScope() === "node"}
+                      onChange={() => setColorScope("node")}
+                    />
+                    <span>This idea</span>
+                  </label>
+                  <label
+                    class="color-scope"
+                    classList={{
+                      "color-scope-selected": colorScope() === "branch",
+                    }}
+                  >
+                    <input
+                      class="sr-only"
+                      type="radio"
+                      name="node-color-scope"
+                      value="branch"
+                      checked={colorScope() === "branch"}
+                      onChange={() => setColorScope("branch")}
+                    />
+                    <span>This branch</span>
+                  </label>
+                </fieldset>
+                <fieldset class="grid grid-cols-4 gap-1 px-1">
+                  <legend class="sr-only">
+                    Choose a color for{" "}
+                    {colorScope() === "node" ? "this idea" : "this branch"}
+                  </legend>
+                  <For each={NODE_COLORS}>
+                    {(color) => (
+                      <button
+                        type="button"
+                        class="color-choice"
+                        aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
+                        aria-pressed={
+                          (selectedNode()?.color ?? "blue") === color.value
+                        }
+                        title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
+                        {...press(() => colorSelectedNode(color.value))}
+                      >
+                        <span
+                          aria-hidden="true"
+                          class={`grid size-7 place-items-center rounded-full border-2 ${color.swatchClass}`}
+                        >
+                          <Show
+                            when={
+                              (selectedNode()?.color ?? "blue") === color.value
+                            }
+                          >
+                            <svg
+                              viewBox="0 0 20 20"
+                              fill="none"
+                              class="size-4 text-slate-950"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="m4 10 4 4 8-8"
+                                stroke="currentColor"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                stroke-width="2.5"
+                              />
+                            </svg>
+                          </Show>
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </fieldset>
+                <p class="px-2 pb-1 text-xs text-stone-500">
+                  {colorScope() === "node"
+                    ? "Changes only the selected idea."
+                    : "Changes this idea and everything under it."}
+                </p>
+              </section>
+            </Show>
+            <button
+              type="button"
+              class="tool-button"
+              title="Add a child idea (Tab)"
+              {...press(() => add("child"))}
+            >
+              <ChildIcon />
+              <span class="max-sm:sr-only">Child</span>
+            </button>
+            <button
+              type="button"
+              class="tool-button"
+              // Enter on a central idea adds a child instead.
+              title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
+              disabled={selectedId() === focusId()}
+              {...press(() => add("sibling"))}
+            >
+              <SiblingIcon />
+              <span class="max-sm:sr-only">Sibling</span>
+            </button>
+            <span class="toolbar-divider" />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Color"
+              title="Color"
+              aria-expanded={colorOpen()}
+              {...press((e) => {
+                setColorOpen((open) => !open);
+                if (!colorOpen()) backToCanvas(e);
+              })}
+            >
+              <span
+                aria-hidden="true"
+                class={`size-4.5 rounded-full border-2 ${(NODE_COLORS.find((color) => color.value === (selectedNode()?.color ?? "blue")) ?? NODE_COLORS[0]).swatchClass}`}
+              />
+            </button>
+            <button
+              type="button"
+              class="icon-button relative"
+              aria-label="Notes"
+              title={`Notes (${ALT_LABEL}N)`}
+              aria-expanded={notesOpen()}
+              {...press(() => toggleNotes())}
+            >
+              <NoteIcon />
+              <Show
+                when={view()
+                  .note(selectedId() ?? "")
+                  .trim()}
+              >
+                <span
+                  aria-hidden="true"
+                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-accent"
+                />
+              </Show>
+            </button>
+            <Show when={details().get(selectedId() ?? "")?.descendants}>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label={
+                  collapsedIds().has(selectedId() ?? "")
+                    ? "Expand children"
+                    : "Collapse children"
+                }
+                title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
+                {...press(() => toggleCollapse(selectedId() as string))}
+              >
+                <Show
+                  when={collapsedIds().has(selectedId() ?? "")}
+                  fallback={<FoldIcon />}
+                >
+                  <UnfoldIcon />
+                </Show>
+              </button>
+              <button
+                type="button"
+                class="icon-button narrow-hide"
+                aria-label={
+                  focusId() === selectedId()
+                    ? "Leave focus"
+                    : "Focus on this branch"
+                }
+                title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
+                aria-pressed={focusId() === selectedId()}
+                {...press(() =>
+                  focusId() === selectedId() ? exitFocus() : focusBranch(),
+                )}
+              >
+                <FocusIcon />
+              </button>
+            </Show>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="More actions"
+              title="More actions"
+              aria-haspopup="menu"
+              aria-expanded={!!contextMenu()?.above}
+              {...press((e) => {
+                if (contextMenu()?.above) {
+                  setContextMenu(undefined);
+                  backToCanvas(e);
+                  return;
+                }
+                const bounds = e.currentTarget.getBoundingClientRect();
+                const id = selectedId();
+                setContextMenu({
+                  x: Math.max(
+                    8,
+                    Math.min(bounds.left, window.innerWidth - 232),
+                  ),
+                  y: bounds.top - 8,
+                  nodeId: id,
+                  above: true,
+                });
+              })}
+            >
+              <MoreIcon />
+            </button>
+          </section>
+        </Show>
+      </div>
+      <div
+        class="map-layer absolute w-full h-full origin-top-left"
+        classList={{ "map-layer-easing": easingView() }}
+        data-dropping={dropTarget() ? "" : undefined}
+        style={{
+          left: "50%",
+          top: "50%",
+          transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
+        }}
+      >
+        <svg
+          class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
+          aria-hidden="true"
+        >
+          {/* Keyed by child id so a layout change updates path data in place
+              instead of recreating every connection. */}
+          <For each={nodeIds()}>
+            {(id) => (
+              <Show when={connections().get(id)}>
+                {(connection) => (
+                  <path
+                    d={connectionPath(connection())}
+                    fill="none"
+                    class={
+                      (
+                        NODE_COLORS.find(
+                          (option) => option.value === connection().to.color,
+                        ) ?? NODE_COLORS[0]
+                      ).lineClass
+                    }
+                  />
+                )}
+              </Show>
+            )}
+          </For>
+        </svg>
+        <For each={nodeIds()}>
+          {(id) => {
+            const node = () => positionedNodes().get(id)!;
+            return (
+              <Node
+                doc={session().doc}
+                id={id}
+                text={view().text(id)}
+                color={node().color}
+                x={node().x}
+                y={node().y}
+                selected={selectedId() === id}
+                writing={selectedId() === id && writing()}
+                dragging={draggingId() === id}
+                root={!details().get(id)?.parent || focusId() === id}
+                note={!!view().note(id).trim()}
+                descendants={details().get(id)?.descendants ?? 0}
+                collapsed={collapsedIds().has(id)}
+                onToggleCollapse={() => {
+                  select(id);
+                  toggleCollapse(id);
+                }}
+                onSize={(size) => measureNode(id, size)}
+                onSelect={() => select(id)}
+                onWrite={() => write(id)}
+                onFinish={() => {
+                  if (selectedId() === id) finishWriting();
+                }}
+                onTab={(shift) => (shift ? insertParent() : add("child"))}
+                onSelectionChange={recordEditorSelection}
+                onPointerDown={(e) => startPointer(e, id)}
+              />
+            );
+          }}
+        </For>
+        <Show when={dropTarget()}>
+          {(target) => (
+            <Show when={positionedNodes().get(target().id)}>
+              {(rect) => (
+                <div
+                  aria-hidden="true"
+                  class="drop-indicator"
+                  data-kind={target().kind}
+                  style={{
+                    transform: `translate(${rect().x}px, ${
+                      target().kind === "before"
+                        ? rect().y - 8
+                        : target().kind === "after"
+                          ? rect().y + rect().height + 5
+                          : rect().y
+                    }px)`,
+                    width: `${rect().width}px`,
+                    height:
+                      target().kind === "inside"
+                        ? `${rect().height}px`
+                        : undefined,
+                  }}
+                />
+              )}
+            </Show>
+          )}
+        </Show>
+      </div>
+      <Show when={drag() && dragPointer()}>
+        <div
+          aria-hidden="true"
+          class="drag-label"
+          style={{
+            left: `${(dragPointer()?.x ?? 0) + 14}px`,
+            top: `${(dragPointer()?.y ?? 0) - 40}px`,
+          }}
+        >
+          {dragLabel()}
+        </div>
+      </Show>
+      <Show when={!forest().length}>
+        <div
+          data-no-pan
+          data-toolbar
+          class="absolute top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 text-center cursor-default"
+        >
+          <p class="font-display text-2xl font-semibold text-stone-900">
+            Your canvas is empty
+          </p>
+          <p class="max-w-64 text-sm text-stone-500">
+            Start with the central idea. Press <kbd>Enter</kbd> anytime to add
+            one.
+          </p>
+          <button
+            type="button"
+            class="primary-button"
+            {...press(() => add("root"))}
+          >
+            Create an idea
+          </button>
+        </div>
+      </Show>
+      <Show when={contextMenu()}>
+        {(menu) => (
+          <div
+            ref={(el) => {
+              contextMenuElement = el;
+              const moreActions = () =>
+                document.querySelector<HTMLButtonElement>(
+                  'button[aria-label="More actions"]',
+                );
+              transientLayer(el, {
+                trigger: moreActions,
+                close: () => setContextMenu(undefined),
+                // A right-click menu has no trigger; it came from the map.
+                returnFocus: () =>
+                  (contextMenu()?.above && moreActions()) || canvas,
+              });
+            }}
+            data-no-pan
+            data-toolbar
+            data-context-menu
+            role="menu"
+            aria-label={menu().nodeId ? "Idea actions" : "Canvas actions"}
+            class="map-toolbar menu-panel fixed z-50 w-60 text-sm cursor-default outline-none"
+            style={{
+              left: `${menu().x}px`,
+              top: `${menu().y}px`,
+              transform: menu().above ? "translateY(-100%)" : undefined,
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            onKeyDown={menuArrowKeys}
+          >
+            <Show
+              when={menu().nodeId}
+              fallback={
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  {...press(() => {
+                    const position = menu().rootPosition;
+                    setContextMenu(undefined);
+                    add("root", position);
+                  })}
+                >
+                  New central idea
+                </button>
+              }
+            >
+              {(nodeId) => {
+                const run = (action: () => void) => () => {
+                  setContextMenu(undefined);
+                  setSelectedId(nodeId());
+                  action();
+                };
+                const siblings = () =>
+                  childrenOf(details().get(nodeId())?.parent);
+                return (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      {...press(run(() => add("child")))}
+                    >
+                      Add child idea
+                      <kbd class="ml-auto">Tab</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={nodeId() === focusId()}
+                      {...press(run(() => add("sibling")))}
+                    >
+                      Add sibling idea
+                      {/* Enter on a central idea adds a child instead. */}
+                      <Show when={details().get(nodeId())?.parent}>
+                        <kbd class="ml-auto">Enter</kbd>
+                      </Show>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={nodeId() === focusId()}
+                      {...press(run(insertParent))}
+                    >
+                      Insert parent
+                      <kbd class="ml-auto">{SHIFT_LABEL}Tab</kbd>
+                    </button>
+                    <div class="menu-divider" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={siblings()[0]?.id === nodeId()}
+                      {...press(run(indentSelected))}
+                    >
+                      Move under idea above
+                      <kbd class="ml-auto">{ALT_LABEL}→</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      disabled={
+                        !details().get(nodeId())?.parent ||
+                        nodeId() === focusId()
+                      }
+                      {...press(run(outdentSelected))}
+                    >
+                      Move out to parent level
+                      <kbd class="ml-auto">{ALT_LABEL}←</kbd>
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      {...press(run(() => toggleNotes(true)))}
+                    >
+                      {view().note(nodeId()).trim()
+                        ? "Open notes"
+                        : "Add notes"}
+                      <kbd class="ml-auto">{ALT_LABEL}N</kbd>
+                    </button>
+                    <Show when={placedIds(nodeId()).length}>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        {...press(run(() => resetPlacement(nodeId())))}
+                      >
+                        Reset placement
+                      </button>
+                    </Show>
+                    <Show when={details().get(nodeId())?.descendants}>
+                      <div class="menu-divider" />
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        {...press(() => {
+                          setContextMenu(undefined);
+                          toggleCollapse(nodeId());
+                        })}
+                      >
+                        {collapsedIds().has(nodeId())
+                          ? "Expand children"
+                          : "Collapse children"}
+                        <kbd class="ml-auto">{ALT_LABEL}G</kbd>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class="menu-item"
+                        {...press(
+                          run(() =>
+                            focusId() === nodeId()
+                              ? exitFocus()
+                              : focusBranch(),
+                          ),
+                        )}
+                      >
+                        {focusId() === nodeId()
+                          ? "Leave focus"
+                          : "Focus on this branch"}
+                        <kbd class="ml-auto">{ALT_LABEL}F</kbd>
+                      </button>
+                    </Show>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item"
+                      {...press(run(() => fitSelection(nodeId())))}
+                    >
+                      Fit selection
+                      <kbd class="ml-auto">{ALT_LABEL}2</kbd>
+                    </button>
+                    <div class="menu-divider" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item text-rose-700!"
+                      {...press(run(removeSelected))}
+                    >
+                      Delete
+                      <kbd class="ml-auto">{DELETE_LABEL}</kbd>
+                    </button>
+                  </>
+                );
+              }}
+            </Show>
+          </div>
+        )}
+      </Show>
+      <Show when={!isPhone()}>
+        <section
+          data-no-pan
+          data-toolbar
+          aria-label="View and help"
+          class="map-toolbar pointer-events-auto absolute right-3 bottom-3 z-20 flex items-center gap-0.5 text-sm cursor-default"
+        >
+          <fieldset aria-label="Canvas zoom" class="flex items-center gap-0.5">
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Zoom out"
+              title={`Zoom out (${MOD_LABEL}−)`}
+              disabled={zoom() <= ZOOM_MIN}
+              {...press((e) => {
+                changeZoom(zoom() / 1.2);
+                backToCanvas(e);
+              })}
+            >
+              <MinusIcon />
+            </button>
+            <button
+              type="button"
+              class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
+              aria-label="Zoom to 100%"
+              title={`Zoom to 100% (${MOD_LABEL}0)`}
+              {...press((e) => {
+                changeZoom(1);
+                backToCanvas(e);
+              })}
+            >
+              {Math.round(zoom() * 100)}%
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Zoom in"
+              title={`Zoom in (${MOD_LABEL}+)`}
+              disabled={zoom() >= ZOOM_MAX}
+              {...press((e) => {
+                changeZoom(zoom() * 1.2);
+                backToCanvas(e);
+              })}
+            >
+              <PlusIcon />
+            </button>
+            <span class="toolbar-divider" />
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Fit map"
+              title={`Fit map (${ALT_LABEL}1)`}
+              disabled={!forest().length}
+              {...press((e) => {
+                fitMap();
+                backToCanvas(e);
+              })}
+            >
+              <FitMapIcon />
+            </button>
+          </fieldset>
+          <span class="toolbar-divider" />
+          <button
+            type="button"
+            class="icon-button"
+            aria-label="Shortcuts and navigation"
+            title="Shortcuts and navigation (? with nothing selected)"
+            aria-haspopup="dialog"
+            {...press(() => setShowHelp(true))}
+          >
+            <HelpIcon />
+          </button>
+        </section>
+      </Show>
+      <Show when={isPhone()}>
+        <Dialog
+          variant="panel"
+          open={menuOpen()}
+          onClose={() => setMenuOpen(false)}
+          title="Project menu"
+          closeLabel="Close project menu"
+          heading={<ProjectNameInput />}
+        >
+          <Show
+            when={saveDot().tone === "error"}
+            fallback={
+              <p class="panel-status">
+                <span
+                  aria-hidden="true"
+                  class="save-state"
+                  data-tone={saveDot().tone}
+                />
+                {saveDot().label}
+              </p>
+            }
+          >
+            <button
+              type="button"
+              class="panel-status"
+              aria-haspopup="dialog"
+              {...press(fromPanel(() => setSaveErrorOpen(true)))}
+            >
+              <span aria-hidden="true" class="save-state" data-tone="error" />
+              {saveDot().label}
+              <ChevronRightIcon class="ml-auto size-4" />
+            </button>
+          </Show>
+          <Show when={canUndo() || canRedo()}>
+            <div class="grid grid-cols-2 gap-2 py-2">
+              <button
+                type="button"
+                class="panel-pair"
+                disabled={!canUndo()}
+                {...press(fromPanel(undo))}
+              >
+                <UndoIcon />
+                Undo
+              </button>
+              <button
+                type="button"
+                class="panel-pair"
+                disabled={!canRedo()}
+                {...press(fromPanel(redo))}
+              >
+                <RedoIcon />
+                Redo
+              </button>
+            </div>
+          </Show>
+          <button
+            type="button"
+            class="menu-item"
+            {...press(fromPanel(openSearch))}
+          >
+            <SearchIcon />
+            Search
+          </button>
+          <button
+            type="button"
+            class="menu-item"
+            {...press(fromPanel(() => setOutlineOpen(true)))}
+          >
+            <OutlineIcon />
+            Outline
+          </button>
+          <button
+            type="button"
+            class="menu-item"
+            disabled={!forest().length}
+            {...press(fromPanel(fitMap))}
+          >
+            <FitMapIcon />
+            Fit map
+          </button>
+          <div class="menu-divider" />
+          <fieldset disabled={fileBusy()} class="contents">
+            <button
+              type="button"
+              class="menu-item"
+              {...press(fromPanel(createNewProject))}
+            >
+              New map
+            </button>
+            <OpenMapItems />
+            <button
+              type="button"
+              class="menu-item"
+              aria-haspopup="dialog"
+              {...press(fromPanel(() => setShowShare(true)))}
+            >
+              Share link…
+            </button>
+            <button
+              type="button"
+              class="menu-item"
+              aria-expanded={showBackup()}
+              {...press(() => setShowBackup((open) => !open))}
+            >
+              Backup and export
+              <ChevronRightIcon
+                class={`ml-auto size-4 transition-transform duration-100 ${showBackup() ? "rotate-90" : ""}`}
+              />
+            </button>
+            <Show when={showBackup()}>
+              <div class="mx-1 mb-1 rounded-lg bg-stone-50 p-1">
+                <button
+                  type="button"
+                  class="menu-item"
+                  {...press(fromPanel(importProjectFromFile))}
+                >
+                  Import backup…
+                </button>
+                <button
+                  type="button"
+                  class="menu-item"
+                  {...press(fromPanel(exportCurrentProject))}
+                >
+                  Export backup (.json)
+                </button>
+                <button
+                  type="button"
+                  class="menu-item"
+                  {...press(fromPanel(() => void exportMarkdown()))}
+                >
+                  Export outline (.md)
+                </button>
+              </div>
+            </Show>
+            <button
+              type="button"
+              class="menu-item"
+              aria-haspopup="dialog"
+              {...press(
+                fromPanel(() => {
+                  returnToShare = false;
+                  setShowPreferences(true);
+                }),
+              )}
+            >
+              Project preferences…
+            </button>
+            <button
+              type="button"
+              class="menu-item"
+              aria-haspopup="dialog"
+              {...press(fromPanel(() => setShowHelp(true)))}
+            >
+              Help
+            </button>
+          </fieldset>
+          <AccountControls
+            inline
+            state={account()}
+            beforeNavigate={saveBeforeAuth}
+            onRetry={() => void auth.check()}
+            onAuthError={() => setMenuOpen(true)}
+            shownElsewhere={saveDot().label}
+          />
+        </Dialog>
+      </Show>
+      <SaveErrorDialog
+        open={saveErrorOpen()}
+        onClose={() => {
+          setSaveErrorOpen(false);
+          canvas.focus({ preventScroll: true });
+        }}
+        problems={saveProblems()}
+        safeInBrowser={
+          view().saving().local &&
+          storageReady() &&
+          !localSave.message() &&
+          !recoveryPending()
+        }
+        retryingAlone={
+          !!localSave.message() || cloudStatus()?.status === "retrying"
+        }
+        onRetryLocal={
+          localSave.message() || recoveryPending() ? retryLocal : undefined
+        }
+        onRetryCloud={cloudProblem() ? retryCloud : undefined}
+      />
+      <ShortcutsDialog
+        open={showHelp()}
+        onClose={() => {
+          setShowHelp(false);
+          canvas.focus({ preventScroll: true });
+        }}
+        wheelMode={wheelMode()}
+        onWheelMode={setWheelMode}
+      />
+    </section>
   );
 }

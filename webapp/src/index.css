@@ -880,102 +880,68 @@ kbd {
 }
 
 /* Side panels. */
-.outline-panel,
-.notes-panel {
+.side-panel {
   height: 100%;
   min-height: 0;
   padding: 0;
   overflow: hidden;
 }
-/* The outline docks to the right of the map. It opens by growing from the
-   right edge while the map narrows, so the map pans left with its centre,
-   and closes the same way back (see `createPresence`). The panel inside
-   keeps its width, so it slides in with the edge instead of reflowing. On
-   phones it covers the map and slides in over it. */
-.outline-dock {
-  position: absolute;
-  inset: 0.75rem;
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  animation: outline-drawer-enter 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+/* The side panel is a drawer: it slides in from the right edge, and back out
+   while it closes (see `createPresence`). */
+.side-drawer {
+  animation: side-drawer-enter 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
-.outline-dock[data-closing] {
-  animation: outline-drawer-exit 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+.side-drawer[data-closing] {
+  animation: side-drawer-exit 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
-/* Open notes share the column with the tree, half each. */
-.outline-dock > .map-toolbar {
-  flex: 1 1 0;
-  height: auto;
-  min-height: 0;
-}
-@keyframes outline-drawer-enter {
+@keyframes side-drawer-enter {
   from {
     transform: translateX(calc(100% + 0.75rem));
   }
 }
-@keyframes outline-drawer-exit {
+@keyframes side-drawer-exit {
   to {
     transform: translateX(calc(100% + 0.75rem));
   }
 }
-@media (min-width: 640px) {
-  .outline-dock {
-    position: relative;
-    inset: auto;
-    z-index: auto;
-    flex: none;
-    width: 20rem;
-    height: 100%;
-    overflow: hidden;
-    gap: 0;
-    border-left: 1px solid var(--line);
-    background: var(--surface);
-    animation: outline-dock-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
-  }
-  .outline-dock[data-closing] {
-    animation: outline-dock-exit 160ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
-  }
-  /* Flat sections of one column, not islands. */
-  .outline-dock > .map-toolbar {
-    width: 20rem;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-  .outline-dock > .map-toolbar + .map-toolbar {
-    border-top: 1px solid var(--line);
-  }
-  /* The column's title lines up with the map's top islands: 12px from the
-     top, 44px tall. */
-  .outline-dock > .map-toolbar:first-child > header {
-    min-height: 4.25rem;
-  }
+/* Its tabs: quiet labels, the open one set on a soft fill. */
+.panel-tab {
+  height: 2rem;
+  border-radius: var(--radius-control);
+  padding: 0 0.7rem;
+  color: var(--ink-3);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 80ms ease,
+    color 80ms ease;
 }
-@media (min-width: 1024px) {
-  .outline-dock,
-  .outline-dock > .map-toolbar {
-    width: 24rem;
-  }
+.panel-tab:hover {
+  background: var(--hover);
+  color: var(--ink);
 }
-@media (min-width: 1280px) {
-  .outline-dock,
-  .outline-dock > .map-toolbar {
-    width: 28rem;
-  }
+.panel-tab[aria-selected="true"] {
+  background: var(--color-stone-100);
+  color: var(--ink);
+  font-weight: 600;
 }
-@keyframes outline-dock-enter {
-  from {
-    width: 0;
-  }
+.panel-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
-@keyframes outline-dock-exit {
-  to {
-    width: 0;
-  }
+/* The idea's title heads its notes. */
+.note-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  padding-top: 0.375rem;
+  color: var(--ink);
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.5rem;
+  overflow-wrap: anywhere;
 }
 
 /* The outline toggle's lines, each drawn 12.728 long around its own origin.
@@ -1111,8 +1077,8 @@ kbd {
   .dialog-center[data-size="large"][open]::backdrop,
   .dialog-side[open],
   .dialog-panel[open],
-  .outline-dock,
-  .outline-dock[data-closing],
+  .side-drawer,
+  .side-drawer[data-closing],
   .save-state[data-tone="saving"]::before {
     animation: none;
   }
