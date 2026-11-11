@@ -38,7 +38,7 @@ export function ProjectPreferences(props: {
             {
               key: "local" as const,
               label: "Save locally",
-              description: "Keep a copy in this browser for offline use.",
+              description: "Keep a copy in this browser.",
             },
             {
               key: "cloud" as const,
@@ -123,7 +123,7 @@ export function ProjectPreferences(props: {
       <Show when={!props.saving.local && props.saving.cloud && props.signedIn}>
         <p class="mt-8 text-sm leading-6 text-stone-600">
           Wait for the green save dot before leaving, or export a backup. This
-          browser will not keep an offline copy.
+          browser will not keep a copy.
         </p>
       </Show>
       <p role="status" class="mt-6 text-sm text-stone-600">

@@ -18,9 +18,9 @@ import type {
   SavingPreferences,
 } from "./project-document";
 
-import { CATALOG_VERSION, STORAGE_GENERATION } from "./offline-contract";
-
-export { STORAGE_GENERATION } from "./offline-contract";
+// Fresh Loro storage. Bump to start over in new IndexedDB databases.
+export const STORAGE_GENERATION = 2;
+const CATALOG_VERSION = 1;
 export const ANONYMOUS_NAMESPACE = "anonymous";
 export const accountNamespace = (userId: number | string) =>
   `account-${userId}`;

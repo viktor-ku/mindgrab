@@ -81,16 +81,6 @@ depends = ["install", "state:build"]
 dir = "e2e"
 run = "bun --bun run test"
 
-[tasks."webapp:test:offline"]
-description = "Alias for e2e:test:offline"
-depends = ["e2e:test:offline"]
-
-[tasks."e2e:test:offline"]
-description = "Verify production shell caching, cold offline reopen and safe upgrades"
-depends = ["install", "state:build"]
-dir = "e2e"
-run = "bun --bun run test:offline"
-
 [tasks."e2e:check"]
 description = "Run e2e lint, formatting and type checks"
 depends = ["install", "state:build"]
@@ -110,8 +100,8 @@ dir = "webapp"
 run = "bun --bun run check"
 
 [tasks.check]
-description = "Verify the Rust/Loro app, browser behavior, and offline shell"
-depends = ["tooling:test", "tooling:check", "backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "e2e:test:offline", "webapp:build", "state:test", "state:check", "state:interop"]
+description = "Verify the Rust/Loro app and browser behavior"
+depends = ["tooling:test", "tooling:check", "backend:check", "backend:test", "webapp:check", "webapp:test", "e2e:check", "e2e:test", "webapp:build", "state:test", "state:check", "state:interop"]
 
 [tasks."state:setup"]
 description = "Install the Rust WASM target and matching binding generator"

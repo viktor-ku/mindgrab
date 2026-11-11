@@ -1,12 +1,11 @@
 import { defineConfig, loadEnv } from "vite";
 import solid from "vite-plugin-solid";
 import tailwindcss from "@tailwindcss/vite";
-import { offlineShell } from "./build/offline-shell.ts";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   return {
-    plugins: [tailwindcss(), solid(), offlineShell()],
+    plugins: [tailwindcss(), solid()],
     server: {
       port: Number(process.env.WEBAPP_PORT ?? "5173"),
       strictPort: true,
