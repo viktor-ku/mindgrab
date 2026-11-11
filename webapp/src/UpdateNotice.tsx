@@ -10,6 +10,7 @@ import {
   reloadAnyway,
   strandedRisks,
 } from "./offline-shell";
+import { press } from "./press";
 
 const plural = (count: number, word: string) =>
   `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -111,7 +112,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
               <button
                 type="button"
                 class="primary-button compact shrink-0"
-                onClick={() => update.mutate(undefined)}
+                {...press(() => update.mutate(undefined))}
               >
                 Update now
               </button>
@@ -136,14 +137,14 @@ export function UpdateNotice(props: { inline?: boolean }) {
                     type="button"
                     class="map-control outlined"
                     disabled={recheck.isPending}
-                    onClick={() => recheck.mutate()}
+                    {...press(() => recheck.mutate())}
                   >
                     Check again
                   </button>
                   <button
                     type="button"
                     class="primary-button compact danger"
-                    onClick={reloadAnyway}
+                    {...press(reloadAnyway)}
                   >
                     Reload and lose it
                   </button>
@@ -161,7 +162,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
                 <button
                   type="button"
                   class="primary-button compact shrink-0"
-                  onClick={() => window.location.reload()}
+                  {...press(() => window.location.reload())}
                 >
                   Reload
                 </button>
@@ -182,17 +183,18 @@ export function UpdateNotice(props: { inline?: boolean }) {
                   <button
                     type="button"
                     class="map-control outlined"
-                    onClick={() => update.reset()}
+                    {...press(() => update.reset())}
                   >
                     Not now
                   </button>
                   <button
                     type="button"
                     class="primary-button compact danger"
-                    onClick={() =>
-                      update.data?.status === "unsafe" &&
-                      update.mutate(update.data.confirmation)
-                    }
+                    {...press(
+                      () =>
+                        update.data?.status === "unsafe" &&
+                        update.mutate(update.data.confirmation),
+                    )}
                   >
                     Update and lose it
                   </button>
@@ -213,7 +215,7 @@ export function UpdateNotice(props: { inline?: boolean }) {
               <button
                 type="button"
                 class="map-control outlined shrink-0"
-                onClick={() => update.reset()}
+                {...press(() => update.reset())}
               >
                 Try again
               </button>
