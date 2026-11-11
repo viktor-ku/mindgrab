@@ -2459,13 +2459,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       { defer: true },
     ),
   );
-  // The storage island shows in the corner where the outline starts, so the
-  // outline starts 8px under it: the island's top is at 64px.
-  const [storageIslandHeight, setStorageIslandHeight] = createSignal(0);
-  const outlineTop = () =>
-    storageIslandHeight() && !isPhone()
-      ? { top: `${64 + storageIslandHeight() + 8}px` }
-      : undefined;
   // Centred chrome sits in a strip of the canvas, given as its distance from
   // the left and right edges.
   interface Strip {
@@ -2484,6 +2477,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       left: edges.left ? edges.left + 8 : 12,
       right: edges.right ? edges.right + 8 : 12,
     };
+  };
+  // Search stays in the toolbar column, 16px clear of the open panels.
+  const searchBeside = () => {
+    const right = panelEdges(
+      canvasSize().width,
+      outlineOpen(),
+      notesOpen(),
+    ).right;
+    return right && !isPhone()
+      ? {
+          "margin-right": `${right + 4}px`,
+          "max-width": `calc(100vw - ${right + 28}px)`,
+        }
+      : undefined;
   };
   // Beside open panels the breadcrumb keeps the focused branch readable: it
   // drops the steps above it first, then the label of the way out.
@@ -4482,16 +4489,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
-            ref={(el) => {
-              const observer = new ResizeObserver(() =>
-                setStorageIslandHeight(el.offsetHeight),
-              );
-              observer.observe(el);
-              onCleanup(() => {
-                observer.disconnect();
-                setStorageIslandHeight(0);
-              });
-            }}
           >
             <Show when={memoryOnly()}>
               <p role="status" class="text-amber-800">
@@ -4587,14 +4584,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button"
                 aria-label="Outline"
-                title={`Outline (${ALT_LABEL}O)`}
+                title={`${outlineOpen() ? "Close outline" : "Outline"} (${ALT_LABEL}O)`}
                 aria-expanded={outlineOpen()}
                 {...press((e) => {
                   setOutlineOpen((open) => !open);
                   backToCanvas(e);
                 })}
               >
-                <OutlineIcon />
+                <OutlineIcon open={outlineOpen()} />
               </button>
             </nav>
             <AccountControls
@@ -4614,12 +4611,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Search ideas"
             // The field fills the island, so the island carries its focus ring.
             class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
-            // Beside the notes, not over their header: previews select ideas,
-            // and their notes follow.
-            classList={{
-              "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
-                notesOpen() && !isPhone(),
-            }}
+            // Beside the open panels, not over their headers: previews select
+            // ideas, and the outline and notes follow.
+            style={searchBeside()}
             ref={(el) => closeOnEscape(el, () => closeSearch(false))}
           >
             <div class="flex items-center gap-2 px-2">
@@ -4741,22 +4735,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </search>
         </Show>
       </div>
-      <Show when={notesOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-          <NotesPanel
-            doc={session().doc}
-            id={selectedId()}
-            title={nodeLabel(selectedId() ?? "")}
-            onFocusChange={() => session().undo.finishGroup()}
-            onClose={() => toggleNotes(false)}
-          />
-        </div>
-      </Show>
+      {/* The outline is a drawer on the right, under the toolbar that
+          toggles it. */}
       <Show when={outlineOpen()}>
-        <div
-          class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
-          style={outlineTop()}
-        >
+        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
           <Outline
             roots={scopeForest()}
             text={(id) => view().text(id)}
@@ -4777,6 +4759,24 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               setOutlineOpen(false);
               canvas.focus({ preventScroll: true });
             }}
+          />
+        </div>
+      </Show>
+      {/* The notes come after the outline, so where they cannot sit beside
+          the drawer they cover it while open. */}
+      <Show when={notesOpen()}>
+        <div
+          class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+          classList={{
+            "lg:right-[25.25rem] xl:right-[29.25rem]": outlineOpen(),
+          }}
+        >
+          <NotesPanel
+            doc={session().doc}
+            id={selectedId()}
+            title={nodeLabel(selectedId() ?? "")}
+            onFocusChange={() => session().undo.finishGroup()}
+            onClose={() => toggleNotes(false)}
           />
         </div>
       </Show>

@@ -654,11 +654,11 @@ export function SharedProject(props: { token: string }) {
               type="button"
               class="icon-button"
               aria-label="Outline"
-              title="Outline"
+              title={outlineOpen() ? "Close outline" : "Outline"}
               aria-expanded={outlineOpen()}
               {...press(() => setOutlineOpen((open) => !open))}
             >
-              <OutlineIcon />
+              <OutlineIcon open={outlineOpen()} />
             </button>
           </Show>
         </section>
@@ -671,8 +671,9 @@ export function SharedProject(props: { token: string }) {
         </a>
       </div>
 
+      {/* The outline is a drawer on the right, as in the editor. */}
       <Show when={status() === "ready" && outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
           <Outline
             roots={forest()}
             text={(id) => view()?.text(id) ?? ""}
@@ -695,8 +696,14 @@ export function SharedProject(props: { token: string }) {
         </div>
       </Show>
 
+      {/* Beside the outline drawer where there is room, over it otherwise. */}
       <Show when={selectedNote() && !notesDismissed()}>
-        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
+        <div
+          class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+          classList={{
+            "lg:right-[25.25rem] xl:right-[29.25rem]": outlineOpen(),
+          }}
+        >
           <aside
             data-toolbar
             aria-label="Notes"

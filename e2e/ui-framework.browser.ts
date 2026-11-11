@@ -1451,7 +1451,7 @@ describe("islands and stacking", () => {
     expect(Math.abs((await edges(toolbar)).center - 512)).toBeLessThan(1);
   });
 
-  test("the top bars stack in the strip between the open panels", async () => {
+  test("the top bars stack in the strip left of the open panels", async () => {
     await page.setViewportSize({ width: 1024, height: 700 });
     const { c } = await chain();
     await page.keyboard.press("Alt+o");
@@ -1460,14 +1460,22 @@ describe("islands and stacking", () => {
     await page.keyboard.press("Alt+f");
     await notesButton().click();
     const crumbs = page.getByRole("navigation", { name: "Branch focus" });
+    // Both panels open on the right; where there is no room beside the
+    // outline drawer, the notes cover it.
+    const panelsLeft = async () =>
+      Math.min((await edges(outline())).left, (await edges(notes())).left);
     const between = async (bar: ReturnType<typeof region>) => {
       const bounds = await edges(bar);
-      expect(bounds.left).toBeGreaterThan((await edges(outline())).right);
-      expect(bounds.right).toBeLessThan((await edges(notes())).left);
+      expect(bounds.left).toBeGreaterThanOrEqual(12);
+      expect(bounds.right).toBeLessThan(await panelsLeft());
       return bounds;
     };
     await between(crumbs);
-    // The panels' own controls stay in reach.
+    // The notes sit beside the drawer, and the panels' own controls stay in
+    // reach.
+    expect((await edges(notes())).right).toBeLessThan(
+      (await edges(outline())).left,
+    );
     await page.getByRole("button", { name: "Close notes" }).click({
       trial: true,
     });
@@ -1478,10 +1486,10 @@ describe("islands and stacking", () => {
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.fill("needle");
-    // Search steps aside for the notes it would cover.
+    // Search steps aside for the panels it would cover.
     expect(
       (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
-    ).toBeLessThan((await edges(notes())).left);
+    ).toBeLessThan(await panelsLeft());
     await field.press("Enter");
     const back = await between(
       page.getByRole("navigation", { name: "Return from search" }),
@@ -1509,28 +1517,26 @@ describe("islands and stacking", () => {
     }
   });
 
-  test("the outline starts under the storage island", async () => {
-    await page.getByRole("button", { name: "Project menu" }).click();
-    await page.getByRole("menuitem", { name: "Project preferences…" }).click();
-    const dialog = page.getByRole("dialog", { name: "Project preferences" });
-    await dialog.getByRole("switch", { name: "Save locally" }).click();
-    await dialog.getByText("This map lives only in memory.").waitFor();
-    await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "hidden" });
-    const island = page.locator(".map-toolbar", {
-      hasText: "In memory only",
-    });
-    await island.waitFor();
-    await page.keyboard.press("Alt+o");
-    expect((await edges(outline())).top).toBeGreaterThan(
-      (await edges(island)).bottom,
-    );
+  test("the outline is a drawer on the right, under the toggle that turns into a cross", async () => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const toggle = page.getByRole("button", { name: "Outline", exact: true });
+    const cross = toggle.locator("[data-open]");
+    expect(await cross.count()).toBe(0);
+    await toggle.click();
+    await outline().waitFor();
+    expect(await cross.count()).toBe(1);
+    expect(await toggle.getAttribute("title")).toContain("Close outline");
+    const drawer = await edges(outline());
+    expect(Math.abs(drawer.right - (1280 - 12))).toBeLessThan(1);
+    expect(Math.round(drawer.right - drawer.left)).toBe(448);
+    expect(drawer.top).toBeGreaterThan((await edges(toggle)).bottom);
     await page.getByRole("button", { name: "Close outline" }).click();
     await outline().waitFor({ state: "hidden" });
+    expect(await cross.count()).toBe(0);
   });
 
   test("a panel that opens over the selected idea moves the map aside", async () => {
-    const { root, leaf } = await chain();
+    const { leaf } = await chain();
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(leaf).click();
     const before = await box(leaf);
@@ -1542,10 +1548,12 @@ describe("islands and stacking", () => {
     await page.getByRole("button", { name: "Close notes" }).click();
 
     await page.getByRole("button", { name: "Fit map" }).click();
-    await node(root).click();
-    expect((await box(root)).x).toBeLessThan(300);
+    await node(leaf).click();
     await page.keyboard.press("Alt+o");
-    expect((await box(root)).x).toBeGreaterThan((await edges(outline())).right);
+    const drawer = await edges(outline());
+    expect(before.x + before.width).toBeGreaterThan(drawer.left);
+    const beside = await box(leaf);
+    expect(beside.x + beside.width).toBeLessThan(drawer.left);
   });
 });
 

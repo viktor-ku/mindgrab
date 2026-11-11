@@ -165,10 +165,20 @@ export const BrandMark = (props: IconProps) => (
   </svg>
 );
 
-export const OutlineIcon = (props: IconProps) => (
-  <Icon class={props.class}>
-    <path d="M7.5 5h9M10 10h6.5M10 15h6.5" />
-    <path d="M3.5 5h.01M6 10h.01M6 15h.01" stroke-width="2.4" />
+// The outline's toggle. Open, its lines fold into the close cross: the top and
+// bottom lines turn into the two strokes and the rest fades. Every line is
+// drawn centred on its own origin and placed from CSS (`.outline-morph`), so
+// the change animates.
+export const OutlineIcon = (props: IconProps & { open?: boolean }) => (
+  <Icon class={`outline-morph ${props.class ?? "size-4.5"}`}>
+    <g data-open={props.open ? "" : undefined}>
+      <path class="outline-morph-top" d="M-6.364 0h12.728" />
+      <path class="outline-morph-middle" d="M-6.364 0h12.728" />
+      <path class="outline-morph-bottom" d="M-6.364 0h12.728" />
+      <path class="outline-morph-dot" d="M0 0h.01" stroke-width="2.4" />
+      <path class="outline-morph-dot" d="M0 0h.01" stroke-width="2.4" />
+      <path class="outline-morph-dot" d="M0 0h.01" stroke-width="2.4" />
+    </g>
   </Icon>
 );
 

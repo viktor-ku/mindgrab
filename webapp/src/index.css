@@ -887,6 +887,72 @@ kbd {
   padding: 0;
   overflow: hidden;
 }
+/* The outline is a drawer: it slides in from the right edge. */
+.outline-panel {
+  animation: outline-drawer-enter 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes outline-drawer-enter {
+  from {
+    transform: translateX(calc(100% + 0.75rem));
+  }
+}
+
+/* The outline toggle's lines, each drawn 12.728 long around its own origin.
+   Closed, a dash shows the line's part of the outline glyph; open, the top
+   and bottom lines turn into the close cross and the rest fades into its
+   middle. */
+.outline-morph path {
+  transition:
+    transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    stroke-dasharray 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    stroke-dashoffset 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 100ms ease;
+}
+.outline-morph-top {
+  transform: translate(12px, 5px) rotate(0deg);
+  stroke-dasharray: 9 20;
+  stroke-dashoffset: -1.864;
+}
+.outline-morph-middle {
+  transform: translate(13.25px, 10px);
+  stroke-dasharray: 6.5 20;
+  stroke-dashoffset: -3.114;
+}
+.outline-morph-bottom {
+  transform: translate(13.25px, 15px) rotate(0deg);
+  stroke-dasharray: 6.5 20;
+  stroke-dashoffset: -3.114;
+}
+.outline-morph-dot:nth-child(4) {
+  transform: translate(3.5px, 5px) scale(1);
+}
+.outline-morph-dot:nth-child(5) {
+  transform: translate(6px, 10px) scale(1);
+}
+.outline-morph-dot:nth-child(6) {
+  transform: translate(6px, 15px) scale(1);
+}
+.outline-morph [data-open] .outline-morph-top,
+.outline-morph [data-open] .outline-morph-bottom {
+  stroke-dasharray: 12.728 20;
+  stroke-dashoffset: 0;
+}
+.outline-morph [data-open] .outline-morph-top {
+  transform: translate(10px, 10px) rotate(45deg);
+}
+.outline-morph [data-open] .outline-morph-bottom {
+  transform: translate(10px, 10px) rotate(-45deg);
+}
+.outline-morph [data-open] .outline-morph-middle {
+  transform: translate(10px, 10px);
+  stroke-dasharray: 0 20;
+  stroke-dashoffset: 0;
+  opacity: 0;
+}
+.outline-morph [data-open] .outline-morph-dot {
+  transform: translate(10px, 10px) scale(0);
+  opacity: 0;
+}
 .panel-title {
   font-size: 0.9375rem;
   font-weight: 600;
@@ -964,10 +1030,12 @@ kbd {
   .dialog-center[data-size="large"][open]::backdrop,
   .dialog-side[open],
   .dialog-panel[open],
+  .outline-panel,
   .save-state[data-tone="saving"]::before {
     animation: none;
   }
-  .saving-switch::before {
+  .saving-switch::before,
+  .outline-morph path {
     transition: none;
   }
 }
