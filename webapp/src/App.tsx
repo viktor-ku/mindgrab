@@ -4796,6 +4796,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 }}
                 onToggle={(id) => toggleCollapse(id, false)}
                 onEdit={write}
+                hasNote={(id) => !!view().note(id).trim()}
+                onOpenNotes={(id) => {
+                  finishWriting();
+                  setColorScope("node");
+                  setSelectedId(id);
+                  setSideTab("notes");
+                }}
               />
             }
             notes={

@@ -1083,6 +1083,35 @@ kbd {
   border-radius: 999px;
   background: var(--line-strong);
 }
+/* Opens a row's notes. Quiet until it matters: on ideas with notes, and on
+   the row under the pointer or selected. */
+.outline-note {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex-shrink: 0;
+  margin-right: -0.25rem;
+  border-radius: 0.3rem;
+  color: var(--ink-3);
+  cursor: pointer;
+  visibility: hidden;
+}
+.outline-note[data-has-note],
+.outline-row:hover > .outline-note,
+.outline-item[aria-selected="true"] > .outline-row > .outline-note {
+  visibility: visible;
+}
+.outline-row:not(:hover) > .outline-note:not([data-has-note]) {
+  opacity: 0.6;
+}
+.outline-note:hover {
+  background: var(--pressed);
+  color: var(--ink);
+}
+.outline-item[aria-selected="true"] > .outline-row > .outline-note {
+  color: var(--accent-deep);
+}
 /* Hints that a panel continues below the fold. */
 .scroll-fade {
   mask-image: linear-gradient(

@@ -764,6 +764,11 @@ export function SharedProject(props: { token: string }) {
                 }}
                 onToggle={toggleCollapse}
                 onEdit={centerOn}
+                hasNote={(id) => !!view()?.note(id).trim()}
+                onOpenNotes={(id) => {
+                  select(id);
+                  setSideTab("notes");
+                }}
               />
             }
             notes={notesTab()}

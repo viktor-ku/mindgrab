@@ -1,5 +1,5 @@
 import { createEffect, For, Show } from "solid-js";
-import { ChevronRightIcon } from "./icons";
+import { ChevronRightIcon, NoteIcon } from "./icons";
 import type { MindMapNode } from "./mind-map";
 import { press } from "./press";
 
@@ -16,6 +16,9 @@ export function Outline(props: {
   onSelect: (id: string, via: "pointer" | "keyboard") => void;
   onToggle: (id: string) => void;
   onEdit: (id: string) => void;
+  // Whether an idea has notes, and opening them on the Notes tab.
+  hasNote: (id: string) => boolean;
+  onOpenNotes: (id: string) => void;
 }) {
   let tree!: HTMLDivElement;
   // Items in display order, honoring folds, for keyboard movement.
@@ -151,6 +154,23 @@ export function Outline(props: {
                   {children().length}
                 </span>
               </Show>
+              {/* Shown on ideas with notes, and on the row under the pointer
+                  or selected; the tree keeps one tab stop, and Alt+N opens
+                  the selected idea's notes from the keyboard. */}
+              <button
+                type="button"
+                tabIndex={-1}
+                class="outline-note"
+                data-has-note={props.hasNote(node.id) ? "" : undefined}
+                aria-label={`Notes for ${props.text(node.id).trim() || "New idea"}`}
+                title={props.hasNote(node.id) ? "Open notes" : "Add notes"}
+                {...press((e) => {
+                  e.stopPropagation();
+                  props.onOpenNotes(node.id);
+                })}
+              >
+                <NoteIcon class="size-3.5" />
+              </button>
             </div>
             <Show when={open() && children().length}>
               {/* biome-ignore lint/a11y/useSemanticElements: The W3C tree pattern nests child treeitems in role=group; a fieldset is not a tree group. */}

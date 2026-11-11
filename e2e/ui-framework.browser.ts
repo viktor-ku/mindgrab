@@ -1572,6 +1572,22 @@ describe("islands and stacking", () => {
     await page.keyboard.press("ArrowRight");
     await notes().waitFor();
 
+    // Each outline row opens its idea's notes, shown on ideas that have some.
+    await notes()
+      .getByRole("textbox", { name: "Idea notes" })
+      .fill("Its notes.");
+    await tab("Outline").click();
+    const noteButton = outline().getByRole("button", {
+      name: "Notes for Renamed on the map",
+    });
+    expect(await noteButton.getAttribute("data-has-note")).toBe("");
+    await node(root).click();
+    await page.keyboard.press("Escape");
+    await noteButton.click();
+    await notes().waitFor();
+    expect(await selected()).toBe(root);
+    expect(await title.inputValue()).toBe("Renamed on the map");
+
     // "Show on map" brings the idea back, centred beside the drawer.
     await page.mouse.move(200, 200);
     await page.mouse.wheel(300, 300);
