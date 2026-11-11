@@ -606,6 +606,10 @@ kbd {
 .dialog-center[data-size="small"] {
   width: min(26rem, calc(100vw - 2rem));
 }
+.dialog-center[data-size="large"] {
+  width: min(60rem, calc(100vw - 2rem));
+  height: min(40rem, calc(100dvh - 2rem));
+}
 .dialog-center[open] {
   display: flex;
   flex-direction: column;

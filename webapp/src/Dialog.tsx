@@ -15,7 +15,9 @@ export function Dialog(props: {
   // slides in from the right, pads its content and scrolls as a whole. "panel"
   // does the same from the left, under the phone menu button.
   variant: "center" | "side" | "panel";
-  size?: "small";
+  // "large" gives "center" a fixed height, as a settings window with room for
+  // sections, so switching what it shows does not resize it.
+  size?: "small" | "large";
   // Replaces the visible title, which then only names the dialog.
   heading?: JSX.Element;
   children: JSX.Element;
