@@ -2464,7 +2464,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (id && !isPhone()) keepInView(id);
     },
   });
-  const viewInsets = () => panelInsets(canvasSize().viewport, notesOpen());
+  // With the outline docked, the notes join it under the tree; otherwise
+  // they float over the map's right edge.
+  const notesFloating = () => notesOpen() && !outlineDrawer.mounted();
+  const viewInsets = () => panelInsets(canvasSize().viewport, notesFloating());
   // Notes that open over the selected idea move the map aside, as selecting
   // that idea with the notes already open would. The outline does the same
   // once it has docked.
@@ -2473,7 +2476,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       notesOpen,
       (open) => {
         const id = selectedId();
-        if (id && open && !isPhone()) keepInView(id);
+        if (id && open && notesFloating() && !isPhone()) keepInView(id);
       },
       { defer: true },
     ),
@@ -2491,7 +2494,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // The top bars keep to the strip between the open panels, 8px clear of
   // each, so they never cover a panel's header.
   const panelStrip = (): Strip => {
-    const edges = panelEdges(canvasSize().viewport, notesOpen());
+    const edges = panelEdges(canvasSize().viewport, notesFloating());
     return {
       left: edges.left ? edges.left + 8 : 12,
       right: edges.right ? edges.right + 8 : 12,
@@ -4626,7 +4629,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               // and their notes follow.
               classList={{
                 "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
-                  notesOpen() && !isPhone(),
+                  notesFloating() && !isPhone(),
               }}
               ref={(el) => closeOnEscape(el, () => closeSearch(false))}
             >
@@ -4752,7 +4755,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             </search>
           </Show>
         </div>
-        <Show when={notesOpen()}>
+        <Show when={notesFloating()}>
           <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
             <NotesPanel
               doc={session().doc}
@@ -5739,7 +5742,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         />
       </section>
       {/* The outline docks beside the map: the map narrows, so it pans
-          left with its centre. On phones it covers the map. */}
+          left with its centre. Open notes join it underneath. On phones it
+          covers the map. */}
       <Show when={outlineDrawer.mounted()}>
         <div ref={outlineDrawer.ref} class="outline-dock">
           <Outline
@@ -5762,6 +5766,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               canvas.focus({ preventScroll: true });
             }}
           />
+          {/* The selected idea's notes, under its row in the tree. */}
+          <Show when={notesOpen()}>
+            <NotesPanel
+              doc={session().doc}
+              id={selectedId()}
+              title={nodeLabel(selectedId() ?? "")}
+              onFocusChange={() => session().undo.finishGroup()}
+              onClose={() => toggleNotes(false)}
+            />
+          </Show>
         </div>
       </Show>
     </div>

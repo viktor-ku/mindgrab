@@ -301,7 +301,10 @@ export function SharedProject(props: { token: string }) {
   // Fit map and outline picks work in the room beside the open panels, as in
   // the editor.
   const viewInsets = () =>
-    panelInsets(window.innerWidth, !!selectedNote() && !notesDismissed());
+    panelInsets(
+      window.innerWidth,
+      !!selectedNote() && !notesDismissed() && !outlineOpen(),
+    );
   function fitMap() {
     const nodes = layout().nodes;
     if (!nodes.length) return;
@@ -457,6 +460,40 @@ export function SharedProject(props: { token: string }) {
     <div class="absolute top-1/2 left-1/2 flex w-[22rem] max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 text-center">
       {content() as never}
     </div>
+  );
+
+  // The selected idea's notes: over the map's right edge, or under the
+  // outline while it is docked.
+  const notesPanel = () => (
+    <aside
+      data-toolbar
+      aria-label="Notes"
+      class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
+    >
+      <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
+        <div class="min-w-0">
+          <h2 class="panel-title">Notes</h2>
+          <p class="truncate text-xs text-stone-500">
+            {view()?.text(selectedId() ?? "") || "New idea"}
+          </p>
+        </div>
+        <button
+          type="button"
+          class="icon-button size-8!"
+          aria-label="Close notes"
+          title="Close notes (Esc)"
+          {...press(() => {
+            setNotesDismissed(true);
+            canvas.focus({ preventScroll: true });
+          })}
+        >
+          <CloseIcon class="size-4" />
+        </button>
+      </header>
+      <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
+        {selectedNote()}
+      </p>
+    </aside>
   );
 
   return (
@@ -682,37 +719,11 @@ export function SharedProject(props: { token: string }) {
           </a>
         </div>
 
-        <Show when={selectedNote() && !notesDismissed()}>
+        <Show
+          when={selectedNote() && !notesDismissed() && !outlineDrawer.mounted()}
+        >
           <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-            <aside
-              data-toolbar
-              aria-label="Notes"
-              class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
-            >
-              <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
-                <div class="min-w-0">
-                  <h2 class="panel-title">Notes</h2>
-                  <p class="truncate text-xs text-stone-500">
-                    {view()?.text(selectedId() ?? "") || "New idea"}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  class="icon-button size-8!"
-                  aria-label="Close notes"
-                  title="Close notes (Esc)"
-                  {...press(() => {
-                    setNotesDismissed(true);
-                    canvas.focus({ preventScroll: true });
-                  })}
-                >
-                  <CloseIcon class="size-4" />
-                </button>
-              </header>
-              <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
-                {selectedNote()}
-              </p>
-            </aside>
+            {notesPanel()}
           </div>
         </Show>
 
@@ -789,6 +800,7 @@ export function SharedProject(props: { token: string }) {
               canvas.focus({ preventScroll: true });
             }}
           />
+          <Show when={selectedNote() && !notesDismissed()}>{notesPanel()}</Show>
         </div>
       </Show>
     </div>

@@ -1468,7 +1468,7 @@ describe("islands and stacking", () => {
     }
   }
 
-  test("the top bars stack in the strip left of the open panels", async () => {
+  test("the top bars stay left of the docked outline, which holds the notes", async () => {
     await page.setViewportSize({ width: 1024, height: 700 });
     const { c } = await chain();
     await page.keyboard.press("Alt+o");
@@ -1478,17 +1478,19 @@ describe("islands and stacking", () => {
     await page.keyboard.press("Alt+f");
     await notesButton().click();
     const crumbs = page.getByRole("navigation", { name: "Branch focus" });
-    // The notes open inside the map, left of the docked outline.
     const between = async (bar: ReturnType<typeof region>) => {
       const bounds = await edges(bar);
       expect(bounds.left).toBeGreaterThanOrEqual(12);
-      expect(bounds.right).toBeLessThan((await edges(notes())).left);
+      expect(bounds.right).toBeLessThan((await edges(outline())).left);
       return bounds;
     };
     await between(crumbs);
-    expect((await edges(notes())).right).toBeLessThan(
-      (await edges(outline())).left,
-    );
+    // The notes join the outline's column, under the tree.
+    const tree = await edges(outline());
+    const notesBox = await edges(notes());
+    expect(Math.abs(notesBox.left - tree.left)).toBeLessThan(1);
+    expect(Math.abs(notesBox.right - tree.right)).toBeLessThan(1);
+    expect(notesBox.top).toBeGreaterThanOrEqual(tree.bottom - 1);
     // The panels' own controls stay in reach.
     await page.getByRole("button", { name: "Close notes" }).click({
       trial: true,
@@ -1500,10 +1502,9 @@ describe("islands and stacking", () => {
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.fill("needle");
-    // Search steps aside for the notes it would cover.
     expect(
       (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
-    ).toBeLessThan((await edges(notes())).left);
+    ).toBeLessThan(tree.left);
     await field.press("Enter");
     const back = await between(
       page.getByRole("navigation", { name: "Return from search" }),
@@ -1514,8 +1515,8 @@ describe("islands and stacking", () => {
     // out: the focused branch is never clipped away.
     const place = crumbs.locator('[aria-current="location"]');
     for (const [width, height, steps] of [
-      [1024, 700, 0],
-      [1280, 800, 0],
+      [800, 600, 0],
+      [1024, 700, 3],
       [1440, 900, 3],
     ]) {
       await page.setViewportSize({ width, height });

@@ -898,10 +898,17 @@ kbd {
   z-index: 40;
   display: flex;
   flex-direction: column;
+  gap: 0.5rem;
   animation: outline-drawer-enter 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .outline-dock[data-closing] {
   animation: outline-drawer-exit 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+/* Open notes share the column with the tree, half each. */
+.outline-dock > .map-toolbar {
+  flex: 1 1 0;
+  height: auto;
+  min-height: 0;
 }
 @keyframes outline-drawer-enter {
   from {
@@ -922,6 +929,7 @@ kbd {
     width: 20rem;
     height: 100%;
     overflow: hidden;
+    gap: 0;
     border-left: 1px solid var(--line);
     background: var(--surface);
     animation: outline-dock-enter 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -929,8 +937,8 @@ kbd {
   .outline-dock[data-closing] {
     animation: outline-dock-exit 160ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
   }
-  .outline-dock > .outline-panel {
-    flex: none;
+  /* Flat sections of one column, not islands. */
+  .outline-dock > .map-toolbar {
     width: 20rem;
     border-radius: 0;
     background: transparent;
@@ -938,16 +946,24 @@ kbd {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }
+  .outline-dock > .map-toolbar + .map-toolbar {
+    border-top: 1px solid var(--line);
+  }
+  /* The column's title lines up with the map's top islands: 12px from the
+     top, 44px tall. */
+  .outline-dock > .map-toolbar:first-child > header {
+    min-height: 4.25rem;
+  }
 }
 @media (min-width: 1024px) {
   .outline-dock,
-  .outline-dock > .outline-panel {
+  .outline-dock > .map-toolbar {
     width: 24rem;
   }
 }
 @media (min-width: 1280px) {
   .outline-dock,
-  .outline-dock > .outline-panel {
+  .outline-dock > .map-toolbar {
     width: 28rem;
   }
 }
