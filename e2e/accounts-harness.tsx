@@ -175,6 +175,11 @@ const accountHarness = {
   project,
   content: () => current.view(),
   id: () => current.id,
+  // Signed out, the preferences lock cloud saving; older maps may still have
+  // it off.
+  setSaving(saving: project.SavingPreferences) {
+    project.setSavingPreferences(current, saving);
+  },
   channels: () => [...channels].map((channel) => channel.name),
   sockets: () => [...sockets].map((socket) => socket.url),
   failWrites(value: boolean) {

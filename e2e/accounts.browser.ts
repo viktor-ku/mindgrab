@@ -1128,6 +1128,32 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
     .waitFor();
 });
 
+test("Project preferences switch sections and reopen at Saving", async () => {
+  await projectMenu("Project preferences…");
+  const preferences = page.getByRole("dialog", { name: "Project preferences" });
+  const sections = preferences.getByRole("navigation", {
+    name: "Preference sections",
+  });
+  const local = preferences.getByRole("switch", {
+    name: "Save locally",
+    exact: true,
+  });
+  await local.waitFor();
+  await sections.getByRole("button", { name: "Backup" }).click();
+  await preferences.getByRole("button", { name: "Export backup" }).waitFor();
+  expect(await local.count()).toBe(0);
+  expect(
+    await sections
+      .getByRole("button", { name: "Backup" })
+      .getAttribute("aria-current"),
+  ).toBe("true");
+  await preferences
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  await projectMenu("Project preferences…");
+  await local.waitFor();
+});
+
 test("signed-out Share and Project preferences start the normal sign-in", async () => {
   await projectMenu("Share link…");
   const share = page.getByRole("dialog", { name: "Share" });
@@ -1142,6 +1168,13 @@ test("signed-out Share and Project preferences start the normal sign-in", async 
   await ready();
   await projectMenu("Project preferences…");
   const preferences = page.getByRole("dialog", { name: "Project preferences" });
+  // Cloud saving is locked until sign-in, with Sign in in place of its switch.
+  await preferences.getByText("Save locally", { exact: true }).waitFor();
+  expect(
+    await preferences
+      .getByRole("switch", { name: "Save in Mindgrab Cloud" })
+      .count(),
+  ).toBe(0);
   await preferences
     .getByRole("button", { name: "Sign in", exact: true })
     .click();
@@ -1227,9 +1260,13 @@ test("cloud-only projects load after reload without leaving a local copy", async
 
 test("anonymous projects with cloud saving off migrate locally without ever being uploaded", async () => {
   const id = await call("id");
-  await projectMenu("Project preferences…");
-  await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
-  await page.getByRole("button", { name: "Close project preferences" }).click();
+  await call("setSaving", { local: true, cloud: false });
+  await eventually(
+    async () =>
+      (await call("catalog", "anonymous")).find((entry) => entry.id === id)
+        ?.saving?.cloud === false,
+    "the anonymous catalog to record cloud saving off",
+  );
   await login();
   await claimed(id);
   expect(await call("id")).toBe(id);

@@ -134,6 +134,13 @@ export const CloseIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const LockIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <rect x="4.5" y="9" width="11" height="8" rx="2" />
+    <path d="M7 9V6.5a3 3 0 0 1 6 0V9" />
+  </Icon>
+);
+
 export const ArrowLeftIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <path d="M9 5 4 10l5 5M4.5 10h11" />
