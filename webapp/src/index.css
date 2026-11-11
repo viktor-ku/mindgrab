@@ -610,6 +610,12 @@ kbd {
   width: min(60rem, calc(100vw - 2rem));
   height: min(40rem, calc(100dvh - 2rem));
 }
+.preferences-nav .menu-item {
+  font-size: 0.875rem;
+}
+.preferences-nav .menu-item[aria-current="true"] {
+  background: var(--accent-soft);
+}
 .dialog-center[open] {
   display: flex;
   flex-direction: column;
@@ -625,6 +631,25 @@ kbd {
   from {
     opacity: 0;
     transform: translateY(4px) scale(0.995);
+  }
+}
+/* A large dialog covers most of the screen; it grows into place and the
+   backdrop fades in with it, so the switch from the map is not abrupt. */
+.dialog-center[data-size="large"][open] {
+  animation: dialog-enter-large 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.dialog-center[data-size="large"][open]::backdrop {
+  animation: backdrop-enter 180ms ease-out;
+}
+@keyframes dialog-enter-large {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.97);
+  }
+}
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
   }
 }
 .choice-card {
@@ -935,6 +960,8 @@ kbd {
   .notice,
   .menu-panel,
   .dialog-center[open],
+  .dialog-center[data-size="large"][open],
+  .dialog-center[data-size="large"][open]::backdrop,
   .dialog-side[open],
   .dialog-panel[open],
   .save-state[data-tone="saving"]::before {

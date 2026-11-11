@@ -1128,6 +1128,32 @@ test("signed-in users can disable both destinations, edit privately, and keep Ne
     .waitFor();
 });
 
+test("Project preferences switch sections and reopen at Saving", async () => {
+  await projectMenu("Project preferences…");
+  const preferences = page.getByRole("dialog", { name: "Project preferences" });
+  const sections = preferences.getByRole("navigation", {
+    name: "Preference sections",
+  });
+  const local = preferences.getByRole("switch", {
+    name: "Save locally",
+    exact: true,
+  });
+  await local.waitFor();
+  await sections.getByRole("button", { name: "Backup" }).click();
+  await preferences.getByRole("button", { name: "Export backup" }).waitFor();
+  expect(await local.count()).toBe(0);
+  expect(
+    await sections
+      .getByRole("button", { name: "Backup" })
+      .getAttribute("aria-current"),
+  ).toBe("true");
+  await preferences
+    .getByRole("button", { name: "Close project preferences" })
+    .click();
+  await projectMenu("Project preferences…");
+  await local.waitFor();
+});
+
 test("signed-out Share and Project preferences start the normal sign-in", async () => {
   await projectMenu("Share link…");
   const share = page.getByRole("dialog", { name: "Share" });
