@@ -72,7 +72,7 @@ export function NotesPanel(props: {
         ref={input}
         aria-label="Idea notes"
         placeholder="Add details, links, or context…"
-        class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset"
+        class="min-h-0 flex-1 resize-none bg-transparent px-3.5 py-3 text-sm leading-6 text-stone-900 outline-none select-text placeholder:text-stone-400"
         onFocus={props.onFocusChange}
         onBlur={props.onFocusChange}
       />

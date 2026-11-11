@@ -1556,6 +1556,13 @@ describe("islands and stacking", () => {
     expect(await node(root).innerText()).toBe("Renamed in the notes");
     await title.press("Enter");
     expect(await activeLabel()).toBe("Idea notes");
+    // And writing on the map shows in the title as it is typed.
+    await node(root).dblclick();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("Renamed on the map");
+    expect(await title.inputValue()).toBe("Renamed on the map");
+    await page.keyboard.press("Enter");
+    expect(await title.inputValue()).toBe("Renamed on the map");
     expect(await cross.count()).toBe(0);
     // Arrow keys move between the tabs.
     await tab("Notes").focus();
@@ -1699,9 +1706,9 @@ describe("buttons and controls", () => {
     await page.waitForFunction(
       () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
     );
-    expect(await style(notes, "box-shadow")).toContain(
-      `${ACCENT} 0px 0px 0px 2px inset`,
-    );
+    // Writing notes shows only the caret: no ring around the tab's body.
+    expect(await style(notes, "box-shadow")).toBe("none");
+    expect(await style(notes, "outline-style")).toBe("none");
     await page.keyboard.press("Escape");
 
     await page
