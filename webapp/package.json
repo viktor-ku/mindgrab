@@ -14,8 +14,7 @@
     "format": "bun --bun run biome format --write .",
     "format:check": "bun --bun run biome format .",
     "lint:ts": "bun --bun run tsc -b",
-    "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts",
-    "test:offline": "bun --bun run --cwd ../e2e test:offline"
+    "check": "bun --bun run lint && bun --bun run format:check && bun --bun run lint:ts"
   },
   "dependencies": {
     "@solid-primitives/event-listener": "2.4.6",

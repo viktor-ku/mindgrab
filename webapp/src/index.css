@@ -3,8 +3,7 @@
 @source "./node-colors.ts";
 
 /* Type. Inter carries the whole app: the interface, the ideas and the titles.
-   It is bundled with the app so the offline shell caches it; until it loads,
-   and for any glyph it lacks, each platform's own UI font stands in. */
+   It is bundled with the app; until it loads, and for any glyph it lacks, each platform's own UI font stands in. */
 @font-face {
   font-family: "Inter";
   font-style: normal;
@@ -455,48 +454,6 @@ kbd {
   background: none;
   color: var(--ink-4);
   font-weight: 400;
-}
-
-/* A new version is waiting. It stays until the person updates, so it is an
-   island like the rest of the chrome, marked by an accent edge and dot rather
-   than by size or motion. */
-.update-notice {
-  padding: 0.5rem 0.5rem 0.5rem 0.875rem;
-  background: var(--surface);
-  border-radius: var(--radius-island);
-  box-shadow:
-    inset 3px 0 0 var(--accent),
-    var(--shadow-island);
-  color: var(--ink);
-  line-height: 1.25rem;
-  animation: notice-enter 160ms ease-out;
-}
-.update-notice.warning {
-  box-shadow:
-    inset 3px 0 0 var(--color-rose-600, #e11d48),
-    var(--shadow-island);
-}
-.update-dot {
-  flex-shrink: 0;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 999px;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-ring);
-}
-.update-dot.pulsing {
-  animation: update-pulse 1s ease-in-out infinite alternate;
-}
-@keyframes update-pulse {
-  to {
-    box-shadow: 0 0 0 6px transparent;
-  }
-}
-.primary-button.danger {
-  background: var(--color-rose-700, #be123c);
-}
-.primary-button.danger:hover:not(:disabled) {
-  background: var(--color-rose-800, #9f1239);
 }
 
 /* Notices answer an action, so they slide in from the toolbar they sit above. */

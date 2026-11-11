@@ -19,7 +19,7 @@
 		file_server
 	}
 
-	# index.html and sw.js must revalidate so a new build reaches browsers.
+	# index.html (and the sw.js tombstone) must revalidate so a new build reaches browsers.
 	handle {
 		header Cache-Control "no-cache"
 		try_files {path} /index.html
