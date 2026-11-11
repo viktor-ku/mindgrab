@@ -1451,31 +1451,45 @@ describe("islands and stacking", () => {
     expect(Math.abs((await edges(toolbar)).center - 512)).toBeLessThan(1);
   });
 
+  // The outline docks with an animation, then the map eases to keep the
+  // selection in view.
+  async function docked() {
+    for (const selector of [".outline-dock", ".map-layer"]) {
+      await page.evaluate(
+        (selector) =>
+          Promise.all(
+            (document.querySelector(selector)?.getAnimations() ?? []).map(
+              (animation) => animation.finished.catch(() => undefined),
+            ),
+          ),
+        selector,
+      );
+      await settle();
+    }
+  }
+
   test("the top bars stack in the strip left of the open panels", async () => {
     await page.setViewportSize({ width: 1024, height: 700 });
     const { c } = await chain();
     await page.keyboard.press("Alt+o");
+    await docked();
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(c).click();
     await page.keyboard.press("Alt+f");
     await notesButton().click();
     const crumbs = page.getByRole("navigation", { name: "Branch focus" });
-    // Both panels open on the right; where there is no room beside the
-    // outline drawer, the notes cover it.
-    const panelsLeft = async () =>
-      Math.min((await edges(outline())).left, (await edges(notes())).left);
+    // The notes open inside the map, left of the docked outline.
     const between = async (bar: ReturnType<typeof region>) => {
       const bounds = await edges(bar);
       expect(bounds.left).toBeGreaterThanOrEqual(12);
-      expect(bounds.right).toBeLessThan(await panelsLeft());
+      expect(bounds.right).toBeLessThan((await edges(notes())).left);
       return bounds;
     };
     await between(crumbs);
-    // The notes sit beside the drawer, and the panels' own controls stay in
-    // reach.
     expect((await edges(notes())).right).toBeLessThan(
       (await edges(outline())).left,
     );
+    // The panels' own controls stay in reach.
     await page.getByRole("button", { name: "Close notes" }).click({
       trial: true,
     });
@@ -1486,10 +1500,10 @@ describe("islands and stacking", () => {
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.fill("needle");
-    // Search steps aside for the panels it would cover.
+    // Search steps aside for the notes it would cover.
     expect(
       (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
-    ).toBeLessThan(await panelsLeft());
+    ).toBeLessThan((await edges(notes())).left);
     await field.press("Enter");
     const back = await between(
       page.getByRole("navigation", { name: "Return from search" }),
@@ -1501,7 +1515,7 @@ describe("islands and stacking", () => {
     const place = crumbs.locator('[aria-current="location"]');
     for (const [width, height, steps] of [
       [1024, 700, 0],
-      [800, 600, 0],
+      [1280, 800, 0],
       [1440, 900, 3],
     ]) {
       await page.setViewportSize({ width, height });
@@ -1517,22 +1531,35 @@ describe("islands and stacking", () => {
     }
   });
 
-  test("the outline is a drawer on the right, under the toggle that turns into a cross", async () => {
+  test("the outline docks beside the map, which pans left to make room", async () => {
     await page.setViewportSize({ width: 1280, height: 720 });
+    const root = await rootId();
     const toggle = page.getByRole("button", { name: "Outline", exact: true });
     const cross = toggle.locator("[data-open]");
+    const canvas = page.getByRole("region", { name: "Mind map canvas" });
+    const start = await box(root);
     expect(await cross.count()).toBe(0);
     await toggle.click();
     await outline().waitFor();
+    await docked();
     expect(await cross.count()).toBe(1);
     expect(await toggle.getAttribute("title")).toContain("Close outline");
-    const drawer = await edges(outline());
-    expect(Math.abs(drawer.right - (1280 - 12))).toBeLessThan(1);
-    expect(Math.round(drawer.right - drawer.left)).toBe(448);
-    expect(drawer.top).toBeGreaterThan((await edges(toggle)).bottom);
+    // Full height at the right edge, with the map's canvas narrowed beside it.
+    const dock = await edges(page.locator(".outline-dock"));
+    expect(dock).toMatchObject({ top: 0, bottom: 720, right: 1280 });
+    expect(Math.round(dock.right - dock.left)).toBe(448);
+    expect(Math.abs((await edges(canvas)).right - dock.left)).toBeLessThan(1);
+    // The toolbar that toggles it moves along with the canvas edge.
+    expect((await edges(toggle)).right).toBeLessThan(dock.left);
+    // The map keeps its centre in the narrower canvas: it pans half the way.
+    expect(Math.abs(start.x - (await box(root)).x - 224)).toBeLessThan(1);
+
     await page.getByRole("button", { name: "Close outline" }).click();
-    await outline().waitFor({ state: "hidden" });
+    await page.locator(".outline-dock").waitFor({ state: "detached" });
+    await settle();
     expect(await cross.count()).toBe(0);
+    expect((await edges(canvas)).right).toBe(1280);
+    expect(Math.abs((await box(root)).x - start.x)).toBeLessThan(1);
   });
 
   test("a panel that opens over the selected idea moves the map aside", async () => {
@@ -1547,13 +1574,16 @@ describe("islands and stacking", () => {
     expect(after.x + after.width).toBeLessThan(panel.left);
     await page.getByRole("button", { name: "Close notes" }).click();
 
+    // The docked outline narrows the map past the idea; once docked, the map
+    // follows it back into view.
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(leaf).click();
     await page.keyboard.press("Alt+o");
-    const drawer = await edges(outline());
-    expect(before.x + before.width).toBeGreaterThan(drawer.left);
+    await docked();
+    const dock = await edges(outline());
+    expect(before.x + before.width).toBeGreaterThan(dock.left);
     const beside = await box(leaf);
-    expect(beside.x + beside.width).toBeLessThan(drawer.left);
+    expect(beside.x + beside.width).toBeLessThan(dock.left);
   });
 });
 

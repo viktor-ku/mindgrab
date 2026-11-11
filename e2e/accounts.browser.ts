@@ -1351,6 +1351,40 @@ test("the shared view has editor-sized islands, plain tooltips and a retry that 
   );
 });
 
+test("opening the outline in the shared view keeps the selected idea clear of its notes", async () => {
+  const doc = createProjectDocument(crypto.randomUUID(), "Shared", {
+    text: "Root",
+  });
+  createChild(doc, doc.view().roots[0], { text: "Child", note: "A note" });
+  backend.shared = { projectId: doc.id, data: base64(doc.snapshot()) };
+  doc.destroy();
+  await page.routeWebSocket(/\/sync\/share\//, () => {});
+  await page.goto(new URL("/s/token", appUrl).href);
+  await page.locator("[data-node-id]").filter({ hasText: "Child" }).click();
+  await page.getByRole("complementary", { name: "Notes" }).waitFor();
+  // The docked outline narrows the map, which pans the idea under the notes
+  // until the map centres it beside them.
+  await page.getByRole("button", { name: "Outline", exact: true }).click();
+  await page.getByRole("complementary", { name: "Outline" }).waitFor();
+  // Checked only once the drawer and the map have stopped moving: before the
+  // drawer opens, the idea is clear of the notes too.
+  await page.waitForFunction(() => {
+    const moving = [".outline-dock", ".map-layer"].some(
+      (selector) => document.querySelector(selector)?.getAnimations().length,
+    );
+    const idea = [...document.querySelectorAll("[data-node-id]")].find((node) =>
+      node.textContent?.includes("Child"),
+    );
+    const notes = document.querySelector('aside[aria-label="Notes"]');
+    return (
+      !moving &&
+      !!idea &&
+      !!notes &&
+      idea.getBoundingClientRect().right < notes.getBoundingClientRect().left
+    );
+  });
+});
+
 test("an unknown address shows a page with a way back", async () => {
   await page.goto(new URL("/no/such/page", appUrl).href);
   await page.getByRole("heading", { name: "Page not found" }).waitFor();
