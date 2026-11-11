@@ -6,6 +6,9 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "VITE_");
   return {
     plugins: [tailwindcss(), solid()],
+    // Maps without a sourceMappingURL comment: the web Dockerfile uploads them
+    // to PostHog error tracking and deletes them before anything is served.
+    build: { sourcemap: "hidden" },
     server: {
       port: Number(process.env.WEBAPP_PORT ?? "5173"),
       strictPort: true,

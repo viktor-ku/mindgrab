@@ -12,7 +12,9 @@ Railway runs two services from the `live` branch, both rooted at `/`:
   Its healthcheck path is `/`.
 - `web` builds `webapp/Dockerfile` and serves the static webapp at `mindgrab.app`.
   Its healthcheck path is `/`. `VITE_BACKEND_URL=https://api.mindgrab.app` is a
-  build variable on this service.
+  build variable on this service. `POSTHOG_CLI_API_KEY`, a PostHog personal API
+  key with error tracking write access, lets the build upload source maps so
+  exceptions in PostHog show original code. Without it the build skips the upload.
 
 Both domains are proxied through Cloudflare. They scale and deploy independently:
 watch patterns limit each service to its own files, plus `crates/`, `tooling/` and
