@@ -1427,11 +1427,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setHistoryRevision((n) => n + 1);
       const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
-      // Undo from inside the notes panel keeps the person writing notes
-      // instead of reopening the idea's title editor.
+      // Undo from inside the notes panel keeps the person writing there
+      // instead of reopening the idea's title editor on the map.
       const resumeWriting =
         selection.writing &&
-        !document.activeElement?.matches('textarea[aria-label="Idea notes"]');
+        !document.activeElement?.matches(
+          'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
+        );
       setSelectedId(selection.id);
       setWriting(resumeWriting);
       editorSelection = selection.text;
@@ -2412,7 +2414,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const isTextField = (target: EventTarget) =>
     target instanceof Element &&
     target.matches(
-      'textarea[aria-label="Idea notes"], input[aria-label="Project name"]',
+      'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input[aria-label="Project name"]',
     );
   // Chrome that closes while it holds focus (a panel, a menu item, a banner
   // button, a breadcrumb) hands focus back to the map, so keyboard users never
@@ -2683,7 +2685,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else
       (
         next.querySelector<HTMLElement>(
-          'textarea, [role="tree"] [tabindex="0"]',
+          'textarea[aria-label="Idea notes"], [role="tree"] [tabindex="0"]',
         ) ?? next.querySelector<HTMLElement>(focusable)
       )?.focus();
   }
@@ -3137,7 +3139,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         if (
           editor &&
           active !== editor &&
-          !active?.matches('textarea[aria-label="Idea notes"], input')
+          !active?.matches(
+            'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input',
+          )
         )
           editor.focus({ preventScroll: true });
       });
@@ -3927,7 +3931,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const textEditor =
         target instanceof Element &&
         target.matches(
-          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"]',
+          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
         );
       if (
         target instanceof Element &&
@@ -4754,6 +4758,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       <Show when={sidePanel.mounted()}>
         <div
           ref={sidePanel.ref}
+          data-closing={sidePanel.closing() ? "" : undefined}
+          inert={sidePanel.closing()}
           class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
         >
           <SidePanel
@@ -4796,7 +4802,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <NotesPanel
                 doc={session().doc}
                 id={selectedId()}
-                title={nodeLabel(selectedId() ?? "")}
                 onFocusChange={() => session().undo.finishGroup()}
                 onShowOnMap={() => {
                   const id = selectedId();

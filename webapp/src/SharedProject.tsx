@@ -305,14 +305,13 @@ export function SharedProject(props: { token: string }) {
       sideOpen,
       (open) => {
         const id = selectedId();
-        if (!open || !id || canvas.clientWidth < 640) return;
-        const box = canvas
-          .querySelector(`[data-node-id="${CSS.escape(id)}"]`)
-          ?.getBoundingClientRect();
+        const node = id ? positioned().get(id) : undefined;
+        if (!open || !id || !node || canvas.clientWidth < 640) return;
+        // Both from the canvas centre, where the map's origin sits.
+        const right = left() + zoom() * (node.x + node.width - viewOrigin().x);
         const room =
-          canvas.getBoundingClientRect().right -
-          panelEdges(canvas.clientWidth, true).right;
-        if (box && box.right > room) centerOn(id);
+          canvas.clientWidth / 2 - panelEdges(canvas.clientWidth, true).right;
+        if (right > room) centerOn(id);
       },
       { defer: true },
     ),
@@ -492,10 +491,11 @@ export function SharedProject(props: { token: string }) {
     >
       {(id) => (
         <>
-          <NoteHeading
-            title={view()?.text(id()).trim() || "New idea"}
-            onShowOnMap={() => showOnMap(id())}
-          />
+          <NoteHeading onShowOnMap={() => showOnMap(id())}>
+            <h2 class="note-title">
+              {view()?.text(id()).trim() || "New idea"}
+            </h2>
+          </NoteHeading>
           <Show
             when={selectedNote()}
             fallback={
@@ -735,6 +735,8 @@ export function SharedProject(props: { token: string }) {
       <Show when={status() === "ready" && sidePanel.mounted()}>
         <div
           ref={sidePanel.ref}
+          data-closing={sidePanel.closing() ? "" : undefined}
+          inert={sidePanel.closing()}
           class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
         >
           <SidePanel

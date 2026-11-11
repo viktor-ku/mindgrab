@@ -662,8 +662,8 @@ describe("Escape layers", () => {
 
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("complementary", { name: "Notes" });
-    await notes.getByRole("textbox").waitFor();
-    await notes.getByRole("textbox").press("Escape");
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).press("Escape");
     await notes.waitFor({ state: "hidden" });
     expect(await selected()).toBe(current);
 
@@ -981,10 +981,10 @@ describe("dialogs, panels and search", () => {
     expect(await activeLabel()).toBe("Mind map canvas");
 
     // A press on the panel's plain content keeps focus in the panel, so Esc
-    // closes it: the notes' title, and the outline tab's header.
+    // closes it: here the room beside its tabs.
     const notes = page.getByRole("complementary", { name: "Notes" });
     for (const [key, panel, target] of [
-      ["Alt+n", notes, notes.getByRole("heading")],
+      ["Alt+n", notes, notes.getByRole("tablist")],
       ["Alt+o", outline, outline.getByRole("tablist")],
     ] as const) {
       await page.keyboard.press(key);
@@ -999,7 +999,7 @@ describe("dialogs, panels and search", () => {
   test("F6 enters panels at their content and reaches the zoom island", async () => {
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("complementary", { name: "Notes" });
-    await notes.getByRole("textbox").waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
     expect(
       await notes
         .getByRole("button", { name: "Close notes" })
@@ -1008,7 +1008,7 @@ describe("dialogs, panels and search", () => {
     await page.keyboard.press("Escape");
     await notes.waitFor({ state: "hidden" });
     await page.keyboard.press("Alt+n");
-    await notes.getByRole("textbox").waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
     await page.locator('[aria-label="Mind map canvas"]').focus();
 
     // Where focus lands in each region, until the cycle returns to the map.
@@ -1549,9 +1549,13 @@ describe("islands and stacking", () => {
     await notes().waitFor();
     expect(await edges(panel())).toEqual(drawer);
     expect(await tab("Notes").getAttribute("aria-selected")).toBe("true");
-    expect(await notes().getByRole("heading").innerText()).toBe(
-      await node(root).innerText(),
-    );
+    const title = notes().getByRole("textbox", { name: "Idea title" });
+    expect(await title.inputValue()).toBe(await node(root).innerText());
+    // The title is the idea's own text: editing it renames the idea.
+    await title.fill("Renamed in the notes");
+    expect(await node(root).innerText()).toBe("Renamed in the notes");
+    await title.press("Enter");
+    expect(await activeLabel()).toBe("Idea notes");
     expect(await cross.count()).toBe(0);
     // Arrow keys move between the tabs.
     await tab("Notes").focus();

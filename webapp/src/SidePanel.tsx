@@ -22,7 +22,7 @@ export function SidePanel(props: {
   outline: JSX.Element;
   notes: JSX.Element;
 }) {
-  let tabs!: HTMLDivElement;
+  const tabRefs: Partial<Record<SideTab, HTMLButtonElement>> = {};
   const label = () => (props.tab === "outline" ? "Outline" : "Notes");
   function keydown(e: KeyboardEvent) {
     if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -31,9 +31,7 @@ export function SidePanel(props: {
     const index = TABS.findIndex((tab) => tab.id === props.tab);
     const next = TABS[(index + (e.key === "ArrowRight" ? 1 : -1) + 2) % 2];
     props.onTab(next.id);
-    queueMicrotask(() =>
-      tabs.querySelector<HTMLElement>('[aria-selected="true"]')?.focus(),
-    );
+    tabRefs[next.id]?.focus();
   }
   return (
     <aside
@@ -48,7 +46,6 @@ export function SidePanel(props: {
     >
       <header class="flex items-center gap-2 border-b border-stone-100 py-1.5 pr-1.5 pl-1.5">
         <div
-          ref={tabs}
           role="tablist"
           aria-label="Side panel"
           class="flex min-w-0 flex-1 items-center gap-0.5"
@@ -57,6 +54,9 @@ export function SidePanel(props: {
           <For each={TABS}>
             {(tab) => (
               <button
+                ref={(el) => {
+                  tabRefs[tab.id] = el;
+                }}
                 type="button"
                 role="tab"
                 id={`side-tab-${tab.id}`}
