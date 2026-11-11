@@ -1996,7 +1996,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   });
   // Programmatic view changes ease into place; direct manipulation does not.
   const [easingView, setEasingView] = createSignal(false);
-  const stopEasingView = debounce(() => setEasingView(false), 220);
+  const stopEasingView = debounce(() => setEasingView(false), 160);
   function moveView(next: { left: number; top: number; zoom?: number }) {
     batch(() => {
       setEasingView(true);
@@ -4140,7 +4140,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       >
         Open map…
         <ChevronRightIcon
-          class={`ml-auto size-4 transition-transform ${showLoad() ? "rotate-90" : ""}`}
+          class={`ml-auto size-4 transition-transform duration-100 ${showLoad() ? "rotate-90" : ""}`}
         />
       </button>
       <Show when={showLoad()}>
@@ -5660,7 +5660,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               Backup and export
               <ChevronRightIcon
-                class={`ml-auto size-4 transition-transform ${showBackup() ? "rotate-90" : ""}`}
+                class={`ml-auto size-4 transition-transform duration-100 ${showBackup() ? "rotate-90" : ""}`}
               />
             </button>
             <Show when={showBackup()}>

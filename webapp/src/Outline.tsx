@@ -143,7 +143,7 @@ export function Outline(props: {
                   })}
                 >
                   <ChevronRightIcon
-                    class={`size-3.5 transition-transform ${open() ? "rotate-90" : ""}`}
+                    class={`size-3.5 transition-transform duration-100 ${open() ? "rotate-90" : ""}`}
                   />
                 </button>
               </Show>
