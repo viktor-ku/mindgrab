@@ -272,7 +272,7 @@ export function SharedProject(props: { token: string }) {
   const [zoom, setZoom] = createSignal(1);
   const [easing, setEasing] = createSignal(false);
   const [panning, setPanning] = createSignal(false);
-  const stopEasing = debounce(() => setEasing(false), 220);
+  const stopEasing = debounce(() => setEasing(false), 160);
   function moveView(next: { left: number; top: number; zoom?: number }) {
     batch(() => {
       setEasing(true);
