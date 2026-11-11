@@ -22,5 +22,6 @@
   },
   "files": {
     "includes": ["**", "!public", "!src/generated"]
-  }
+  },
+  "plugins": ["./lint/press-not-click.grit"]
 }

@@ -46,6 +46,7 @@ import {
   sharedProjectSocket,
 } from "./shared-project";
 import { panelInsets } from "./view-insets";
+import { press } from "./press";
 
 const ZOOM_MIN = 0.1;
 const ZOOM_MAX = 2.5;
@@ -460,6 +461,7 @@ export function SharedProject(props: { token: string }) {
       onPointerMove={movePointer}
       onPointerUp={stopPointer}
       onPointerCancel={stopPointer}
+      // biome-ignore lint/plugin: A press on the background may start a pan, so only a release without one clears the selection.
       onClick={(e) => {
         if (suppressClick) {
           suppressClick = false;
@@ -606,11 +608,11 @@ export function SharedProject(props: { token: string }) {
               type="button"
               class="primary-button"
               disabled={snapshot.isFetching}
-              onClick={() => {
+              {...press(() => {
                 refetch();
                 // This button disables itself and then goes away.
                 canvas.focus({ preventScroll: true });
-              }}
+              })}
             >
               Retry
             </button>
@@ -654,7 +656,7 @@ export function SharedProject(props: { token: string }) {
               aria-label="Outline"
               title="Outline"
               aria-expanded={outlineOpen()}
-              onClick={() => setOutlineOpen((open) => !open)}
+              {...press(() => setOutlineOpen((open) => !open))}
             >
               <OutlineIcon />
             </button>
@@ -712,10 +714,10 @@ export function SharedProject(props: { token: string }) {
                 class="icon-button size-8!"
                 aria-label="Close notes"
                 title="Close notes (Esc)"
-                onClick={() => {
+                {...press(() => {
                   setNotesDismissed(true);
                   canvas.focus({ preventScroll: true });
-                }}
+                })}
               >
                 <CloseIcon class="size-4" />
               </button>
@@ -739,7 +741,7 @@ export function SharedProject(props: { token: string }) {
             aria-label="Zoom out"
             title="Zoom out"
             disabled={zoom() <= ZOOM_MIN}
-            onClick={() => changeZoom(zoom() / 1.2)}
+            {...press(() => changeZoom(zoom() / 1.2))}
           >
             <MinusIcon />
           </button>
@@ -748,7 +750,7 @@ export function SharedProject(props: { token: string }) {
             class="map-control h-9 min-w-14 px-1! tabular-nums max-sm:hidden"
             aria-label="Zoom to 100%"
             title="Zoom to 100%"
-            onClick={() => changeZoom(1)}
+            {...press(() => changeZoom(1))}
           >
             {Math.round(zoom() * 100)}%
           </button>
@@ -758,7 +760,7 @@ export function SharedProject(props: { token: string }) {
             aria-label="Zoom in"
             title="Zoom in"
             disabled={zoom() >= ZOOM_MAX}
-            onClick={() => changeZoom(zoom() * 1.2)}
+            {...press(() => changeZoom(zoom() * 1.2))}
           >
             <PlusIcon />
           </button>
@@ -769,7 +771,7 @@ export function SharedProject(props: { token: string }) {
             aria-label="Fit map"
             title="Fit map"
             disabled={!forest().length}
-            onClick={fitMap}
+            {...press(fitMap)}
           >
             <FitMapIcon />
           </button>

@@ -1585,11 +1585,6 @@ describe("buttons and controls", () => {
       .getByRole("button", { name: "Sign in" });
     await signIn.hover();
     await background(signIn, "rgb(255, 255, 255)");
-    await page.mouse.down();
-    await background(signIn, "rgb(232, 234, 239)");
-    // Off the button before letting go, so the press does not sign in.
-    await page.mouse.move(600, 400);
-    await page.mouse.up();
   });
 
   test("toolbar rows are 44px with 36px controls, and disabled labels stay readable", async () => {

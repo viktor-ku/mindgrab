@@ -8,6 +8,7 @@ import { Dialog } from "./Dialog";
 import { LoroApi, SyncError } from "./loro-api";
 import { shareUrl } from "./shared-project";
 import { MOD_LABEL } from "./ShortcutsDialog";
+import { press } from "./press";
 
 // One view-only link per project. The link only exists in Mindgrab Cloud, so
 // sharing needs an account and cloud saving.
@@ -109,7 +110,7 @@ export function ShareDialog(props: {
                     <button
                       type="button"
                       class="map-control outlined mt-2"
-                      onClick={() => props.onSignIn?.()}
+                      {...press(() => props.onSignIn?.())}
                     >
                       Sign in
                     </button>
@@ -124,7 +125,7 @@ export function ShareDialog(props: {
               <button
                 type="button"
                 class="map-control outlined mt-2"
-                onClick={props.onOpenPreferences}
+                {...press(props.onOpenPreferences)}
               >
                 Open project preferences
               </button>
@@ -156,9 +157,9 @@ export function ShareDialog(props: {
             ref={linkSwitch}
             aria-disabled={busy() || link.isError}
             data-busy={busy() ? "" : undefined}
-            onClick={() => {
+            {...press(() => {
               if (!busy() && !link.isError) toggle.mutate(!token());
-            }}
+            })}
           >
             <span>{token() ? "On" : "Off"}</span>
           </button>
@@ -177,7 +178,7 @@ export function ShareDialog(props: {
             <button
               type="button"
               class="primary-button compact shrink-0"
-              onClick={() => copy.mutate(url())}
+              {...press(() => copy.mutate(url()))}
             >
               {copy.isSuccess ? "Copied" : "Copy link"}
             </button>
@@ -208,12 +209,12 @@ export function ShareDialog(props: {
             type="button"
             class="map-control outlined mt-2"
             disabled={busy()}
-            onClick={() => {
+            {...press(() => {
               toggle.reset();
               void link.refetch();
               // This button disables itself and then goes away.
               linkSwitch?.focus();
-            }}
+            })}
           >
             Retry
           </button>

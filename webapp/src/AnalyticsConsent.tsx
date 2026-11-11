@@ -2,6 +2,7 @@ import { createEffect, Show } from "solid-js";
 import { closeConsent, consent, consentOpen, setConsent } from "./analytics";
 import { closeOnEscape } from "./escape-key";
 import { CloseIcon } from "./icons";
+import { press } from "./press";
 
 // "Accept all" has focus when the banner opens, so one click or Enter accepts.
 // "Decline" has the same size and style, as EU consent guidance requires.
@@ -37,7 +38,7 @@ export function AnalyticsConsent() {
               class="icon-button -my-1.5 -mr-1.5 size-8!"
               aria-label="Close analytics choice"
               title="Close analytics choice (Esc)"
-              onClick={closeConsent}
+              {...press(closeConsent)}
             >
               <CloseIcon class="size-4" />
             </button>
@@ -61,14 +62,14 @@ export function AnalyticsConsent() {
             ref={accept}
             type="button"
             class="map-control outlined"
-            onClick={() => setConsent("granted")}
+            {...press(() => setConsent("granted"))}
           >
             Accept all
           </button>
           <button
             type="button"
             class="map-control outlined"
-            onClick={() => setConsent("denied")}
+            {...press(() => setConsent("denied"))}
           >
             Decline
           </button>

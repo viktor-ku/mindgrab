@@ -1,6 +1,7 @@
 import { createEffect, createUniqueId, type JSX, Show } from "solid-js";
 import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
+import { press } from "./press";
 
 // A modal dialog with a title bar. `open` decides whether it shows: Esc, the
 // close button and a click on the backdrop all go through `onClose`.
@@ -65,7 +66,7 @@ export function Dialog(props: {
           autofocus={props.variant === "panel"}
           aria-label={props.closeLabel}
           title={`${props.closeLabel} (Esc)`}
-          onClick={props.onClose}
+          {...press(props.onClose)}
         >
           <CloseIcon />
         </button>
