@@ -342,6 +342,8 @@ export function Node(props: {
   x: number;
   y: number;
   selected: boolean;
+  // Pointed out from elsewhere, such as its outline row under the pointer.
+  hinted?: boolean;
   writing: boolean;
   dragging: boolean;
   root: boolean;
@@ -411,7 +413,10 @@ export function Node(props: {
       </Show>
       <div
         class={`map-node-card relative flex items-center gap-2 box-border border ${fill()}`}
-        classList={{ "map-node-selected": props.selected }}
+        classList={{
+          "map-node-selected": props.selected,
+          "map-node-hinted": props.hinted && !props.selected,
+        }}
         style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
       >
         <Show
@@ -2395,6 +2400,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
 
   // The side panel on the right, open on one of its tabs: the outline or the
   // selected idea's notes.
+  // The idea whose outline row is under the pointer, pointed out on the map.
+  const [hintedId, setHintedId] = createSignal<string>();
   const [sideTab, setSideTab] = createSignal<SideTab | undefined>(
     storedFlag(OUTLINE_KEY) ? "outline" : undefined,
   );
@@ -4797,6 +4804,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 onToggle={(id) => toggleCollapse(id, false)}
                 onEdit={write}
                 hasNote={(id) => !!view().note(id).trim()}
+                onHover={setHintedId}
                 onOpenNotes={(id) => {
                   finishWriting();
                   setColorScope("node");
@@ -5238,6 +5246,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 x={node().x}
                 y={node().y}
                 selected={selectedId() === id}
+                hinted={hintedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
                 root={!details().get(id)?.parent || focusId() === id}

@@ -856,6 +856,13 @@ kbd {
     0 0 0 2px var(--paper),
     0 0 0 4px var(--accent) !important;
 }
+/* Pointed out from its outline row: a softer ring than the selection's, so
+   the map shows where the row is without moving. */
+.map-node-card.map-node-hinted {
+  box-shadow:
+    0 0 0 2px var(--paper),
+    0 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
 .map-node-dragging {
   z-index: 10;
   opacity: 0.75;

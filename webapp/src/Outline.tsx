@@ -1,4 +1,4 @@
-import { createEffect, For, Show } from "solid-js";
+import { createEffect, For, onCleanup, Show } from "solid-js";
 import { ChevronRightIcon, NoteIcon } from "./icons";
 import type { MindMapNode } from "./mind-map";
 import { press } from "./press";
@@ -19,7 +19,10 @@ export function Outline(props: {
   // Whether an idea has notes, and opening them on the Notes tab.
   hasNote: (id: string) => boolean;
   onOpenNotes: (id: string) => void;
+  // The row under the pointer, so the map can point out its idea.
+  onHover: (id: string | undefined) => void;
 }) {
+  onCleanup(() => props.onHover(undefined));
   let tree!: HTMLDivElement;
   // Items in display order, honoring folds, for keyboard movement.
   const visible = () => {
@@ -126,6 +129,8 @@ export function Outline(props: {
               style={{ "padding-left": `${(branch.level - 1) * 14 + 4}px` }}
               {...press(() => props.onSelect(node.id, "pointer"))}
               onDblClick={() => props.onEdit(node.id)}
+              onPointerEnter={() => props.onHover(node.id)}
+              onPointerLeave={() => props.onHover(undefined)}
             >
               <Show
                 when={children().length}

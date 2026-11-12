@@ -1542,6 +1542,18 @@ describe("islands and stacking", () => {
     expect(await box(root)).toEqual(start);
     const tab = (name: string) => page.getByRole("tab", { name });
     expect(await tab("Outline").getAttribute("aria-selected")).toBe("true");
+    // A row under the pointer points out its idea on the map, which stays.
+    const child = await addChild(root, "Pointed out");
+    await node(root).click();
+    const hinted = page.locator(".map-node-hinted");
+    const row = outline().getByRole("treeitem", { name: "Pointed out" });
+    const placed = await box(child);
+    await row.locator(".outline-row").hover();
+    expect(await hinted.count()).toBe(1);
+    expect(await node(child).locator(".map-node-hinted").count()).toBe(1);
+    expect(await box(child)).toEqual(placed);
+    await page.mouse.move(100, 600);
+    expect(await hinted.count()).toBe(0);
 
     // The notes open the same drawer on their tab, titled by the idea, and
     // the outline toggle is no longer a cross.

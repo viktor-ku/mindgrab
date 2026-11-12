@@ -253,6 +253,8 @@ export function SharedProject(props: { token: string }) {
   // The side panel, as in the editor: the outline or the selected idea's
   // notes. Selecting an idea with notes opens it on its notes.
   const [sideTab, setSideTab] = createSignal<SideTab>();
+  // The idea whose outline row is under the pointer, pointed out on the map.
+  const [hintedId, setHintedId] = createSignal<string>();
   const sideOpen = () => sideTab() !== undefined;
   const outlineOpen = () => sideTab() === "outline";
   // The panel stays while it slides out.
@@ -593,6 +595,7 @@ export function SharedProject(props: { token: string }) {
                       x={node().x}
                       y={node().y}
                       selected={selectedId() === id}
+                      hinted={hintedId() === id}
                       writing={false}
                       dragging={false}
                       root={!details().get(id)?.parent}
@@ -765,6 +768,7 @@ export function SharedProject(props: { token: string }) {
                 onToggle={toggleCollapse}
                 onEdit={centerOn}
                 hasNote={(id) => !!view()?.note(id).trim()}
+                onHover={setHintedId}
                 onOpenNotes={(id) => {
                   select(id);
                   setSideTab("notes");
