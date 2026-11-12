@@ -1628,6 +1628,11 @@ describe("islands and stacking", () => {
     expect(before.x + before.width).toBeGreaterThan(drawer.left);
     const after = await box(leaf);
     expect(after.x + after.width).toBeLessThan(drawer.left);
+    // Its first note widens the idea with an icon; the map keeps it clear.
+    await page.keyboard.type("A first note.");
+    const noted = await box(leaf);
+    expect(noted.width).toBeGreaterThan(after.width);
+    expect(noted.x + noted.width).toBeLessThan(drawer.left);
     await page.getByRole("button", { name: "Close notes" }).click();
     await panel().waitFor({ state: "detached" });
 

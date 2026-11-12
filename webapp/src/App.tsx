@@ -2117,11 +2117,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     on(
       [
         selectedId,
-        // While writing, follow the growing node; otherwise only selection
+        // While writing, on the map or in its notes, follow the growing
+        // node (its first note adds an icon); otherwise only selection
         // changes move the view so remote edits never pull it around.
         () => {
           const id = selectedId();
-          const node = writing() && id ? positionedNodes().get(id) : undefined;
+          const node =
+            (writing() || notesOpen()) && id
+              ? positionedNodes().get(id)
+              : undefined;
           return node && `${node.x},${node.y},${node.width},${node.height}`;
         },
       ],
