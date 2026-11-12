@@ -23,6 +23,9 @@ const FOCUSABLE =
 // - Focus leaves before the action and goes to the control after it, as with
 //   a click, unless the action took focus itself, even a microtask later:
 //   into a menu it opens, or back to the map.
+// - An action that stops its event from reaching the controls around it
+//   stops the skipped click too, so a button inside a pressable row does not
+//   press the row on release.
 export function press<T extends HTMLElement = HTMLElement>(
   run: (e: PressEvent<T>) => void,
 ): {
@@ -30,6 +33,7 @@ export function press<T extends HTMLElement = HTMLElement>(
   onClick: JSX.EventHandler<T, MouseEvent>;
 } {
   let pressed = false;
+  let stopped = false;
   return {
     onMouseDown(e) {
       pressed =
@@ -41,6 +45,7 @@ export function press<T extends HTMLElement = HTMLElement>(
       if (document.activeElement instanceof HTMLElement)
         document.activeElement.blur();
       run(e);
+      stopped = e.cancelBubble;
       const target = e.target.closest<HTMLElement>(FOCUSABLE);
       queueMicrotask(() => {
         if (document.activeElement === document.body && target?.isConnected)
@@ -53,6 +58,7 @@ export function press<T extends HTMLElement = HTMLElement>(
       const handled = pressed && e.detail > 0;
       pressed = false;
       if (!handled) run(e);
+      else if (stopped) e.stopPropagation();
     },
   };
 }

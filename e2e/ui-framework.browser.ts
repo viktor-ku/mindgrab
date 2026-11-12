@@ -1554,6 +1554,18 @@ describe("islands and stacking", () => {
     expect(await box(child)).toEqual(placed);
     await page.mouse.move(100, 600);
     expect(await hinted.count()).toBe(0);
+    // A row's fold toggle folds without selecting the row.
+    const deeper = await addChild(child, "Deeper");
+    await node(root).click();
+    const fold = outline()
+      .getByRole("treeitem", { name: "Pointed out", exact: true })
+      .locator(".outline-toggle")
+      .first();
+    await fold.click();
+    await node(deeper).waitFor({ state: "detached" });
+    expect(await selected()).toBe(root);
+    await fold.click();
+    await node(deeper).waitFor();
 
     // The notes open the same drawer on their tab, titled by the idea, and
     // the outline toggle is no longer a cross.

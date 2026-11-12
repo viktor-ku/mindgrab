@@ -2410,6 +2410,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     storedFlag(OUTLINE_KEY) ? "outline" : undefined,
   );
   const sideOpen = () => sideTab() !== undefined;
+  // The tab on screen: the last one open, kept while the panel slides out.
+  const shownTab = createMemo<SideTab>((last) => sideTab() ?? last, "outline");
   const outlineOpen = () => sideTab() === "outline";
   const notesOpen = () => sideTab() === "notes";
   // Opening a tab shows it in the panel; closing it closes the panel only
@@ -4774,7 +4776,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
         >
           <SidePanel
-            tab={sideTab() ?? "outline"}
+            tab={shownTab()}
             onTab={(tab) => {
               finishWriting();
               setSideTab(tab);

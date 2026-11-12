@@ -1392,10 +1392,28 @@ test("in the shared view, an idea's notes open in the side panel, clear of the i
       .getByRole("tab", { name: "Outline" })
       .getAttribute("aria-selected"),
   ).toBe("true");
+  // Folding a branch from its row leaves the selection, and Show on map
+  // unfolds the branch again to reach the idea.
+  await page
+    .getByRole("treeitem", { name: "Root" })
+    .locator(".outline-toggle")
+    .first()
+    .click();
+  await idea.waitFor({ state: "detached" });
   await page.getByRole("tab", { name: "Notes" }).click();
-  await notes
-    .getByRole("button", { name: "Show on map" })
-    .click({ trial: true });
+  await notes.getByRole("button", { name: "Show on map" }).click();
+  await idea.waitFor();
+  // While the panel slides out it keeps the tab it was on.
+  expect(
+    await page.evaluate(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Close notes"]')
+        ?.click();
+      await Promise.resolve();
+      const closing = document.querySelector(".side-drawer[data-closing]");
+      return closing?.querySelector("aside")?.getAttribute("aria-label");
+    }),
+  ).toBe("Notes");
 });
 
 test("an unknown address shows a page with a way back", async () => {

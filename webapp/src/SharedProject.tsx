@@ -256,6 +256,8 @@ export function SharedProject(props: { token: string }) {
   // The idea whose outline row is under the pointer, pointed out on the map.
   const [hintedId, setHintedId] = createSignal<string>();
   const sideOpen = () => sideTab() !== undefined;
+  // The tab on screen: the last one open, kept while the panel slides out.
+  const shownTab = createMemo<SideTab>((last) => sideTab() ?? last, "outline");
   const outlineOpen = () => sideTab() === "outline";
   // The panel stays while it slides out.
   const sidePanel = createPresence(sideOpen, {
@@ -320,9 +322,18 @@ export function SharedProject(props: { token: string }) {
   );
   // "Show on map" in the notes. On phones the panel covers the map, so it
   // closes first.
+  // The idea, unfolded and centred beside the panel, as in the editor.
   function showOnMap(id: string) {
     if (canvas.clientWidth < 640) setSideTab(undefined);
-    centerOn(id);
+    const next = new Set(collapsedIds());
+    for (
+      let parent = details().get(id)?.parent;
+      parent;
+      parent = details().get(parent)?.parent
+    )
+      next.delete(parent);
+    if (next.size !== collapsedIds().size) setCollapsedIds(next);
+    queueMicrotask(() => centerOn(id));
   }
   function fitMap() {
     const nodes = layout().nodes;
@@ -743,7 +754,7 @@ export function SharedProject(props: { token: string }) {
           class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
         >
           <SidePanel
-            tab={sideTab() ?? "outline"}
+            tab={shownTab()}
             onTab={setSideTab}
             onClose={() => {
               setSideTab(undefined);
