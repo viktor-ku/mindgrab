@@ -662,8 +662,8 @@ describe("Escape layers", () => {
 
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("complementary", { name: "Notes" });
-    await notes.getByRole("textbox").waitFor();
-    await notes.getByRole("textbox").press("Escape");
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).press("Escape");
     await notes.waitFor({ state: "hidden" });
     expect(await selected()).toBe(current);
 
@@ -980,12 +980,15 @@ describe("dialogs, panels and search", () => {
     expect(await selected()).toBe(root);
     expect(await activeLabel()).toBe("Mind map canvas");
 
-    // A press on a panel's title keeps focus in the panel, so Esc closes it.
-    await page.keyboard.press("Alt+o");
-    await page.keyboard.press("Alt+n");
+    // A press on the panel's plain content keeps focus in the panel, so Esc
+    // closes it: here the room beside its tabs.
     const notes = page.getByRole("complementary", { name: "Notes" });
-    for (const panel of [notes, outline]) {
-      await panel.getByRole("heading").click();
+    for (const [key, panel, target] of [
+      ["Alt+n", notes, notes.getByRole("tablist")],
+      ["Alt+o", outline, outline.getByRole("tablist")],
+    ] as const) {
+      await page.keyboard.press(key);
+      await target.click({ position: { x: 150, y: 10 } });
       await page.keyboard.press("Escape");
       await panel.waitFor({ state: "hidden" });
       expect(await selected()).toBe(root);
@@ -994,10 +997,9 @@ describe("dialogs, panels and search", () => {
   });
 
   test("F6 enters panels at their content and reaches the zoom island", async () => {
-    await page.keyboard.press("Alt+o");
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("complementary", { name: "Notes" });
-    await notes.getByRole("textbox").waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
     expect(
       await notes
         .getByRole("button", { name: "Close notes" })
@@ -1006,24 +1008,31 @@ describe("dialogs, panels and search", () => {
     await page.keyboard.press("Escape");
     await notes.waitFor({ state: "hidden" });
     await page.keyboard.press("Alt+n");
-    await notes.getByRole("textbox").waitFor();
+    await notes.getByRole("textbox", { name: "Idea notes" }).waitFor();
     await page.locator('[aria-label="Mind map canvas"]').focus();
 
     // Where focus lands in each region, until the cycle returns to the map.
-    const stops: string[] = [];
-    for (let presses = 0; presses < 12; presses++) {
-      await page.keyboard.press("F6");
-      const stop = await page.evaluate(() => {
-        const active = document.activeElement;
-        const region = active?.closest("[data-toolbar][aria-label]");
-        return `${region?.getAttribute("aria-label") ?? "canvas"}: ${active?.getAttribute("role") ?? active?.tagName.toLowerCase()}`;
-      });
-      if (stop.startsWith("canvas")) break;
-      stops.push(stop);
-    }
+    const cycle = async () => {
+      const stops: string[] = [];
+      for (let presses = 0; presses < 12; presses++) {
+        await page.keyboard.press("F6");
+        const stop = await page.evaluate(() => {
+          const active = document.activeElement;
+          const region = active?.closest("[data-toolbar][aria-label]");
+          return `${region?.getAttribute("aria-label") ?? "canvas"}: ${active?.getAttribute("role") ?? active?.tagName.toLowerCase()}`;
+        });
+        if (stop.startsWith("canvas")) break;
+        stops.push(stop);
+      }
+      return stops;
+    };
+    const stops = await cycle();
     expect(stops).toContain("Notes: textarea");
-    expect(stops).toContain("Outline: treeitem");
     expect(stops).toContain("View and help: button");
+    // The panel shows one tab at a time; on the outline it enters the tree.
+    await page.keyboard.press("Alt+o");
+    await page.locator('[aria-label="Mind map canvas"]').focus();
+    expect(await cycle()).toContain("Outline: treeitem");
   });
 
   test("ideas are not tab stops, and an arrow key selects the first idea", async () => {
@@ -1451,37 +1460,41 @@ describe("islands and stacking", () => {
     expect(Math.abs((await edges(toolbar)).center - 512)).toBeLessThan(1);
   });
 
-  test("the top bars stack in the strip between the open panels", async () => {
+  // The side panel's drawer and its tabs: the outline, or the selected idea's
+  // notes.
+  const panel = () => page.locator(".side-panel");
+
+  test("the top bars stay left of the side panel", async () => {
     await page.setViewportSize({ width: 1024, height: 700 });
     const { c } = await chain();
     await page.keyboard.press("Alt+o");
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(c).click();
     await page.keyboard.press("Alt+f");
-    await notesButton().click();
     const crumbs = page.getByRole("navigation", { name: "Branch focus" });
     const between = async (bar: ReturnType<typeof region>) => {
       const bounds = await edges(bar);
-      expect(bounds.left).toBeGreaterThan((await edges(outline())).right);
-      expect(bounds.right).toBeLessThan((await edges(notes())).left);
+      expect(bounds.left).toBeGreaterThanOrEqual(12);
+      expect(bounds.right).toBeLessThan((await edges(panel())).left);
       return bounds;
     };
     await between(crumbs);
-    // The panels' own controls stay in reach.
+    // The notes open in the same panel, on their own tab.
+    const drawer = await edges(panel());
+    await notesButton().click();
+    await notes().waitFor();
+    expect(await edges(notes())).toEqual(drawer);
     await page.getByRole("button", { name: "Close notes" }).click({
-      trial: true,
-    });
-    await page.getByRole("button", { name: "Close outline" }).click({
       trial: true,
     });
 
     await page.getByRole("button", { name: "Search", exact: true }).click();
     const field = page.getByRole("searchbox", { name: "Search ideas" });
     await field.fill("needle");
-    // Search steps aside for the notes it would cover.
+    // Search steps aside for the panel it would cover.
     expect(
       (await edges(page.getByRole("search", { name: "Search ideas" }))).right,
-    ).toBeLessThan((await edges(notes())).left);
+    ).toBeLessThan(drawer.left);
     await field.press("Enter");
     const back = await between(
       page.getByRole("navigation", { name: "Return from search" }),
@@ -1492,8 +1505,8 @@ describe("islands and stacking", () => {
     // out: the focused branch is never clipped away.
     const place = crumbs.locator('[aria-current="location"]');
     for (const [width, height, steps] of [
-      [1024, 700, 0],
       [800, 600, 0],
+      [1024, 700, 3],
       [1440, 900, 3],
     ]) {
       await page.setViewportSize({ width, height });
@@ -1509,43 +1522,138 @@ describe("islands and stacking", () => {
     }
   });
 
-  test("the outline starts under the storage island", async () => {
-    await page.getByRole("button", { name: "Project menu" }).click();
-    await page.getByRole("menuitem", { name: "Project preferences…" }).click();
-    const dialog = page.getByRole("dialog", { name: "Project preferences" });
-    await dialog.getByRole("switch", { name: "Save locally" }).click();
-    await dialog.getByText("This map lives only in memory.").waitFor();
-    await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "hidden" });
-    const island = page.locator(".map-toolbar", {
-      hasText: "In memory only",
+  test("the outline and the notes are tabs of one drawer over the map", async () => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const root = await rootId();
+    await node(root).click();
+    const start = await box(root);
+    const toggle = page.getByRole("button", { name: "Outline", exact: true });
+    const cross = toggle.locator("[data-open]");
+    expect(await cross.count()).toBe(0);
+    await toggle.click();
+    await outline().waitFor();
+    expect(await cross.count()).toBe(1);
+    expect(await toggle.getAttribute("title")).toContain("Close outline");
+    // At the right edge under the toolbar, over the map, which stays put.
+    const drawer = await edges(panel());
+    expect(Math.abs(drawer.right - (1280 - 12))).toBeLessThan(1);
+    expect(Math.round(drawer.right - drawer.left)).toBe(448);
+    expect(drawer.top).toBeGreaterThan((await edges(toggle)).bottom);
+    expect(await box(root)).toEqual(start);
+    const tab = (name: string) => page.getByRole("tab", { name });
+    expect(await tab("Outline").getAttribute("aria-selected")).toBe("true");
+    // A row under the pointer points out its idea on the map, which stays.
+    const child = await addChild(root, "Pointed out");
+    await node(root).click();
+    const hinted = page.locator(".map-node-hinted");
+    const row = outline().getByRole("treeitem", { name: "Pointed out" });
+    const placed = await box(child);
+    await row.locator(".outline-row").hover();
+    expect(await hinted.count()).toBe(1);
+    expect(await node(child).locator(".map-node-hinted").count()).toBe(1);
+    expect(await box(child)).toEqual(placed);
+    await page.mouse.move(100, 600);
+    expect(await hinted.count()).toBe(0);
+    // A row's fold toggle folds without selecting the row.
+    const deeper = await addChild(child, "Deeper");
+    await node(root).click();
+    const fold = outline()
+      .getByRole("treeitem", { name: "Pointed out", exact: true })
+      .locator(".outline-toggle")
+      .first();
+    await fold.click();
+    await node(deeper).waitFor({ state: "detached" });
+    expect(await selected()).toBe(root);
+    await fold.click();
+    await node(deeper).waitFor();
+
+    // The notes open the same drawer on their tab, titled by the idea, and
+    // the outline toggle is no longer a cross.
+    await notesButton().click();
+    await notes().waitFor();
+    expect(await edges(panel())).toEqual(drawer);
+    expect(await tab("Notes").getAttribute("aria-selected")).toBe("true");
+    const title = notes().getByRole("textbox", { name: "Idea title" });
+    expect(await title.inputValue()).toBe(await node(root).innerText());
+    // The title is the idea's own text: editing it renames the idea.
+    await title.fill("Renamed in the notes");
+    expect(await node(root).innerText()).toBe("Renamed in the notes");
+    await title.press("Enter");
+    expect(await activeLabel()).toBe("Idea notes");
+    // And writing on the map shows in the title as it is typed.
+    await node(root).dblclick();
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("Renamed on the map");
+    expect(await title.inputValue()).toBe("Renamed on the map");
+    await page.keyboard.press("Enter");
+    expect(await title.inputValue()).toBe("Renamed on the map");
+    expect(await cross.count()).toBe(0);
+    // Arrow keys move between the tabs.
+    await tab("Notes").focus();
+    await page.keyboard.press("ArrowLeft");
+    await outline().waitFor();
+    expect(await activeLabel()).toBe(null);
+    await page.keyboard.press("ArrowRight");
+    await notes().waitFor();
+
+    // Each outline row opens its idea's notes, shown on ideas that have some.
+    await notes()
+      .getByRole("textbox", { name: "Idea notes" })
+      .fill("Its notes.");
+    await tab("Outline").click();
+    const noteButton = outline().getByRole("button", {
+      name: "Notes for Renamed on the map",
     });
-    await island.waitFor();
-    await page.keyboard.press("Alt+o");
-    expect((await edges(outline())).top).toBeGreaterThan(
-      (await edges(island)).bottom,
-    );
-    await page.getByRole("button", { name: "Close outline" }).click();
-    await outline().waitFor({ state: "hidden" });
+    expect(await noteButton.getAttribute("data-has-note")).toBe("");
+    await node(root).click();
+    await page.keyboard.press("Escape");
+    await noteButton.click();
+    await notes().waitFor();
+    expect(await selected()).toBe(root);
+    // Ready to write: the notes field has the keyboard.
+    expect(await activeLabel()).toBe("Idea notes");
+    expect(await title.inputValue()).toBe("Renamed on the map");
+
+    // "Show on map" brings the idea back, centred beside the drawer.
+    await page.mouse.move(200, 200);
+    await page.mouse.wheel(300, 300);
+    await settle();
+    expect((await box(root)).x).not.toBe(start.x);
+    await notes().getByRole("button", { name: "Show on map" }).click();
+    await settle();
+    const shown = await box(root);
+    const room = (24 + drawer.left - 16) / 2;
+    expect(Math.abs(shown.x + shown.width / 2 - room)).toBeLessThan(2);
+
+    await page.getByRole("button", { name: "Close notes" }).click();
+    await panel().waitFor({ state: "detached" });
+    expect(await cross.count()).toBe(0);
   });
 
   test("a panel that opens over the selected idea moves the map aside", async () => {
-    const { root, leaf } = await chain();
+    const { leaf } = await chain();
     await page.getByRole("button", { name: "Fit map" }).click();
     await node(leaf).click();
     const before = await box(leaf);
     await notesButton().click();
-    const panel = await edges(notes());
-    expect(before.x + before.width).toBeGreaterThan(panel.left);
+    const drawer = await edges(notes());
+    expect(before.x + before.width).toBeGreaterThan(drawer.left);
     const after = await box(leaf);
-    expect(after.x + after.width).toBeLessThan(panel.left);
+    expect(after.x + after.width).toBeLessThan(drawer.left);
+    // Its first note widens the idea with an icon; the map keeps it clear.
+    await page.keyboard.type("A first note.");
+    const noted = await box(leaf);
+    expect(noted.width).toBeGreaterThan(after.width);
+    expect(noted.x + noted.width).toBeLessThan(drawer.left);
     await page.getByRole("button", { name: "Close notes" }).click();
+    await panel().waitFor({ state: "detached" });
 
     await page.getByRole("button", { name: "Fit map" }).click();
-    await node(root).click();
-    expect((await box(root)).x).toBeLessThan(300);
+    await node(leaf).click();
     await page.keyboard.press("Alt+o");
-    expect((await box(root)).x).toBeGreaterThan((await edges(outline())).right);
+    expect((await box(leaf)).x + (await box(leaf)).width).toBeLessThan(
+      (await edges(outline())).left,
+    );
   });
 });
 
@@ -1645,9 +1753,9 @@ describe("buttons and controls", () => {
     await page.waitForFunction(
       () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
     );
-    expect(await style(notes, "box-shadow")).toContain(
-      `${ACCENT} 0px 0px 0px 2px inset`,
-    );
+    // Writing notes shows only the caret: no ring around the tab's body.
+    expect(await style(notes, "box-shadow")).toBe("none");
+    expect(await style(notes, "outline-style")).toBe("none");
     await page.keyboard.press("Escape");
 
     await page

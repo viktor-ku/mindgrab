@@ -17,7 +17,6 @@ import { Node } from "./App";
 import { track } from "./analytics";
 import {
   BrandMark,
-  CloseIcon,
   FitMapIcon,
   MinusIcon,
   OutlineIcon,
@@ -33,7 +32,9 @@ import {
 } from "./mind-map";
 import type { NodeSize } from "./mind-map";
 import { NODE_COLORS } from "./node-colors";
+import { NoteHeading } from "./NotesPanel";
 import { Outline } from "./Outline";
+import { createPresence } from "./presence";
 import {
   ORIGIN,
   openProjectDocument,
@@ -45,7 +46,8 @@ import {
   SharedProjectError,
   sharedProjectSocket,
 } from "./shared-project";
-import { panelInsets } from "./view-insets";
+import { type SideTab, SidePanel } from "./SidePanel";
+import { panelEdges, panelInsets } from "./view-insets";
 import { press } from "./press";
 
 const ZOOM_MIN = 0.1;
@@ -248,8 +250,19 @@ export function SharedProject(props: { token: string }) {
   );
 
   const [selectedId, setSelectedId] = createSignal<string>();
-  const [notesDismissed, setNotesDismissed] = createSignal(false);
-  const [outlineOpen, setOutlineOpen] = createSignal(false);
+  // The side panel, as in the editor: the outline or the selected idea's
+  // notes. Selecting an idea with notes opens it on its notes.
+  const [sideTab, setSideTab] = createSignal<SideTab>();
+  // The idea whose outline row is under the pointer, pointed out on the map.
+  const [hintedId, setHintedId] = createSignal<string>();
+  const sideOpen = () => sideTab() !== undefined;
+  // The tab on screen: the last one open, kept while the panel slides out.
+  const shownTab = createMemo<SideTab>((last) => sideTab() ?? last, "outline");
+  const outlineOpen = () => sideTab() === "outline";
+  // The panel stays while it slides out.
+  const sidePanel = createPresence(sideOpen, {
+    restoreFocus: () => canvas.focus({ preventScroll: true }),
+  });
   const selectedNote = () => {
     const id = selectedId();
     return id && details().has(id) ? (view()?.note(id).trim() ?? "") : "";
@@ -257,7 +270,7 @@ export function SharedProject(props: { token: string }) {
   function select(id?: string) {
     batch(() => {
       setSelectedId(id);
-      setNotesDismissed(false);
+      if (selectedNote() && !sideOpen()) setSideTab("notes");
     });
   }
   // Ideas the owner deletes stop being selected.
@@ -287,14 +300,41 @@ export function SharedProject(props: { token: string }) {
     y: NODE_MIN_HEIGHT / 2,
   });
 
-  // Fit map and outline picks work in the room beside the open panels, as in
+  // Fit map and outline picks work in the room beside the open panel, as in
   // the editor.
-  const viewInsets = () =>
-    panelInsets(
-      canvas.clientWidth,
-      outlineOpen(),
-      !!selectedNote() && !notesDismissed(),
-    );
+  const viewInsets = () => panelInsets(canvas.clientWidth, sideOpen());
+  // A panel that opens over the selected idea moves the map aside.
+  createEffect(
+    on(
+      sideOpen,
+      (open) => {
+        const id = selectedId();
+        const node = id ? positioned().get(id) : undefined;
+        if (!open || !id || !node || canvas.clientWidth < 640) return;
+        // Both from the canvas centre, where the map's origin sits.
+        const right = left() + zoom() * (node.x + node.width - viewOrigin().x);
+        const room =
+          canvas.clientWidth / 2 - panelEdges(canvas.clientWidth, true).right;
+        if (right > room) centerOn(id);
+      },
+      { defer: true },
+    ),
+  );
+  // "Show on map" in the notes. On phones the panel covers the map, so it
+  // closes first.
+  // The idea, unfolded and centred beside the panel, as in the editor.
+  function showOnMap(id: string) {
+    if (canvas.clientWidth < 640) setSideTab(undefined);
+    const next = new Set(collapsedIds());
+    for (
+      let parent = details().get(id)?.parent;
+      parent;
+      parent = details().get(parent)?.parent
+    )
+      next.delete(parent);
+    if (next.size !== collapsedIds().size) setCollapsedIds(next);
+    queueMicrotask(() => centerOn(id));
+  }
   function fitMap() {
     const nodes = layout().nodes;
     if (!nodes.length) return;
@@ -452,6 +492,38 @@ export function SharedProject(props: { token: string }) {
     </div>
   );
 
+  // The Notes tab: the selected idea's title and its notes, read only.
+  const notesTab = () => (
+    <Show
+      when={selectedId()}
+      fallback={
+        <p class="p-4 text-sm text-stone-500">
+          Select an idea to read its notes.
+        </p>
+      }
+    >
+      {(id) => (
+        <>
+          <NoteHeading onShowOnMap={() => showOnMap(id())}>
+            <h2 class="note-title">
+              {view()?.text(id()).trim() || "New idea"}
+            </h2>
+          </NoteHeading>
+          <Show
+            when={selectedNote()}
+            fallback={
+              <p class="p-4 text-sm text-stone-500">This idea has no notes.</p>
+            }
+          >
+            <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
+              {selectedNote()}
+            </p>
+          </Show>
+        </>
+      )}
+    </Show>
+  );
+
   return (
     <section
       ref={canvas}
@@ -474,14 +546,12 @@ export function SharedProject(props: { token: string }) {
           select(undefined);
       }}
       onKeyDown={(e) => {
-        // The outline closes on Esc from inside it, as in the editor.
+        // The side panel closes on Esc from inside it, as in the editor.
+        // On the map, Esc closes the notes that opened with the selection,
+        // then clears the selection.
         if (e.key === "Escape") {
-          if (selectedNote() && !notesDismissed()) {
-            setNotesDismissed(true);
-            // The notes close button goes away while it holds focus.
-            if (e.target.closest('[aria-label="Notes"]'))
-              canvas.focus({ preventScroll: true });
-          } else select(undefined);
+          if (sideTab() === "notes") setSideTab(undefined);
+          else select(undefined);
         }
       }}
       class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
@@ -536,6 +606,7 @@ export function SharedProject(props: { token: string }) {
                       x={node().x}
                       y={node().y}
                       selected={selectedId() === id}
+                      hinted={hintedId() === id}
                       writing={false}
                       dragging={false}
                       root={!details().get(id)?.parent}
@@ -654,11 +725,13 @@ export function SharedProject(props: { token: string }) {
               type="button"
               class="icon-button"
               aria-label="Outline"
-              title="Outline"
+              title={outlineOpen() ? "Close outline" : "Outline"}
               aria-expanded={outlineOpen()}
-              {...press(() => setOutlineOpen((open) => !open))}
+              {...press(() =>
+                setSideTab(outlineOpen() ? undefined : "outline"),
+              )}
             >
-              <OutlineIcon />
+              <OutlineIcon open={outlineOpen()} />
             </button>
           </Show>
         </section>
@@ -671,61 +744,50 @@ export function SharedProject(props: { token: string }) {
         </a>
       </div>
 
-      <Show when={status() === "ready" && outlineOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-          <Outline
-            roots={forest()}
-            text={(id) => view()?.text(id) ?? ""}
-            selectedId={selectedId()}
-            collapsed={collapsedIds()}
-            onSelect={(id, via) => {
-              select(id);
-              centerOn(id);
-              if (via === "pointer" && canvas.clientWidth < 640)
-                setOutlineOpen(false);
-            }}
-            onToggle={toggleCollapse}
-            onEdit={centerOn}
-            shortcut={false}
+      {/* The side panel, a drawer over the map's right edge, as in the
+            editor. */}
+      <Show when={status() === "ready" && sidePanel.mounted()}>
+        <div
+          ref={sidePanel.ref}
+          data-closing={sidePanel.closing() ? "" : undefined}
+          inert={sidePanel.closing()}
+          class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
+        >
+          <SidePanel
+            tab={shownTab()}
+            onTab={setSideTab}
             onClose={() => {
-              setOutlineOpen(false);
+              setSideTab(undefined);
               canvas.focus({ preventScroll: true });
             }}
+            // The shared view has no shortcuts, so its tooltips name none.
+            closeTitle={(tab) =>
+              tab === "outline" ? "Close outline" : "Close notes"
+            }
+            outline={
+              <Outline
+                roots={forest()}
+                text={(id) => view()?.text(id) ?? ""}
+                selectedId={selectedId()}
+                collapsed={collapsedIds()}
+                onSelect={(id, via) => {
+                  select(id);
+                  centerOn(id);
+                  if (via === "pointer" && canvas.clientWidth < 640)
+                    setSideTab(undefined);
+                }}
+                onToggle={toggleCollapse}
+                onEdit={centerOn}
+                hasNote={(id) => !!view()?.note(id).trim()}
+                onHover={setHintedId}
+                onOpenNotes={(id) => {
+                  select(id);
+                  setSideTab("notes");
+                }}
+              />
+            }
+            notes={notesTab()}
           />
-        </div>
-      </Show>
-
-      <Show when={selectedNote() && !notesDismissed()}>
-        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-          <aside
-            data-toolbar
-            aria-label="Notes"
-            class="map-toolbar notes-panel pointer-events-auto flex flex-col cursor-default"
-          >
-            <header class="flex items-start justify-between gap-2 border-b border-stone-100 py-2 pr-1.5 pl-3.5">
-              <div class="min-w-0">
-                <h2 class="panel-title">Notes</h2>
-                <p class="truncate text-xs text-stone-500">
-                  {view()?.text(selectedId() ?? "") || "New idea"}
-                </p>
-              </div>
-              <button
-                type="button"
-                class="icon-button size-8!"
-                aria-label="Close notes"
-                title="Close notes (Esc)"
-                {...press(() => {
-                  setNotesDismissed(true);
-                  canvas.focus({ preventScroll: true });
-                })}
-              >
-                <CloseIcon class="size-4" />
-              </button>
-            </header>
-            <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
-              {selectedNote()}
-            </p>
-          </aside>
         </div>
       </Show>
 

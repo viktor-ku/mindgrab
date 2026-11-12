@@ -159,6 +159,8 @@ import type { CloudStatus } from "./project-sync";
 import { createLocalSave } from "./local-save";
 import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
+import { createPresence } from "./presence";
+import { type SideTab, SidePanel } from "./SidePanel";
 import { panelEdges, panelInsets } from "./view-insets";
 import { press } from "./press";
 
@@ -340,6 +342,8 @@ export function Node(props: {
   x: number;
   y: number;
   selected: boolean;
+  // Pointed out from elsewhere, such as its outline row under the pointer.
+  hinted?: boolean;
   writing: boolean;
   dragging: boolean;
   root: boolean;
@@ -409,7 +413,10 @@ export function Node(props: {
       </Show>
       <div
         class={`map-node-card relative flex items-center gap-2 box-border border ${fill()}`}
-        classList={{ "map-node-selected": props.selected }}
+        classList={{
+          "map-node-selected": props.selected,
+          "map-node-hinted": props.hinted && !props.selected,
+        }}
         style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
       >
         <Show
@@ -1425,11 +1432,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       setHistoryRevision((n) => n + 1);
       const selection = direction === "undo" ? entry.before : entry.after;
       if (!selection) return;
-      // Undo from inside the notes panel keeps the person writing notes
-      // instead of reopening the idea's title editor.
+      // Undo from inside the notes panel keeps the person writing there
+      // instead of reopening the idea's title editor on the map.
       const resumeWriting =
         selection.writing &&
-        !document.activeElement?.matches('textarea[aria-label="Idea notes"]');
+        !document.activeElement?.matches(
+          'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
+        );
       setSelectedId(selection.id);
       setWriting(resumeWriting);
       editorSelection = selection.text;
@@ -2108,11 +2117,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     on(
       [
         selectedId,
-        // While writing, follow the growing node; otherwise only selection
+        // While writing, on the map or in its notes, follow the growing
+        // node (its first note adds an icon); otherwise only selection
         // changes move the view so remote edits never pull it around.
         () => {
           const id = selectedId();
-          const node = writing() && id ? positionedNodes().get(id) : undefined;
+          const node =
+            (writing() || notesOpen()) && id
+              ? positionedNodes().get(id)
+              : undefined;
           return node && `${node.x},${node.y},${node.width},${node.height}`;
         },
       ],
@@ -2389,14 +2402,32 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     }
   }
 
-  const [outlineOpen, setOutlineOpen] = createSignal(storedFlag(OUTLINE_KEY));
-  const [notesOpen, setNotesOpen] = createSignal(false);
+  // The side panel on the right, open on one of its tabs: the outline or the
+  // selected idea's notes.
+  // The idea whose outline row is under the pointer, pointed out on the map.
+  const [hintedId, setHintedId] = createSignal<string>();
+  const [sideTab, setSideTab] = createSignal<SideTab | undefined>(
+    storedFlag(OUTLINE_KEY) ? "outline" : undefined,
+  );
+  const sideOpen = () => sideTab() !== undefined;
+  // The tab on screen: the last one open, kept while the panel slides out.
+  const shownTab = createMemo<SideTab>((last) => sideTab() ?? last, "outline");
+  const outlineOpen = () => sideTab() === "outline";
+  const notesOpen = () => sideTab() === "notes";
+  // Opening a tab shows it in the panel; closing it closes the panel only
+  // while that tab is showing.
+  const showTab = (tab: SideTab, open: boolean) => {
+    if (open) setSideTab(tab);
+    else if (sideTab() === tab) setSideTab(undefined);
+  };
+  const setOutlineOpen = (open: boolean | ((open: boolean) => boolean)) =>
+    showTab("outline", typeof open === "function" ? open(outlineOpen()) : open);
   // A field can be in use before anything is typed into it.
   const [fieldFocused, setFieldFocused] = createSignal(false);
   const isTextField = (target: EventTarget) =>
     target instanceof Element &&
     target.matches(
-      'textarea[aria-label="Idea notes"], input[aria-label="Project name"]',
+      'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input[aria-label="Project name"]',
     );
   // Chrome that closes while it holds focus (a panel, a menu item, a banner
   // button, a breadcrumb) hands focus back to the map, so keyboard users never
@@ -2432,7 +2463,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Opening notes from the keyboard moves focus into them; closing returns it.
   function toggleNotes(open = !notesOpen()) {
     finishWriting();
-    setNotesOpen(open);
+    showTab("notes", open);
     if (open && selectedId())
       queueMicrotask(() =>
         document
@@ -2444,28 +2475,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else canvas.focus({ preventScroll: true });
   }
   createEffect(() => storeFlag(OUTLINE_KEY, outlineOpen()));
-  const viewInsets = () =>
-    panelInsets(canvasSize().width, outlineOpen(), notesOpen());
+  // The panel stays while it slides out.
+  const sidePanel = createPresence(sideOpen, {
+    restoreFocus: () => canvas.focus({ preventScroll: true }),
+  });
+  const viewInsets = () => panelInsets(canvasSize().width, sideOpen());
   // A panel that opens over the selected idea moves the map aside, as
   // selecting that idea with the panel already open would.
   createEffect(
     on(
-      [outlineOpen, notesOpen],
-      (open, before) => {
+      sideOpen,
+      (open) => {
         const id = selectedId();
-        const opened = open.some((now, index) => now && !before?.[index]);
-        if (id && opened && !isPhone()) keepInView(id);
+        if (id && open && !isPhone()) keepInView(id);
       },
       { defer: true },
     ),
   );
-  // The storage island shows in the corner where the outline starts, so the
-  // outline starts 8px under it: the island's top is at 64px.
-  const [storageIslandHeight, setStorageIslandHeight] = createSignal(0);
-  const outlineTop = () =>
-    storageIslandHeight() && !isPhone()
-      ? { top: `${64 + storageIslandHeight() + 8}px` }
-      : undefined;
+  // "Show on map" in the notes: the idea, unfolded and centred beside the
+  // panel. On phones the panel covers the map, so it closes first.
+  function showOnMap(id: string) {
+    if (isPhone()) setSideTab(undefined);
+    revealNode(id);
+    queueMicrotask(() => centerOn(id));
+  }
   // Centred chrome sits in a strip of the canvas, given as its distance from
   // the left and right edges.
   interface Strip {
@@ -2479,7 +2512,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // The top bars keep to the strip between the open panels, 8px clear of
   // each, so they never cover a panel's header.
   const panelStrip = (): Strip => {
-    const edges = panelEdges(canvasSize().width, outlineOpen(), notesOpen());
+    const edges = panelEdges(canvasSize().width, sideOpen());
     return {
       left: edges.left ? edges.left + 8 : 12,
       right: edges.right ? edges.right + 8 : 12,
@@ -2665,7 +2698,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else
       (
         next.querySelector<HTMLElement>(
-          'textarea, [role="tree"] [tabindex="0"]',
+          'textarea[aria-label="Idea notes"], [role="tree"] [tabindex="0"]',
         ) ?? next.querySelector<HTMLElement>(focusable)
       )?.focus();
   }
@@ -3119,7 +3152,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         if (
           editor &&
           active !== editor &&
-          !active?.matches('textarea[aria-label="Idea notes"], input')
+          !active?.matches(
+            'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input',
+          )
         )
           editor.focus({ preventScroll: true });
       });
@@ -3909,7 +3944,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const textEditor =
         target instanceof Element &&
         target.matches(
-          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"]',
+          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
         );
       if (
         target instanceof Element &&
@@ -4482,16 +4517,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
-            ref={(el) => {
-              const observer = new ResizeObserver(() =>
-                setStorageIslandHeight(el.offsetHeight),
-              );
-              observer.observe(el);
-              onCleanup(() => {
-                observer.disconnect();
-                setStorageIslandHeight(0);
-              });
-            }}
           >
             <Show when={memoryOnly()}>
               <p role="status" class="text-amber-800">
@@ -4587,14 +4612,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 type="button"
                 class="icon-button"
                 aria-label="Outline"
-                title={`Outline (${ALT_LABEL}O)`}
+                title={`${outlineOpen() ? "Close outline" : "Outline"} (${ALT_LABEL}O)`}
                 aria-expanded={outlineOpen()}
                 {...press((e) => {
                   setOutlineOpen((open) => !open);
                   backToCanvas(e);
                 })}
               >
-                <OutlineIcon />
+                <OutlineIcon open={outlineOpen()} />
               </button>
             </nav>
             <AccountControls
@@ -4614,11 +4639,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Search ideas"
             // The field fills the island, so the island carries its focus ring.
             class="map-toolbar pointer-events-auto flex w-88 max-w-[calc(100vw-1.5rem)] flex-col cursor-default has-[input:focus-visible]:outline-2 has-[input:focus-visible]:outline-accent"
-            // Beside the notes, not over their header: previews select ideas,
-            // and their notes follow.
+            // Beside the side panel, not over its header: previews select
+            // ideas, and the outline and notes follow.
             classList={{
-              "mr-[21rem] max-w-[calc(100vw-22.5rem)]! xl:mr-[25rem]":
-                notesOpen() && !isPhone(),
+              "mr-[25rem] max-w-[calc(100vw-26.5rem)]! xl:mr-[29rem]":
+                sideOpen() && !isPhone(),
             }}
             ref={(el) => closeOnEscape(el, () => closeSearch(false))}
           >
@@ -4741,42 +4766,71 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           </search>
         </Show>
       </div>
-      <Show when={notesOpen()}>
-        <div class="pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-80 max-w-[calc(100%-1.5rem)] flex-col xl:w-96 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none">
-          <NotesPanel
-            doc={session().doc}
-            id={selectedId()}
-            title={nodeLabel(selectedId() ?? "")}
-            onFocusChange={() => session().undo.finishGroup()}
-            onClose={() => toggleNotes(false)}
-          />
-        </div>
-      </Show>
-      <Show when={outlineOpen()}>
+      {/* The side panel: a drawer over the map's right edge, under the
+            toolbar that opens it. On phones it covers the map. */}
+      <Show when={sidePanel.mounted()}>
         <div
-          class="pointer-events-none absolute top-[4.5rem] bottom-[4.5rem] left-3 z-20 flex w-72 max-w-[calc(100%-1.5rem)] flex-col xl:w-80 max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
-          style={outlineTop()}
+          ref={sidePanel.ref}
+          data-closing={sidePanel.closing() ? "" : undefined}
+          inert={sidePanel.closing()}
+          class="side-drawer pointer-events-none absolute top-[4.5rem] right-3 bottom-[4.5rem] z-20 flex w-96 max-w-[calc(100%-1.5rem)] flex-col xl:w-[28rem] max-sm:inset-3 max-sm:z-40 max-sm:w-auto max-sm:max-w-none"
         >
-          <Outline
-            roots={scopeForest()}
-            text={(id) => view().text(id)}
-            selectedId={selectedId()}
-            collapsed={collapsedIds()}
-            onSelect={(id, via) => {
+          <SidePanel
+            tab={shownTab()}
+            onTab={(tab) => {
               finishWriting();
-              setColorScope("node");
-              setSelectedId(id);
-              // On narrow screens the outline covers the map, so picking an idea
-              // by tap returns to the map; arrow keys keep browsing the outline.
-              if (via === "pointer" && canvasSize().width < 640)
-                setOutlineOpen(false);
+              setSideTab(tab);
             }}
-            onToggle={(id) => toggleCollapse(id, false)}
-            onEdit={write}
             onClose={() => {
-              setOutlineOpen(false);
+              setSideTab(undefined);
               canvas.focus({ preventScroll: true });
             }}
+            closeTitle={(tab) =>
+              tab === "outline"
+                ? `Close outline (${ALT_LABEL}O)`
+                : // Esc, not the Alt shortcut: the notes field keeps that
+                  // key for typing.
+                  "Close notes (Esc)"
+            }
+            outline={
+              <Outline
+                roots={scopeForest()}
+                text={(id) => view().text(id)}
+                selectedId={selectedId()}
+                collapsed={collapsedIds()}
+                onSelect={(id, via) => {
+                  finishWriting();
+                  setColorScope("node");
+                  setSelectedId(id);
+                  // On narrow screens the outline covers the map, so picking an idea
+                  // by tap returns to the map; arrow keys keep browsing the outline.
+                  if (via === "pointer" && canvasSize().width < 640)
+                    setOutlineOpen(false);
+                }}
+                onToggle={(id) => toggleCollapse(id, false)}
+                onEdit={write}
+                hasNote={(id) => !!view().note(id).trim()}
+                onHover={setHintedId}
+                onOpenNotes={(id) => {
+                  finishWriting();
+                  setColorScope("node");
+                  setSelectedId(id);
+                  // Opens the Notes tab ready to write in.
+                  toggleNotes(true);
+                }}
+              />
+            }
+            notes={
+              <NotesPanel
+                doc={session().doc}
+                id={selectedId()}
+                onFocusChange={() => session().undo.finishGroup()}
+                onShowOnMap={() => {
+                  const id = selectedId();
+                  if (id) showOnMap(id);
+                }}
+              />
+            }
           />
         </div>
       </Show>
@@ -5199,6 +5253,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 x={node().x}
                 y={node().y}
                 selected={selectedId() === id}
+                hinted={hintedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}
                 root={!details().get(id)?.parent || focusId() === id}

@@ -1351,6 +1351,71 @@ test("the shared view has editor-sized islands, plain tooltips and a retry that 
   );
 });
 
+test("in the shared view, an idea's notes open in the side panel, clear of the idea", async () => {
+  const doc = createProjectDocument(crypto.randomUUID(), "Shared", {
+    text: "Root",
+  });
+  createChild(doc, doc.view().roots[0], { text: "Child", note: "A note" });
+  backend.shared = { projectId: doc.id, data: base64(doc.snapshot()) };
+  doc.destroy();
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.routeWebSocket(/\/sync\/share\//, () => {});
+  await page.goto(new URL("/s/token", appUrl).href);
+  const idea = page.locator("[data-node-id]").filter({ hasText: "Child" });
+  await idea.click();
+  // Selecting an idea with notes opens them, titled by the idea.
+  const notes = page.getByRole("complementary", { name: "Notes" });
+  await notes.waitFor();
+  expect(await notes.getByRole("heading").innerText()).toBe("Child");
+  expect(await notes.getByText("A note").count()).toBe(1);
+  // The panel would cover the idea, so the map moves it aside once settled.
+  await page.waitForFunction(() => {
+    const moving = [".side-drawer", ".map-layer"].some(
+      (selector) => document.querySelector(selector)?.getAnimations().length,
+    );
+    const idea = [...document.querySelectorAll("[data-node-id]")].find((node) =>
+      node.textContent?.includes("Child"),
+    );
+    const panel = document.querySelector(".side-panel");
+    return (
+      !moving &&
+      !!idea &&
+      !!panel &&
+      idea.getBoundingClientRect().right < panel.getBoundingClientRect().left
+    );
+  });
+  // The outline is the same panel's other tab.
+  await page.getByRole("button", { name: "Outline", exact: true }).click();
+  await page.getByRole("complementary", { name: "Outline" }).waitFor();
+  expect(
+    await page
+      .getByRole("tab", { name: "Outline" })
+      .getAttribute("aria-selected"),
+  ).toBe("true");
+  // Folding a branch from its row leaves the selection, and Show on map
+  // unfolds the branch again to reach the idea.
+  await page
+    .getByRole("treeitem", { name: "Root" })
+    .locator(".outline-toggle")
+    .first()
+    .click();
+  await idea.waitFor({ state: "detached" });
+  await page.getByRole("tab", { name: "Notes" }).click();
+  await notes.getByRole("button", { name: "Show on map" }).click();
+  await idea.waitFor();
+  // While the panel slides out it keeps the tab it was on.
+  expect(
+    await page.evaluate(async () => {
+      document
+        .querySelector<HTMLButtonElement>('button[aria-label="Close notes"]')
+        ?.click();
+      await Promise.resolve();
+      const closing = document.querySelector(".side-drawer[data-closing]");
+      return closing?.querySelector("aside")?.getAttribute("aria-label");
+    }),
+  ).toBe("Notes");
+});
+
 test("an unknown address shows a page with a way back", async () => {
   await page.goto(new URL("/no/such/page", appUrl).href);
   await page.getByRole("heading", { name: "Page not found" }).waitFor();
