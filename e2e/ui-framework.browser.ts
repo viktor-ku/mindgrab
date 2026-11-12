@@ -1598,6 +1598,8 @@ describe("islands and stacking", () => {
     await noteButton.click();
     await notes().waitFor();
     expect(await selected()).toBe(root);
+    // Ready to write: the notes field has the keyboard.
+    expect(await activeLabel()).toBe("Idea notes");
     expect(await title.inputValue()).toBe("Renamed on the map");
 
     // "Show on map" brings the idea back, centred beside the drawer.

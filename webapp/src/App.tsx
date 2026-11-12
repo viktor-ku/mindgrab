@@ -4809,7 +4809,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   finishWriting();
                   setColorScope("node");
                   setSelectedId(id);
-                  setSideTab("notes");
+                  // Opens the Notes tab ready to write in.
+                  toggleNotes(true);
                 }}
               />
             }
