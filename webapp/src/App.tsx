@@ -2186,10 +2186,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const foot = -halfHeight + styleTop() + stylePanelHeight() + 16;
       if (screenLeft + dx < clear && screenTop + dy < foot) {
         // Beside the panel while that keeps the idea clear of the side
-        // panel; in a window too narrow for both, under it.
+        // panel; in a window too narrow for both, under it while that keeps
+        // it above the window's foot. With room for neither it stays where
+        // the window has it, in view behind the panel.
         const beside = clear - screenLeft;
+        const below = foot - screenTop;
         if (screenRight + beside <= halfWidth - insets.right) dx = beside;
-        else dy = foot - screenTop;
+        else if (screenBottom + below <= halfHeight - insets.bottom) dy = below;
       }
     }
     if (dx || dy) moveView({ left: left() + dx, top: top() + dy });
