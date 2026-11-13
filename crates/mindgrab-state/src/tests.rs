@@ -306,6 +306,20 @@ fn colors_are_named_colors_or_tailwind_shades_spelled_one_way() {
         let color: Color = name.parse().unwrap();
         assert_eq!(color.to_string(), name);
     }
+    // The constants are the named colors, each by its own name.
+    for (color, name) in [
+        (Color::BLUE, "blue"),
+        (Color::TEAL, "teal"),
+        (Color::GREEN, "green"),
+        (Color::AMBER, "amber"),
+        (Color::ORANGE, "orange"),
+        (Color::ROSE, "rose"),
+        (Color::VIOLET, "violet"),
+        (Color::SLATE, "slate"),
+    ] {
+        assert_eq!(color.to_string(), name);
+        assert_eq!(name.parse::<Color>().unwrap(), color);
+    }
     for family in COLOR_FAMILIES {
         for shade in COLOR_SHADES {
             let text = format!("{family}-{shade}");

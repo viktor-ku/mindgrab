@@ -2278,6 +2278,24 @@ describe("map colors", () => {
     expect(Math.round((await node(root).boundingBox())?.x ?? 0)).toBe(60);
   });
 
+  test("the quick colors redraw for the selected idea: dark on a central one, white on the rest", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Child");
+    const fill = (name: string) =>
+      panel()
+        .getByRole("button", { name, exact: true })
+        .locator(".style-chip")
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+    await node(root).click();
+    const dark = await fill("Default");
+    expect(dark).not.toBe("rgb(255, 255, 255)");
+    // The panel stays as the selection changes, and its chips follow.
+    await node(child).click();
+    expect(await fill("White")).toBe("rgb(255, 255, 255)");
+    await node(root).click();
+    expect(await fill("Default")).toBe(dark);
+  });
+
   test("new ideas start in the chosen color, and color choices stay out of undo", async () => {
     const root = await rootId();
     await node(root).click();

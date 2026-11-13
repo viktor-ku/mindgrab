@@ -40,13 +40,15 @@ export function StylePanel(props: {
   const custom = () => !props.quick.includes(props.color);
   let more!: HTMLButtonElement;
 
-  const chip = (color: NodeColor) => {
-    const look = nodeLook(color, props.root);
+  // Read as it draws, so the chip follows the idea: its color, and whether
+  // it is a central one.
+  const chip = (color: () => NodeColor) => {
+    const look = () => nodeLook(color(), props.root);
     return (
       <span
         aria-hidden="true"
-        class={`style-chip ${props.root ? "style-chip-root " : ""}${look.class}`}
-        style={look.style}
+        class={`style-chip ${props.root ? "style-chip-root " : ""}${look().class}`}
+        style={look().style}
       >
         Aa
       </span>
@@ -119,7 +121,7 @@ export function StylePanel(props: {
                 onBlur={() => props.onPreview(undefined)}
                 {...press((e) => props.onPick(color, e))}
               >
-                {chip(color)}
+                {chip(() => color)}
               </button>
             )}
           </For>
@@ -145,7 +147,7 @@ export function StylePanel(props: {
                 </span>
               }
             >
-              {chip(props.color)}
+              {chip(() => props.color)}
             </Show>
           </button>
         </div>

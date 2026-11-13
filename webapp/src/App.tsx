@@ -2174,7 +2174,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       -halfWidth + insets.left,
       halfWidth - insets.right,
     );
-    const dy = shift(
+    let dy = shift(
       screenTop,
       screenBottom,
       -halfHeight + insets.top,
@@ -2184,8 +2184,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       // The panel's box with 16px around it, from the canvas centre.
       const clear = -halfWidth + STYLE_PANEL_LEFT + STYLE_PANEL_WIDTH + 16;
       const foot = -halfHeight + styleTop() + stylePanelHeight() + 16;
-      if (screenLeft + dx < clear && screenTop + dy < foot)
-        dx = clear - screenLeft;
+      if (screenLeft + dx < clear && screenTop + dy < foot) {
+        // Beside the panel while that keeps the idea clear of the side
+        // panel; in a window too narrow for both, under it.
+        const beside = clear - screenLeft;
+        if (screenRight + beside <= halfWidth - insets.right) dx = beside;
+        else dy = foot - screenTop;
+      }
     }
     if (dx || dy) moveView({ left: left() + dx, top: top() + dy });
   }
@@ -2619,8 +2624,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const viewInsets = () => panelInsets(canvasSize().width, sideOpen());
   // The style panel's height: its padding, the Apply to section and the Color
   // label come to 118px, and each row of six colors (the plus is one) to 38px.
+  // The rows scroll past 30% of the window's height.
   const stylePanelHeight = () =>
-    118 + 38 * Math.ceil((view().colors().quick.length + 1) / 6);
+    118 +
+    Math.min(
+      38 * Math.ceil((view().colors().quick.length + 1) / 6),
+      0.3 * canvasSize().height,
+    );
   // Every color opens beside the style panel while there is room for it
   // there, 12px clear of the side panel or the edge; otherwise inside the
   // panel. It stands 20px from the panel and is 15rem wide, 20rem for a finger.

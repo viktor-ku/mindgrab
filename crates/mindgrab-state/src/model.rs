@@ -23,29 +23,36 @@ pub const NAMED_COLORS: [&str; 8] = [
 
 /// An idea's color: one of the named colors, or one Tailwind shade such as
 /// `sky-400` that fills the card exactly. Stored as that text.
+///
+/// Every `Color` is a real one: it is made from the constants, from
+/// [`Color::shade`] or by parsing its text, never from raw indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub enum Color {
+pub struct Color(Kind);
+
+/// Indexes into the tables above, always in range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
     Named(u8),
     Shade { family: u8, shade: u8 },
 }
 
 impl Color {
-    pub const BLUE: Self = Self::Named(0);
-    pub const TEAL: Self = Self::Named(1);
-    pub const GREEN: Self = Self::Named(2);
-    pub const AMBER: Self = Self::Named(3);
-    pub const ORANGE: Self = Self::Named(4);
-    pub const ROSE: Self = Self::Named(5);
-    pub const VIOLET: Self = Self::Named(6);
-    pub const SLATE: Self = Self::Named(7);
+    pub const BLUE: Self = Self(Kind::Named(0));
+    pub const TEAL: Self = Self(Kind::Named(1));
+    pub const GREEN: Self = Self(Kind::Named(2));
+    pub const AMBER: Self = Self(Kind::Named(3));
+    pub const ORANGE: Self = Self(Kind::Named(4));
+    pub const ROSE: Self = Self(Kind::Named(5));
+    pub const VIOLET: Self = Self(Kind::Named(6));
+    pub const SLATE: Self = Self(Kind::Named(7));
 
     /// A Tailwind shade, such as `Color::shade("sky", 400)`.
     pub fn shade(family: &str, shade: u16) -> Option<Self> {
-        Some(Self::Shade {
+        Some(Self(Kind::Shade {
             family: COLOR_FAMILIES.iter().position(|f| *f == family)? as u8,
             shade: COLOR_SHADES.iter().position(|s| *s == shade)? as u8,
-        })
+        }))
     }
 }
 
@@ -54,7 +61,7 @@ impl Color {
     /// shade. The other named colors only stay on ideas that already have
     /// them.
     pub fn is_pickable(self) -> bool {
-        self == Self::SLATE || matches!(self, Self::Shade { .. })
+        self == Self::SLATE || matches!(self.0, Kind::Shade { .. })
     }
 }
 
@@ -95,9 +102,9 @@ impl Default for Color {
 
 impl std::fmt::Display for Color {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            Self::Named(index) => f.write_str(NAMED_COLORS[index as usize]),
-            Self::Shade { family, shade } => write!(
+        match self.0 {
+            Kind::Named(index) => f.write_str(NAMED_COLORS[index as usize]),
+            Kind::Shade { family, shade } => write!(
                 f,
                 "{}-{}",
                 COLOR_FAMILIES[family as usize], COLOR_SHADES[shade as usize]
@@ -112,7 +119,7 @@ impl std::str::FromStr for Color {
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         let invalid = || format!("Invalid node color: {value}");
         if let Some(index) = NAMED_COLORS.iter().position(|name| *name == value) {
-            return Ok(Self::Named(index as u8));
+            return Ok(Self(Kind::Named(index as u8)));
         }
         let (family, shade) = value.rsplit_once('-').ok_or_else(invalid)?;
         // Digits only, so "+400" or "0400" are not another spelling.

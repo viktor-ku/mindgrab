@@ -602,6 +602,13 @@ kbd {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   gap: 0.125rem;
+  /* A map may keep any number of quick colors. Past a few rows they scroll,
+     so the plus and the panel's foot stay in the window; the room around
+     them is for the rings a pressed or focused color wears. */
+  max-height: 30dvh;
+  margin: -0.25rem;
+  padding: 0.25rem;
+  overflow-y: auto;
 }
 /* Beside the Color label, quiet until pointed at. */
 .style-manage {
