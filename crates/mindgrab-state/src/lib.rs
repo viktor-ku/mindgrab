@@ -284,7 +284,7 @@ impl Project {
                 let id = tree.create_at(parent, index)?;
                 let meta = tree.get_meta(id)?;
                 meta.insert("id", id.to_string())?;
-                meta.insert("color", color.as_str())?;
+                meta.insert("color", color.to_string())?;
                 meta.insert_container("text", LoroText::new())?
                     .insert(0, &text)?;
                 // Activate the note with the node, inside the same undoable change.
@@ -329,7 +329,7 @@ impl Project {
             Command::ColorBranch { id, color } => {
                 for node in self.subtree(&id)? {
                     if self.node_data(node)?.1 != color {
-                        tree.get_meta(node)?.insert("color", color.as_str())?;
+                        tree.get_meta(node)?.insert("color", color.to_string())?;
                     }
                 }
             }
@@ -422,7 +422,7 @@ impl Project {
             Command::SetColor { id, color } => {
                 let node = self.node(&id)?;
                 if self.node_data(node)?.1 != color {
-                    tree.get_meta(node)?.insert("color", color.as_str())?;
+                    tree.get_meta(node)?.insert("color", color.to_string())?;
                 }
             }
             Command::SetPosition { id, position } => {
@@ -435,6 +435,16 @@ impl Project {
                     )?;
                 } else {
                     meta.delete("position")?;
+                }
+            }
+            Command::SetColors { quick, new_ideas } => {
+                origin = "preferences";
+                let next = ColorPreferences { quick, new_ideas };
+                validate_colors(&next)?;
+                let meta = self.doc.get_map("project");
+                let json = serde_json::to_value(&next)?;
+                if meta.get_deep_value().to_json_value()["colors"] != json {
+                    meta.insert("colors", loro::LoroValue::from(json))?;
                 }
             }
             Command::SetSaving { local, cloud } => {
@@ -489,10 +499,11 @@ impl Project {
         let fields = meta
             .as_object()
             .ok_or_else(|| StateError::Invalid("Expected metadata".into()))?;
-        if fields.len() != 4
+        let required = ["format", "schemaVersion", "name", "saving"];
+        if required.iter().any(|key| !fields.contains_key(*key))
             || fields
                 .keys()
-                .any(|key| !["format", "schemaVersion", "name", "saving"].contains(&key.as_str()))
+                .any(|key| !required.contains(&key.as_str()) && key != "colors")
         {
             return invalid("Unexpected project metadata");
         }
@@ -504,6 +515,14 @@ impl Project {
             .ok_or_else(|| StateError::Invalid("Expected project name".into()))?;
         validate_name(name)?;
         let saving: SavingPreferences = serde_json::from_value(meta["saving"].clone())?;
+        let colors = match fields.get("colors") {
+            Some(value) => {
+                let colors: ColorPreferences = serde_json::from_value(value.clone())?;
+                validate_colors(&colors)?;
+                colors
+            }
+            None => ColorPreferences::default(),
+        };
         let tree = self.tree();
         if live_nodes(&tree).len() > MAX_NODES {
             return Err(StateError::ResourceLimit);
@@ -578,6 +597,7 @@ impl Project {
             schema_version: SCHEMA_VERSION,
             name: name.into(),
             saving,
+            colors,
             roots,
             nodes,
         })
@@ -883,4 +903,18 @@ fn text_diff(old: &str, new: &str, caret: Option<usize>) -> (usize, usize, Strin
             .sum(),
         new[prefix..new.len() - suffix].iter().collect(),
     )
+}
+
+/// Quick colors and the new-idea color are white or shades, each once.
+fn validate_colors(colors: &ColorPreferences) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    if !colors.new_ideas.is_pickable()
+        || colors
+            .quick
+            .iter()
+            .any(|color| !color.is_pickable() || !seen.insert(*color))
+    {
+        return invalid("Invalid color preferences");
+    }
+    Ok(())
 }

@@ -37,7 +37,11 @@ async function pristine(source: ProjectRepository, id: string) {
       const state = readProject(handle.doc);
       return (
         state.status === "ready" &&
-        isPristineSeed(projectForest(state.view), state.view.name)
+        isPristineSeed(
+          projectForest(state.view),
+          state.view.name,
+          state.view.colors,
+        )
       );
     } finally {
       await handle.close();

@@ -3,10 +3,12 @@ import {
   createChild,
   createProjectDocument,
   createRoot,
+  DEFAULT_COLOR_PREFERENCES,
   editNodeText,
   isPristineSeed,
   projectForest,
   renameProject,
+  setColorPreferences,
   setNodeColor,
   setNodeNote,
 } from "../src/project-document";
@@ -35,12 +37,32 @@ const seed = () => {
 };
 const pristine = (doc: ProjectDocument) => {
   const view = doc.view();
-  return isPristineSeed(projectForest(view), view.name);
+  return isPristineSeed(projectForest(view), view.name, view.colors);
 };
 const root = (doc: ProjectDocument) => doc.view().roots[0];
 
 test("the untouched seed is pristine", () => {
-  expect(pristine(seed())).toBe(true);
+  const doc = seed();
+  expect(doc.view().nodes[0].color).toBe("slate");
+  expect(pristine(doc)).toBe(true);
+});
+
+test("a seed from before slate became the default is still pristine", () => {
+  const doc = createProjectDocument(
+    crypto.randomUUID(),
+    generateProjectName(),
+    { text: "New idea", color: "blue" },
+  );
+  docs.push(doc);
+  expect(pristine(doc)).toBe(true);
+});
+
+test("choosing the map's colors counts as an edit", () => {
+  const doc = seed();
+  setColorPreferences(doc, { quick: ["sky-400"], newIdeas: "slate" });
+  expect(pristine(doc)).toBe(false);
+  setColorPreferences(doc, DEFAULT_COLOR_PREFERENCES);
+  expect(pristine(doc)).toBe(true);
 });
 
 test("a renamed seed counts as edited", () => {

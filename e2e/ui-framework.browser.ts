@@ -484,7 +484,8 @@ describe("view controls", () => {
   test("plain wheel pans, pinch zooms around the pointer, and the preference makes the wheel zoom", async () => {
     const root = await rootId();
     const before = await box(root);
-    await page.mouse.move(200, 200);
+    // On the map, clear of the style panel at the left.
+    await page.mouse.move(400, 200);
     await page.mouse.wheel(30, 100);
     const panned = await box(root);
     expect(panned.x).toBeCloseTo(before.x - 30, 0);
@@ -520,7 +521,7 @@ describe("view controls", () => {
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
     const label = await zoomLabel();
-    await page.mouse.move(200, 200);
+    await page.mouse.move(400, 200);
     await page.mouse.wheel(0, 100);
     expect(await zoomLabel()).not.toBe(label);
 
@@ -667,17 +668,13 @@ describe("Escape layers", () => {
     await notes.waitFor({ state: "hidden" });
     expect(await selected()).toBe(current);
 
-    await page.getByRole("button", { name: "Color", exact: true }).click();
-    const colors = page.getByRole("region", {
-      name: "Selected node color controls",
-    });
-    await colors.getByRole("button").first().focus();
-    await page.keyboard.press("Escape");
-    await colors.waitFor({ state: "hidden" });
+    // A color picked with the mouse hands the keyboard back to the map.
+    await page
+      .getByRole("region", { name: "Idea style" })
+      .getByRole("button", { name: "Green 200", exact: true })
+      .click();
     expect(await selected()).toBe(current);
-    expect(await page.evaluate(() => document.activeElement?.ariaLabel)).toBe(
-      "Color",
-    );
+    expect(await activeLabel()).toBe("Mind map canvas");
   });
 });
 
@@ -798,9 +795,7 @@ describe("clipboard", () => {
     await page.keyboard.press("Alt+n");
     await page.getByRole("textbox", { name: "Idea notes" }).fill("keep me");
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Color" }).click();
-    await page.getByRole("button", { name: /^Violet/ }).click();
-    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Blue 200", exact: true }).click();
     await clipboard("cut");
     expect(await idWithText("Carry")).toBeUndefined();
     await node(root).click();
@@ -809,7 +804,7 @@ describe("clipboard", () => {
     const pasted = (await idWithText("Carry")) as string;
     expect(await nodeData(pasted)).toMatchObject({
       note: "keep me",
-      color: "violet",
+      color: "blue-200",
     });
   });
 
@@ -1070,7 +1065,7 @@ describe("dialogs, panels and search", () => {
   test("focusing an idea outside the view cannot scroll the canvas", async () => {
     const root = await rootId();
     // Past the right and bottom edges, where a scroll container would follow.
-    await page.mouse.move(200, 200);
+    await page.mouse.move(400, 200);
     await page.mouse.wheel(-900, -700);
     expect(await insideViewport(root)).toBe(false);
     expect((await box(root)).x).toBeGreaterThan(VIEWPORT.width);
@@ -1093,8 +1088,7 @@ describe("menus and popovers", () => {
   const CANVAS = "Mind map canvas";
   const projectMenu = () => page.getByRole("menu", { name: "Project menu" });
   const ideaMenu = () => page.locator("[data-context-menu]");
-  const colors = () =>
-    page.getByRole("region", { name: "Selected node color controls" });
+  const colors = () => page.getByRole("region", { name: "Idea style" });
   const button = (name: string) =>
     page.getByRole("button", { name, exact: true });
   const isActive = (element: Element) => element === document.activeElement;
@@ -1157,14 +1151,10 @@ describe("menus and popovers", () => {
     await page.keyboard.press("Escape");
     await ideaMenu().waitFor({ state: "detached" });
 
-    await button("Color").click();
-    await colors()
-      .getByText(/^Changes only/)
-      .click();
+    // The style panel is not a layer: a press on its plain content keeps
+    // the selection it styles.
+    await colors().getByText("Apply to").click();
     expect(await colors().isVisible()).toBe(true);
-    await page.keyboard.press("Escape");
-    await colors().waitFor({ state: "detached" });
-    expect(await activeLabel()).toBe("Color");
     expect(await selected()).toBe(root);
   });
 
@@ -1185,12 +1175,6 @@ describe("menus and popovers", () => {
     await page.keyboard.press("Escape");
     await ideaMenu().waitFor({ state: "detached" });
     expect(await activeLabel()).toBe("More actions");
-
-    await button("Color").click();
-    await colors().waitFor();
-    await page.locator(`[aria-label="${CANVAS}"]`).focus();
-    await page.keyboard.press("Escape");
-    await colors().waitFor({ state: "detached" });
     expect(await selected()).toBe(root);
   });
 
@@ -1202,11 +1186,6 @@ describe("menus and popovers", () => {
     await page.keyboard.press("Tab");
     await ideaMenu().waitFor({ state: "detached" });
     expect(await activeLabel()).toBe("Zoom out");
-
-    await button("Color").click();
-    await colors().getByRole("button").last().focus();
-    await page.keyboard.press("Tab");
-    await colors().waitFor({ state: "detached" });
 
     // The trigger belongs to the menu; the field before it does not.
     await button("Project menu").click();
@@ -1349,10 +1328,9 @@ describe("menus and popovers", () => {
     await button("Outline").click();
     expect(await activeLabel()).toBe(CANVAS);
     await button("Outline").click();
-    await button("Color").click();
-    await colors().waitFor();
-    await button("Color").click();
-    await colors().waitFor({ state: "detached" });
+    await colors().getByRole("button", { name: "This branch" }).click();
+    expect(await activeLabel()).toBe(CANVAS);
+    await colors().getByRole("button", { name: "This idea" }).click();
     expect(await activeLabel()).toBe(CANVAS);
 
     await button("Focus on this branch").click();
@@ -1373,20 +1351,24 @@ describe("menus and popovers", () => {
     expect(await activeLabel()).toBe(CANVAS);
   });
 
-  test("the color popover opens over the notice in its slot", async () => {
+  test("on phones the style panel opens over the notice and closes like a popover", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
     const root = await rootId();
     const child = await addChild(root, "Short-lived");
     await node(child).click();
     await page.keyboard.press("Delete");
     await notice("Deleted “Short-lived”").waitFor();
     expect(await selected()).toBe(root);
+    expect(await colors().count()).toBe(0);
     await button("Color").click();
+    await colors().waitFor();
+    // The panel is opaque and lies over the notice in its slot.
     expect(
       await colors()
-        .getByText(/^Changes only/)
-        .evaluate((hint) => {
-          const box = hint.getBoundingClientRect();
-          return hint.contains(
+        .getByText("Apply to")
+        .evaluate((label) => {
+          const box = label.getBoundingClientRect();
+          return label.contains(
             document.elementFromPoint(
               box.x + box.width / 2,
               box.y + box.height / 2,
@@ -1394,12 +1376,146 @@ describe("menus and popovers", () => {
           );
         }),
     ).toBe(true);
-    // And hides it: the popover is not glass like the toolbar it opens from.
     expect(
       await colors().evaluate(
-        (popover) => getComputedStyle(popover).backgroundColor,
+        (panel) => getComputedStyle(panel).backgroundColor,
       ),
     ).toBe("rgb(255, 255, 255)");
+    // Keyboard users land on the current color; Escape returns to the button.
+    expect(
+      await colors()
+        // On a central idea the white card is the dark default.
+        .getByRole("button", { name: "Default", exact: true })
+        .evaluate(isActive),
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await colors().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("Color");
+    expect(await selected()).toBe(root);
+    // Tabbing out closes it too.
+    await button("Color").click();
+    await colors().getByRole("button").last().focus();
+    await page.keyboard.press("Tab");
+    await colors().waitFor({ state: "detached" });
+  });
+
+  test("the style panel follows the selection and previews a color before it is picked", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Branch");
+    const grandchild = await addChild(child, "Leaf");
+    const sibling = await addChild(root, "Other");
+    const fill = (id: string) =>
+      node(id)
+        .locator(".map-node-card")
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+    const color = async (id: string) => (await nodeData(id))?.color;
+
+    await node(child).click();
+    await colors().waitFor();
+    const before = {
+      child: await fill(child),
+      grandchild: await fill(grandchild),
+      sibling: await fill(sibling),
+    };
+    // A leaf has no branch to color.
+    await node(grandchild).click();
+    expect(
+      await colors().getByRole("button", { name: "This branch" }).isDisabled(),
+    ).toBe(true);
+    await node(child).click();
+    await colors().getByRole("button", { name: "This branch" }).click();
+
+    const rose = colors().getByRole("button", {
+      name: "Red 200",
+      exact: true,
+    });
+    await rose.hover();
+    expect(await fill(child)).not.toBe(before.child);
+    expect(await fill(grandchild)).not.toBe(before.grandchild);
+    expect(await fill(sibling)).toBe(before.sibling);
+    // A preview changes nothing in the document.
+    expect(await color(child)).toBe("slate");
+    expect(await color(grandchild)).toBe("slate");
+    expect(
+      await node(child)
+        .locator(".map-node-card")
+        .evaluate((el) => el.classList.contains("map-node-selected")),
+    ).toBe(true);
+
+    await page.mouse.move(600, 400);
+    expect(await fill(child)).toBe(before.child);
+    expect(await fill(grandchild)).toBe(before.grandchild);
+
+    await rose.click();
+    expect(await color(child)).toBe("red-200");
+    expect(await color(grandchild)).toBe("red-200");
+    expect(await color(sibling)).toBe("slate");
+
+    // Writing puts the panel away until the idea is written.
+    await node(child).dblclick();
+    await editor().waitFor();
+    expect(await colors().count()).toBe(0);
+    await page.keyboard.press("Escape");
+    await colors().waitFor();
+  });
+
+  test("the plus opens Tailwind's palette, which previews, picks and closes like a popover", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Painted");
+    await node(child).click();
+    const more = colors().getByRole("button", { name: "Other color" });
+    const palette = () => page.getByRole("region", { name: "Other colors" });
+    expect(await more.getAttribute("aria-pressed")).toBe("false");
+    await more.click();
+    await palette().waitFor();
+    // White, then every Tailwind shade.
+    expect(await palette().getByRole("button").count()).toBe(1 + 26 * 11);
+    // It opens beside the panel, not over it.
+    const panel = await colors().boundingBox();
+    const box = await palette().boundingBox();
+    expect(box?.x).toBeGreaterThan((panel?.x ?? 0) + (panel?.width ?? 0));
+
+    const card = node(child).locator(".map-node-card");
+    const fill = () =>
+      card.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const before = await fill();
+    await palette()
+      .getByRole("button", { name: "Sky 400", exact: true })
+      .hover();
+    expect(await fill()).not.toBe(before);
+    expect((await nodeData(child))?.color).toBe("slate");
+    await palette()
+      .getByRole("button", { name: "Sky 400", exact: true })
+      .click();
+    await palette().waitFor({ state: "detached" });
+    expect((await nodeData(child))?.color).toBe("sky-400");
+    // The plus now shows the idea's color and is the one pressed.
+    expect(await more.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      await colors()
+        .getByRole("button", { name: "White", exact: true })
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+
+    // From the keyboard it is one tab stop that starts on the idea's color,
+    // and the arrows walk the grid: down a row is the next hue.
+    await more.focus();
+    await page.keyboard.press("Enter");
+    await palette().waitFor();
+    expect(
+      await palette()
+        .getByRole("button", { name: "Sky 400", exact: true })
+        .evaluate((el) => el === document.activeElement),
+    ).toBe(true);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowRight");
+    expect(await page.evaluate(() => document.activeElement?.ariaLabel)).toBe(
+      "Blue 500",
+    );
+    await page.keyboard.press("Escape");
+    await palette().waitFor({ state: "detached" });
+    expect(await activeLabel()).toBe("Other color");
+    expect((await nodeData(child))?.color).toBe("sky-400");
   });
 });
 
@@ -1516,6 +1632,13 @@ describe("islands and stacking", () => {
       expect(here.right - here.left).toBeGreaterThan(60);
       // "Whole map", then a button for each step above the focused branch.
       expect(await crumbs.getByRole("button").count()).toBe(1 + steps);
+      // The style panel shares the row only when it leaves the path whole.
+      const style = await edges(region("Idea style"));
+      expect(
+        style.top > bar.bottom ||
+          style.right < bar.left ||
+          style.left > bar.right,
+      ).toBe(true);
       await crumbs
         .getByRole("button", { name: "Whole map" })
         .click({ trial: true });
@@ -1730,14 +1853,18 @@ describe("buttons and controls", () => {
   });
 
   test("focus rings follow the keyboard and sit on the card or island around a field", async () => {
-    await node(await rootId()).click();
-    await page.getByRole("button", { name: "Color" }).click();
-    const scopes = page.locator(".color-scope");
+    const root = await rootId();
+    await addChild(root, "Child");
+    await node(root).click();
+    const scopes = page
+      .getByRole("region", { name: "Idea style" })
+      .locator(".style-segment");
     await scopes.nth(1).click();
     expect(await style(scopes.nth(1), "outline-style")).toBe("none");
-    await page.keyboard.press("ArrowLeft");
-    expect(await style(scopes.nth(0), "outline-color")).toBe(ACCENT);
-    await page.keyboard.press("Escape");
+    await scopes.nth(0).focus();
+    await page.keyboard.press("Tab");
+    expect(await style(scopes.nth(1), "outline-color")).toBe(ACCENT);
+    await page.locator('[aria-label="Mind map canvas"]').focus();
 
     await page.keyboard.press("ControlOrMeta+f");
     const search = page.getByRole("search", { name: "Search ideas" });
@@ -1843,7 +1970,7 @@ describe("wording", () => {
     ).toMatch(/^Add sibling idea\s+Enter$/);
   });
 
-  test("menus and the color popover say idea, and tooltips start with the button's name", async () => {
+  test("menus and the style panel say idea, and tooltips start with the button's name", async () => {
     const root = await rootId();
     // An edit brings Undo and Redo into the toolbar.
     await node(root).click();
@@ -1865,13 +1992,9 @@ describe("wording", () => {
     await page.keyboard.press("Escape");
 
     await node(root).click();
-    await button("Color").click();
-    const colors = page.getByRole("region", {
-      name: "Selected node color controls",
-    });
+    const colors = page.getByRole("region", { name: "Idea style" });
     await colors.getByText("This idea", { exact: true }).waitFor();
-    await colors.getByText("Changes only the selected idea.").waitFor();
-    await page.keyboard.press("Escape");
+    await colors.getByText("This branch", { exact: true }).waitFor();
 
     // An icon button's tooltip is its name, then the key that runs it.
     await button("Search").click();
@@ -1979,5 +2102,325 @@ describe("phone layout", () => {
     await page.getByRole("button", { name: "Zoom in" }).waitFor();
     await page.getByLabel("Project name").waitFor();
     expect(await page.getByRole("dialog").count()).toBe(0);
+  });
+});
+
+describe("map colors", () => {
+  const panel = () => page.getByRole("region", { name: "Idea style" });
+  const dialog = () =>
+    page.getByRole("dialog", { name: "Project preferences" });
+  const quick = async () => (await call("content")).colors.quick;
+  const pick = (label: RegExp) =>
+    dialog()
+      .getByRole("button", { name: label })
+      .and(page.locator(".quick-pick"));
+  const everyColor = (name: string) => dialog().getByRole("region", { name });
+
+  test("Manage opens the Colors section, where quick colors are removed, reordered, added and restored", async () => {
+    const root = await rootId();
+    await node(root).click();
+    await panel().getByRole("button", { name: "Manage" }).click();
+    await dialog().waitFor();
+    expect(
+      await dialog()
+        .getByRole("button", { name: "Colors", exact: true })
+        .getAttribute("aria-current"),
+    ).toBe("true");
+    expect(await quick()).toEqual([
+      "slate",
+      "red-200",
+      "green-200",
+      "blue-200",
+      "yellow-200",
+    ]);
+    const restore = dialog().getByRole("button", { name: "Restore defaults" });
+    // Only offered once the picks differ from the defaults.
+    expect(await restore.count()).toBe(0);
+
+    await dialog().getByRole("button", { name: "Remove Red 200" }).click();
+    expect(await quick()).toEqual([
+      "slate",
+      "green-200",
+      "blue-200",
+      "yellow-200",
+    ]);
+
+    // From the keyboard: Alt and an arrow move a pick, Delete removes it.
+    await pick(/^Blue 200/).focus();
+    await page.keyboard.press("Alt+ArrowLeft");
+    expect(await quick()).toEqual([
+      "slate",
+      "blue-200",
+      "green-200",
+      "yellow-200",
+    ]);
+    expect(
+      await pick(/^Blue 200/).evaluate((el) => el === document.activeElement),
+    ).toBe(true);
+    await pick(/^Yellow 200/).focus();
+    await page.keyboard.press("Delete");
+    expect(await quick()).toEqual(["slate", "blue-200", "green-200"]);
+
+    // Dragged, a pick takes the place of the one it is dropped on.
+    const from = await pick(/^White/).boundingBox();
+    const to = await pick(/^Green 200/).boundingBox();
+    if (!from || !to) throw new Error("The picks are not visible.");
+    await page.mouse.move(from.x + 10, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    expect(await quick()).toEqual(["blue-200", "green-200", "slate"]);
+    // Let go off the row, the drag still ends there and the order is saved.
+    const back = await pick(/^White/).boundingBox();
+    const first = await pick(/^Blue 200/).boundingBox();
+    if (!back || !first) throw new Error("The picks are not visible.");
+    await page.mouse.move(back.x + 10, back.y + back.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(
+      first.x + first.width / 2,
+      first.y + first.height / 2,
+      { steps: 8 },
+    );
+    await page.mouse.move(first.x + first.width / 2, first.y + 120, {
+      steps: 4,
+    });
+    await page.mouse.up();
+    expect(await dialog().locator("[data-dragging]").count()).toBe(0);
+    expect((await quick()).toSorted()).toEqual([
+      "blue-200",
+      "green-200",
+      "slate",
+    ]);
+    expect(await quick()).not.toEqual(["blue-200", "green-200", "slate"]);
+    await pick(/^Blue 200/).focus();
+    await page.keyboard.press("Alt+ArrowLeft");
+    await pick(/^Blue 200/).focus();
+    await page.keyboard.press("Alt+ArrowLeft");
+    await pick(/^White/).focus();
+    await page.keyboard.press("Alt+ArrowRight");
+    await pick(/^White/).focus();
+    await page.keyboard.press("Alt+ArrowRight");
+    expect(await quick()).toEqual(["blue-200", "green-200", "slate"]);
+
+    // Every color shows only when asked for. It adds what is not there,
+    // takes out what is, and stays open for more.
+    const palette = everyColor("Add quick colors");
+    expect(await palette.count()).toBe(0);
+    const add = dialog().getByRole("button", { name: "Add quick colors" });
+    await add.click();
+    await palette.getByRole("button", { name: "Sky 400" }).click();
+    await palette.getByRole("button", { name: "Green 200" }).click();
+    expect(await quick()).toEqual(["blue-200", "slate", "sky-400"]);
+    expect(
+      await palette
+        .getByRole("button", { name: "Sky 400" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    // Everything can go, with every color still open beside the row; the
+    // panel then offers only the plus.
+    for (const name of ["Blue 200", "White", "Sky 400"])
+      await dialog()
+        .getByRole("button", { name: `Remove ${name}` })
+        .click();
+    expect(await quick()).toEqual([]);
+    await dialog().getByText("No quick colors. Press + to add some.").waitFor();
+    await palette.waitFor();
+
+    // Esc closes every color and leaves the preferences open.
+    await page.keyboard.press("Escape");
+    await palette.waitFor({ state: "detached" });
+    await dialog().waitFor();
+    expect(await add.evaluate((el) => el === document.activeElement)).toBe(
+      true,
+    );
+
+    await restore.click();
+    expect(await quick()).toEqual([
+      "slate",
+      "red-200",
+      "green-200",
+      "blue-200",
+      "yellow-200",
+    ]);
+    await restore.waitFor({ state: "detached" });
+  });
+
+  test("an idea pressed where the style panel's column is stays under the pointer", async () => {
+    const root = await rootId();
+    const start = await node(root).boundingBox();
+    if (!start) throw new Error("The central idea is not visible.");
+    // Pan the map until the idea is 60px from the left edge, in the column
+    // the panel takes at the top.
+    await page.mouse.move(start.x + start.width / 2, start.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(
+      start.x + start.width / 2 - (start.x - 60),
+      start.y + 200,
+      {
+        steps: 6,
+      },
+    );
+    await page.mouse.up();
+    const before = await node(root).boundingBox();
+    if (!before) throw new Error("The central idea is not visible.");
+    expect(Math.round(before.x)).toBe(60);
+    expect(await panel().count()).toBe(0);
+
+    // Selecting it opens the panel and moves nothing, so the second press of
+    // a double-click still lands on the idea.
+    await node(root).dblclick();
+    await editor().waitFor();
+    await page.keyboard.press("Escape");
+    await panel().waitFor();
+    expect(Math.round((await node(root).boundingBox())?.x ?? 0)).toBe(60);
+  });
+
+  test("new ideas start in the chosen color, and color choices stay out of undo", async () => {
+    const root = await rootId();
+    await node(root).click();
+    await panel().getByRole("button", { name: "Manage" }).click();
+    await dialog().waitFor();
+    await dialog()
+      .getByRole("button", { name: /^New ideas start as White/ })
+      .click();
+    const palette = everyColor("New ideas start as");
+    // The quick colors come first; any other color is below them.
+    await palette
+      .getByRole("group", { name: "Quick colors" })
+      .getByRole("button", { name: "Red 200" })
+      .waitFor();
+    await palette.getByRole("button", { name: "Lime 200" }).click();
+    expect((await call("content")).colors.newIdeas).toBe("lime-200");
+    // One choice: made, every color closes.
+    await palette.waitFor({ state: "detached" });
+    await dialog()
+      .getByRole("button", { name: /^New ideas start as Lime 200/ })
+      .waitFor();
+    await dialog().getByRole("button", { name: "Remove Red 200" }).click();
+    await page.keyboard.press("Escape");
+    await dialog().waitFor({ state: "hidden" });
+
+    await node(root).click();
+    await page.keyboard.press("Tab");
+    await editor().waitFor();
+    await page.keyboard.type("Typed");
+    await page.keyboard.press("Escape");
+    expect((await nodeData((await idWithText("Typed")) ?? ""))?.color).toBe(
+      "lime-200",
+    );
+    // The panel shows the map's picks, without the one removed.
+    expect(await panel().getByRole("button", { name: "Red 200" }).count()).toBe(
+      0,
+    );
+
+    // Undo takes back ideas, not the color choices.
+    await page.getByRole("button", { name: "Undo", exact: true }).click();
+    const { colors } = await call("content");
+    expect(colors.newIdeas).toBe("lime-200");
+    expect(colors.quick).not.toContain("red-200");
+  });
+
+  test("the sidebar palette adds the idea's color to the quick colors", async () => {
+    const root = await rootId();
+    const child = await addChild(root, "Teal");
+    await node(child).click();
+    const more = panel().getByRole("button", { name: "Other color" });
+    const palette = () => page.getByRole("region", { name: "Other colors" });
+    await more.click();
+    // White is always one press away, even off the quick colors.
+    await palette().getByRole("button", { name: "White" }).waitFor();
+    expect(
+      await palette()
+        .getByRole("button", { name: /^Add .* to quick colors$/ })
+        .count(),
+    ).toBe(0);
+    await palette().getByRole("button", { name: "Teal 600" }).click();
+    await more.click();
+    await palette()
+      .getByRole("button", { name: "Add Teal 600 to quick colors" })
+      .click();
+    expect(await quick()).toContain("teal-600");
+    await palette()
+      .getByRole("button", { name: /^Add .* to quick colors$/ })
+      .waitFor({ state: "detached" });
+    // Now a quick color, it shows in the row and the plus is a plus again.
+    await page.keyboard.press("Escape");
+    expect(
+      await panel()
+        .getByRole("button", { name: "Teal 600", exact: true })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(await more.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("address", () => {
+  const dialog = () =>
+    page.getByRole("dialog", { name: "Project preferences" });
+  const address = () => call("address");
+  const section = () =>
+    dialog().locator(
+      '[aria-label="Preference sections"] [aria-current="true"]',
+    );
+
+  test("the address says whether project preferences are open and on which tab", async () => {
+    expect(await address()).toBe("/");
+    await node(await rootId()).click();
+    await page
+      .getByRole("region", { name: "Idea style" })
+      .getByRole("button", { name: "Manage" })
+      .click();
+    await dialog().waitFor();
+    expect(await address()).toBe("/?preferences=true&tab=colors");
+
+    // Tabs replace the entry, so Back leaves the preferences at once.
+    await dialog().getByRole("button", { name: "Backup" }).click();
+    expect(await address()).toBe("/?preferences=true&tab=backup");
+    expect(await section().innerText()).toBe("Backup");
+    await call("back");
+    await dialog().waitFor({ state: "hidden" });
+    expect(await address()).toBe("/");
+
+    // Closed with the button, it returns to the address before it opened.
+    await page.getByRole("button", { name: "Project menu" }).click();
+    await page.getByRole("menuitem", { name: /^Project preferences/ }).click();
+    await dialog().waitFor();
+    expect(await address()).toBe("/?preferences=true&tab=saving");
+    await dialog()
+      .getByRole("button", { name: "Close project preferences" })
+      .click();
+    await dialog().waitFor({ state: "hidden" });
+    expect(await address()).toBe("/");
+  });
+
+  test("an address opens the preferences on its tab, and an unknown tab shows saving", async () => {
+    await call("go", "/?preferences=true&tab=colors");
+    await dialog().waitFor();
+    expect(await section().innerText()).toBe("Colors");
+    await page.keyboard.press("Escape");
+    await dialog().waitFor({ state: "hidden" });
+    expect(await address()).toBe("/");
+
+    await call("go", "/?preferences=true&tab=nonsense");
+    await dialog().waitFor();
+    expect(await section().innerText()).toBe("Saving");
+  });
+
+  test("a page loaded at an address with the preferences open shows them as a modal", async () => {
+    await page.goto(`${page.url()}?preferences=true&tab=colors`);
+    // The map opens first: the preferences shown are its own, not those of
+    // the placeholder that stands in while it loads.
+    await ready();
+    await dialog().waitFor();
+    expect(await address()).toBe("/?preferences=true&tab=colors");
+    expect(await section().innerText()).toBe("Colors");
+    // Over the map, not in the page under it: the map cannot be pressed.
+    expect(await dialog().evaluate((el) => el.matches(":modal"))).toBe(true);
+    await page.keyboard.press("Escape");
+    await dialog().waitFor({ state: "hidden" });
+    expect(await address()).toBe("/");
   });
 });

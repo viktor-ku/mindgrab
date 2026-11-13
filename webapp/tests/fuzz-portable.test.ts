@@ -4,7 +4,6 @@
 //   FUZZ_SEEDS=2000 bun test --conditions browser tests/fuzz-portable.test.ts
 import { expect, setDefaultTimeout, test } from "bun:test";
 import type { MindMapNode } from "../src/mind-map";
-import { NODE_COLORS } from "../src/node-colors";
 import type { NodeColor } from "../src/node-colors";
 import {
   branchEntry,
@@ -37,6 +36,7 @@ import type { ProjectFile } from "../src/project-import-export";
 import {
   checkView,
   FIRST_SEED,
+  FUZZ_COLORS,
   random,
   SEEDS,
   STEPS,
@@ -47,7 +47,7 @@ import type { Random } from "./fuzz-helpers";
 // Large FUZZ_SEEDS runs take minutes; bun's 5 s default would cut them off.
 setDefaultTimeout(3_600_000);
 const seeds = Array.from({ length: SEEDS }, (_, i) => FIRST_SEED + i);
-const COLORS = NODE_COLORS.map((color) => color.value);
+const COLORS = FUZZ_COLORS;
 const stats: Record<string, number> = {};
 const count = (key: string, by = 1) => (stats[key] = (stats[key] ?? 0) + by);
 
@@ -1265,7 +1265,7 @@ test("backups with other versions, headers and top-level shapes", () => {
       "{}",
       '{"format":"mindgrab-project"}',
       JSON.stringify({ ...valid, version: 2 }),
-      JSON.stringify({ ...valid, version: 5 }),
+      JSON.stringify({ ...valid, version: 6 }),
       JSON.stringify({ ...valid, format: "x" }),
       "# Title\n- a\n",
       "- a",

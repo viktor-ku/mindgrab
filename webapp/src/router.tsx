@@ -6,6 +6,7 @@ import {
 } from "@tanstack/solid-router";
 import { Show } from "solid-js";
 import { App } from "./App.tsx";
+import { appSearchSchema } from "./app-search";
 import { CheckHealth, CheckHealthPending } from "./CheckHealth.tsx";
 import { healthQueryOptions } from "./health";
 import { queryClient } from "./query-client";
@@ -16,6 +17,7 @@ const rootRoute = createRootRoute({ component: Outlet });
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  validateSearch: appSearchSchema,
   component: App,
 });
 

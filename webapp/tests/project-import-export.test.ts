@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_COLOR_PREFERENCES,
   LIMITS,
   projectForest,
   importProjectDocument,
   deleteSubtree,
 } from "../src/project-document";
+import type { ColorPreferences } from "../src/project-document";
 import type {
   ProjectFile,
   ProjectFileNode,
 } from "../src/project-import-export";
 import {
+  PROJECT_FILE_VERSION,
   PROJECT_FILE_MAX_BYTES,
   PROJECT_FILE_MAX_DEPTH,
   parseProjectFile,
@@ -27,7 +30,7 @@ const leaf = (id: string, text = id): ProjectFileNode => ({
 });
 const file = (nodes: ProjectFileNode[] = []): ProjectFile => ({
   format: "mindgrab-project",
-  version: 4,
+  version: PROJECT_FILE_VERSION,
   project: { name: "Planning", nodes },
 });
 const complex = (): ProjectFile => ({
@@ -212,7 +215,7 @@ test("version 4 notes round-trip through project files and newly identified docu
   const doc = importProjectDocument(crypto.randomUUID(), content);
   try {
     const exported = parseProjectFile(serializeProjectFile(doc.view()));
-    expect(exported.version).toBe(4);
+    expect(exported.version).toBe(PROJECT_FILE_VERSION);
     expect(exported.project.nodes[0].note).toBe(input.project.nodes[0].note);
     expect(exported.project.nodes[0].children[0].note).toBe("child details");
     expect(exported.project.nodes[1]).not.toHaveProperty("note");
@@ -222,13 +225,50 @@ test("version 4 notes round-trip through project files and newly identified docu
   }
 });
 
-test("version 3 files without notes still import and export as version 4", () => {
-  const old = { ...file([leaf("old")]), version: 3 };
-  const parsed = parseProjectFile(JSON.stringify(old));
-  expect(parsed.version).toBe(4);
-  const { content } = prepareProjectImport(parsed);
-  expect(content.nodes[0].note).toBe("");
-  expect(projectFileFromContent(content).version).toBe(4);
+test("version 3 and 4 files still import and export as the current version", () => {
+  for (const version of [3, 4]) {
+    const old = { ...file([leaf("old")]), version };
+    const parsed = parseProjectFile(JSON.stringify(old));
+    expect(parsed.version).toBe(PROJECT_FILE_VERSION);
+    const { content } = prepareProjectImport(parsed);
+    expect(content.nodes[0].note).toBe("");
+    expect(content.colors).toEqual(DEFAULT_COLOR_PREFERENCES);
+    expect(projectFileFromContent(content).version).toBe(PROJECT_FILE_VERSION);
+  }
+});
+
+test("a map's color choices round-trip through backups and are validated", () => {
+  const colors = {
+    quick: ["sky-400", "slate", "mauve-950"],
+    newIdeas: "lime-200",
+  } satisfies ColorPreferences;
+  const input = {
+    ...file([{ ...leaf("root"), color: "sky-400" }]),
+    preferences: { colors },
+  } satisfies ProjectFile;
+  const { content } = prepareProjectImport(
+    parseProjectFile(JSON.stringify(input)),
+  );
+  const doc = importProjectDocument(crypto.randomUUID(), content);
+  try {
+    expect(doc.view().colors).toEqual(colors);
+    expect(doc.view().nodes[0].color).toBe("sky-400");
+    const exported = parseProjectFile(serializeProjectFile(doc.view()));
+    expect(exported.preferences?.colors).toEqual(colors);
+  } finally {
+    doc.destroy();
+  }
+  for (const bad of [
+    { quick: ["blue"], newIdeas: "slate" },
+    { quick: ["sky-400", "sky-400"], newIdeas: "slate" },
+    { quick: [], newIdeas: "rose" },
+    { quick: [], newIdeas: "slate", extra: 1 },
+  ])
+    expect(() =>
+      parseProjectFile(
+        JSON.stringify({ ...file([]), preferences: { colors: bad } }),
+      ),
+    ).toThrow();
 });
 
 test("import validates note type and UTF-16 limit", () => {

@@ -214,7 +214,7 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
             parent: None,
             index: None,
             text: "Shared 🌲".into(),
-            color: Color::Blue,
+            color: Color::BLUE,
         })
         .unwrap()
         .created_node
@@ -453,7 +453,7 @@ async fn share_links_grant_anonymous_read_only_access_until_revoked() {
             parent: None,
             index: None,
             text: "Idea".into(),
-            color: Color::Blue,
+            color: Color::BLUE,
         })
         .unwrap();
     assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);

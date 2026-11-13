@@ -13,7 +13,8 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
-import { NODE_COLORS } from "../webapp/src/node-colors";
+import { DEFAULT_QUICK_COLORS } from "../webapp/src/generated/mindgrab-state/model";
+import { colorLabel } from "../webapp/src/node-colors";
 import { PROJECT_FILE_VERSION } from "../webapp/src/project-import-export";
 import type { Harness } from "./harness";
 
@@ -49,9 +50,11 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // Reduced motion turns off color easing, so fills are final when read.
   context = await browser.newContext({
     viewport: { width: 1200, height: 800 },
     permissions: ["clipboard-read", "clipboard-write"],
+    reducedMotion: "reduce",
   });
   page = await context.newPage();
   const errors: Error[] = [];
@@ -386,12 +389,9 @@ describe("node colors", () => {
     node(id)
       .locator(".map-node-card")
       .evaluate((el) => getComputedStyle(el).backgroundColor);
-  const openColors = async () => {
-    await page.getByRole("button", { name: "Color", exact: true }).click();
-    await page
-      .getByRole("region", { name: "Selected node color controls" })
-      .waitFor();
-  };
+  // Wide screens show the style panel whenever an idea is selected.
+  const openColors = () =>
+    page.getByRole("region", { name: "Idea style" }).waitFor();
 
   test("the default fill and every palette swatch render with a background", async () => {
     const root = await rootId();
@@ -399,18 +399,20 @@ describe("node colors", () => {
       (await call("content")).nodes.find(
         (node: { id: string }) => node.id === root,
       )?.color,
-    ).toBe("blue");
+    ).toBe("slate");
     expect(await background(root)).not.toBe("rgba(0, 0, 0, 0)");
     await node(root).click();
     await openColors();
     const fills = new Set<string>();
     const swatches = new Set<string>();
-    for (const color of NODE_COLORS) {
+    for (const color of DEFAULT_QUICK_COLORS) {
+      // On the central idea the white card goes by "Default".
       const choice = page.getByRole("button", {
-        name: new RegExp(`^${color.label}(, selected)?$`),
+        name: colorLabel(color, true),
+        exact: true,
       });
       const swatch = await choice
-        .locator("span")
+        .locator(".style-chip")
         .evaluate((el) => getComputedStyle(el).backgroundColor);
       expect(swatch).not.toBe("rgba(0, 0, 0, 0)");
       await choice.click();
@@ -420,12 +422,12 @@ describe("node colors", () => {
         (await call("content")).nodes.find(
           (node: { id: string }) => node.id === root,
         )?.color,
-      ).toBe(color.value);
+      ).toBe(color);
       fills.add(fill);
       swatches.add(swatch);
     }
-    expect(fills.size).toBe(NODE_COLORS.length);
-    expect(swatches.size).toBe(NODE_COLORS.length);
+    expect(fills.size).toBe(DEFAULT_QUICK_COLORS.length);
+    expect(swatches.size).toBe(DEFAULT_QUICK_COLORS.length);
   });
 
   test("node and branch scopes recolor the intended nodes and undo together", async () => {
@@ -443,7 +445,7 @@ describe("node colors", () => {
       original[id] = await background(id);
     const originalFill = original[child];
     await openColors();
-    await page.getByRole("button", { name: "Rose", exact: true }).click();
+    await page.getByRole("button", { name: "Red 200", exact: true }).click();
     const roseFill = await background(child);
     expect(roseFill).not.toBe(originalFill);
     for (const id of [root, grandchild, sibling]) {
@@ -451,16 +453,20 @@ describe("node colors", () => {
         (await call("content")).nodes.find(
           (node: { id: string }) => node.id === id,
         )?.color,
-      ).toBe("blue");
+      ).toBe("slate");
       expect(await background(id)).toBe(original[id]);
     }
 
-    await page.getByText("This branch", { exact: true }).click();
+    await page
+      .getByRole("button", { name: "This branch", exact: true })
+      .click();
     expect(
-      await page.getByRole("radio", { name: "This branch" }).isChecked(),
-    ).toBe(true);
+      await page
+        .getByRole("button", { name: "This branch", exact: true })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
     const updates = await call("localUpdates");
-    await page.getByRole("button", { name: "Violet", exact: true }).click();
+    await page.getByRole("button", { name: "Blue 200", exact: true }).click();
     expect(await call("localUpdates")).toBe(updates + 1);
     const violetFill = await background(child);
     expect(violetFill).not.toBe(roseFill);
@@ -469,7 +475,7 @@ describe("node colors", () => {
         (await call("content")).nodes.find(
           (node: { id: string }) => node.id === id,
         )?.color,
-      ).toBe("violet");
+      ).toBe("blue-200");
       expect(await background(id)).toBe(violetFill);
     }
     for (const id of [root, sibling]) {
@@ -477,7 +483,7 @@ describe("node colors", () => {
         (await call("content")).nodes.find(
           (node: { id: string }) => node.id === id,
         )?.color,
-      ).toBe("blue");
+      ).toBe("slate");
       expect(await background(id)).toBe(original[id]);
     }
 
@@ -486,13 +492,13 @@ describe("node colors", () => {
       (await call("content")).nodes.find(
         (node: { id: string }) => node.id === child,
       )?.color,
-    ).toBe("rose");
+    ).toBe("red-200");
     expect(await background(child)).toBe(roseFill);
     expect(
       (await call("content")).nodes.find(
         (node: { id: string }) => node.id === grandchild,
       )?.color,
-    ).toBe("blue");
+    ).toBe("slate");
     expect(await background(grandchild)).toBe(original[grandchild]);
   });
 });

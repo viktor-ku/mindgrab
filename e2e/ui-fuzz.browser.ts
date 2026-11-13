@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium, firefox, webkit } from "playwright";
 import type { ViteDevServer } from "vite";
+import { isNodeColor } from "../webapp/src/node-colors";
 import type { Harness } from "./harness";
 import { createServer } from "vite";
 
@@ -593,16 +594,6 @@ function describeDiff(expected: Doc, actual: Doc) {
   return lines.slice(0, 12).join("\n  ");
 }
 
-const COLORS = [
-  "blue",
-  "teal",
-  "green",
-  "amber",
-  "orange",
-  "rose",
-  "violet",
-  "slate",
-];
 // Structural rules any document must satisfy (as webapp/tests/fuzz-helpers.ts).
 function documentProblem(view: Doc): string | undefined {
   const byId = new Map(view.nodes.map((node) => [node.id, node]));
@@ -622,8 +613,7 @@ function documentProblem(view: Doc): string | undefined {
       return `node ${id} depth ${node.depth}, expected ${depth}`;
     if (node.text.length > 65_536 || node.note.length > 65_536)
       return `node ${id} over limit`;
-    if (!COLORS.includes(node.color))
-      return `node ${id} has color ${node.color}`;
+    if (!isNodeColor(node.color)) return `node ${id} has color ${node.color}`;
     if (
       node.position &&
       !(Number.isFinite(node.position.x) && Number.isFinite(node.position.y))
@@ -1115,24 +1105,17 @@ class Runner {
         };
       }
       case "color": {
-        if (
-          !state.contextMenu &&
-          !(await this.target('[aria-label="Selected node color controls"]'))
-        ) {
-          const open = await this.target('button[aria-label="Color"]');
-          if (!open) return "skip";
-          await page.mouse.click(open.x, open.y);
-          await this.settle();
-        }
+        // The style panel stands beside the map whenever an idea is selected.
+        const panel = '[aria-label="Idea style"]';
         const scope = await this.target(
-          '[aria-label="Selected node color controls"] .color-scope',
+          `${panel} .style-segment`,
           action.scope,
         );
         if (!scope) return "skip";
         await page.mouse.click(scope.x, scope.y);
         await this.settle();
         const swatch = await this.target(
-          '[aria-label="Selected node color controls"] .color-choice',
+          `${panel} .style-swatch:not([aria-label="Other color"])`,
           action.c,
         );
         if (!swatch) return "skip";

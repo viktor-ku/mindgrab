@@ -1,15 +1,22 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
+import type { PreferenceTab } from "./app-search";
+import { ColorSettings } from "./ColorSettings";
 import { Dialog } from "./Dialog";
 import { LockIcon } from "./icons";
-import type { SavingPreferences } from "./project-document";
+import type { ColorPreferences, SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
 import { press } from "./press";
 
 export function ProjectPreferences(props: {
   open: boolean;
   onClose: () => void;
+  // The section shown, from the address; saving when absent.
+  section?: PreferenceTab;
+  onSection: (section: PreferenceTab) => void;
   saving: SavingPreferences;
   onChange: (value: SavingPreferences) => void;
+  colors: ColorPreferences;
+  onColors: (value: ColorPreferences) => void;
   busy: boolean;
   error: string;
   cloudStatus?: CloudStatus;
@@ -22,21 +29,18 @@ export function ProjectPreferences(props: {
   let firstSwitch: HTMLButtonElement | undefined;
   const sections = () => [
     { id: "saving" as const, label: "Saving" },
+    { id: "colors" as const, label: "Colors" },
     { id: "backup" as const, label: "Backup" },
     // Only where the dialog is the way to it: on phones.
     ...(props.onReviewAnalytics
       ? [{ id: "privacy" as const, label: "Privacy" }]
       : []),
   ];
-  type Section = ReturnType<typeof sections>[number]["id"];
-  const [section, setSection] = createSignal<Section>("saving");
   // A section that went away, such as Privacy off the phone, shows saving.
   const current = () =>
-    sections().some((item) => item.id === section()) ? section() : "saving";
-  // Each opening starts at saving: the Share errand comes here for it.
-  createEffect(() => {
-    if (props.open) setSection("saving");
-  });
+    sections().some((item) => item.id === props.section)
+      ? (props.section as PreferenceTab)
+      : "saving";
   return (
     <Dialog
       open={props.open}
@@ -57,7 +61,7 @@ export function ProjectPreferences(props: {
                 type="button"
                 class="menu-item w-auto! shrink-0 sm:w-full!"
                 aria-current={current() === item.id ? "true" : undefined}
-                {...press(() => setSection(item.id))}
+                {...press(() => props.onSection(item.id))}
               >
                 {item.label}
               </button>
@@ -65,7 +69,7 @@ export function ProjectPreferences(props: {
           </For>
         </nav>
         <div class="min-h-0 flex-1 overflow-y-auto px-6 pt-5 pb-8">
-          <div class="max-w-xl">
+          <div class="preferences-body">
             <h3 class="mb-2 text-base font-semibold text-stone-900">
               {sections().find((item) => item.id === current())?.label}
             </h3>
@@ -75,7 +79,7 @@ export function ProjectPreferences(props: {
                 existing copy from that location. Your open map stays available
                 in this tab.
               </p>
-              <div class="flex flex-col gap-6">
+              <div class="flex max-w-2xl flex-col gap-6">
                 <For
                   each={[
                     {
@@ -170,7 +174,7 @@ export function ProjectPreferences(props: {
                   (!props.saving.cloud || !props.signedIn)
                 }
               >
-                <div class="mt-8 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                <div class="mt-8 max-w-2xl rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
                   <p class="font-semibold">This map lives only in memory.</p>
                   <p>
                     Export a backup before closing or reloading this tab. Import
@@ -233,6 +237,9 @@ export function ProjectPreferences(props: {
                   Retry
                 </button>
               </Show>
+            </Show>
+            <Show when={current() === "colors"}>
+              <ColorSettings colors={props.colors} onChange={props.onColors} />
             </Show>
             <Show when={current() === "backup"}>
               <p class="mb-4 text-sm leading-6 text-stone-600">

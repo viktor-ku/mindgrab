@@ -31,7 +31,7 @@ import {
   visibleMindMap,
 } from "./mind-map";
 import type { NodeSize } from "./mind-map";
-import { NODE_COLORS } from "./node-colors";
+import { lineLook } from "./node-colors";
 import { NoteHeading } from "./NotesPanel";
 import { Outline } from "./Outline";
 import { createPresence } from "./presence";
@@ -578,13 +578,8 @@ export function SharedProject(props: { token: string }) {
                     <path
                       d={connectionPath(connection())}
                       fill="none"
-                      class={
-                        (
-                          NODE_COLORS.find(
-                            (option) => option.value === connection().to.color,
-                          ) ?? NODE_COLORS[0]
-                        ).lineClass
-                      }
+                      class={lineLook(connection().to.color).class}
+                      style={lineLook(connection().to.color).style}
                     />
                   )}
                 </Show>

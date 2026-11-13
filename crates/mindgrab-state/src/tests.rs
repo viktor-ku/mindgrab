@@ -6,7 +6,7 @@ fn create(project: &mut Project, parent: Option<&str>, text: &str) -> String {
             parent: parent.map(String::from),
             index: None,
             text: text.into(),
-            color: Color::Blue,
+            color: Color::BLUE,
         })
         .unwrap()
         .created_node
@@ -48,7 +48,7 @@ fn commands_own_order_colors_positions_and_preferences() {
     project
         .apply(Command::SetColor {
             id: first.clone(),
-            color: Color::Teal,
+            color: Color::TEAL,
         })
         .unwrap();
     project
@@ -65,7 +65,7 @@ fn commands_own_order_colors_positions_and_preferences() {
         .unwrap();
     let view = project.view().unwrap();
     assert_eq!(view.nodes[0].children, [second, first.clone()]);
-    assert_eq!(view.nodes[2].color, Color::Teal);
+    assert_eq!(view.nodes[2].color, Color::TEAL);
     assert_eq!(view.nodes[2].depth, 1);
     assert_eq!(
         view.saving,
@@ -262,7 +262,7 @@ fn invalid_commands_do_not_change_state() {
             parent: None,
             index: Some(10),
             text: "invalid".into(),
-            color: Color::Blue,
+            color: Color::BLUE,
         },
         Command::SetPosition {
             id: root.clone(),
@@ -298,6 +298,163 @@ fn rejected_remote_schema_does_not_poison_state_or_undo() {
     assert!(project.can_undo());
     project.apply(Command::Undo).unwrap();
     assert!(project.view().unwrap().nodes.is_empty());
+}
+
+#[test]
+fn colors_are_named_colors_or_tailwind_shades_spelled_one_way() {
+    for name in NAMED_COLORS {
+        let color: Color = name.parse().unwrap();
+        assert_eq!(color.to_string(), name);
+    }
+    for family in COLOR_FAMILIES {
+        for shade in COLOR_SHADES {
+            let text = format!("{family}-{shade}");
+            let color: Color = text.parse().unwrap();
+            assert_eq!(color, Color::shade(family, shade).unwrap());
+            assert_eq!(color.to_string(), text);
+            assert_eq!(
+                serde_json::to_value(color).unwrap(),
+                serde_json::json!(text)
+            );
+        }
+    }
+    for text in [
+        "", "sky", "Sky-400", "sky-450", "sky-0400", "sky-+400", "sky-400 ", "-400", "white",
+        "invalid",
+    ] {
+        assert!(text.parse::<Color>().is_err(), "{text:?} was accepted");
+        assert!(serde_json::from_value::<Color>(serde_json::json!(text)).is_err());
+    }
+}
+
+#[test]
+fn tailwind_shades_are_stored_and_survive_a_snapshot() {
+    let mut project = Project::new("Shades").unwrap();
+    let root = create(&mut project, None, "root");
+    let child = create(&mut project, Some(&root), "child");
+    project
+        .apply(Command::ColorBranch {
+            id: root.clone(),
+            color: Color::shade("sky", 400).unwrap(),
+        })
+        .unwrap();
+    project
+        .apply(Command::SetColor {
+            id: child.clone(),
+            color: Color::shade("mauve", 950).unwrap(),
+        })
+        .unwrap();
+    let copy = Project::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    let colors: Vec<String> = copy
+        .view()
+        .unwrap()
+        .nodes
+        .iter()
+        .map(|node| node.color.to_string())
+        .collect();
+    assert_eq!(colors, ["sky-400", "mauve-950"]);
+}
+
+#[test]
+fn color_preferences_default_then_store_outside_undo() {
+    let mut project = Project::new("Palette").unwrap();
+    create(&mut project, None, "root");
+    let defaults = project.view().unwrap().colors;
+    assert_eq!(defaults, ColorPreferences::default());
+    assert_eq!(
+        defaults
+            .quick
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        DEFAULT_QUICK_COLORS
+    );
+    assert_eq!(defaults.new_ideas, Color::SLATE);
+
+    let chosen = ColorPreferences {
+        quick: vec![
+            Color::shade("sky", 400).unwrap(),
+            Color::SLATE,
+            Color::shade("mauve", 950).unwrap(),
+        ],
+        new_ideas: Color::shade("lime", 200).unwrap(),
+    };
+    let result = project
+        .apply(Command::SetColors {
+            quick: chosen.quick.clone(),
+            new_ideas: chosen.new_ideas,
+        })
+        .unwrap();
+    assert!(result.changed);
+    assert_eq!(project.view().unwrap().colors, chosen);
+    // The same choice again changes nothing.
+    assert!(
+        !project
+            .apply(Command::SetColors {
+                quick: chosen.quick.clone(),
+                new_ideas: chosen.new_ideas,
+            })
+            .unwrap()
+            .changed
+    );
+    // An empty list is a choice too.
+    project
+        .apply(Command::SetColors {
+            quick: Vec::new(),
+            new_ideas: chosen.new_ideas,
+        })
+        .unwrap();
+    assert!(project.view().unwrap().colors.quick.is_empty());
+    // Undo reaches past them to the idea, as with saving preferences.
+    project.apply(Command::Undo).unwrap();
+    let view = project.view().unwrap();
+    assert!(view.nodes.is_empty());
+    assert!(view.colors.quick.is_empty());
+
+    let copy = Project::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    assert_eq!(copy.view().unwrap().colors.new_ideas, chosen.new_ideas);
+}
+
+#[test]
+fn color_preferences_are_white_or_shades_each_once() {
+    let mut project = Project::new("Palette").unwrap();
+    for (quick, new_ideas) in [
+        (vec![Color::BLUE], Color::SLATE),
+        (vec![Color::SLATE], Color::ROSE),
+        (
+            vec![
+                Color::shade("sky", 400).unwrap(),
+                Color::shade("sky", 400).unwrap(),
+            ],
+            Color::SLATE,
+        ),
+    ] {
+        assert!(
+            project
+                .apply(Command::SetColors { quick, new_ideas })
+                .is_err()
+        );
+    }
+    assert_eq!(project.view().unwrap().colors, ColorPreferences::default());
+
+    // Hidden data that breaks the rules makes the document invalid.
+    let seed = Project::new("Palette").unwrap();
+    for colors in [
+        serde_json::json!({"quick": ["blue"], "newIdeas": "slate"}),
+        serde_json::json!({"quick": ["sky-400", "sky-400"], "newIdeas": "slate"}),
+        serde_json::json!({"quick": [], "newIdeas": "slate", "extra": true}),
+        serde_json::json!({"quick": [], "newIdeas": "sky-450"}),
+    ] {
+        let raw = LoroDoc::from_snapshot(&seed.snapshot().unwrap()).unwrap();
+        raw.get_map("project")
+            .insert("colors", loro::LoroValue::from(colors.clone()))
+            .unwrap();
+        raw.commit();
+        assert!(
+            Project::from_snapshot(&raw.export(ExportMode::Snapshot).unwrap()).is_err(),
+            "{colors} was accepted"
+        );
+    }
 }
 
 #[test]
@@ -939,7 +1096,7 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
                 .apply(Command::CreateSibling {
                     id: n0.clone(),
                     text: "n1".into(),
-                    color: Color::Blue,
+                    color: Color::BLUE,
                 })
                 .unwrap()
                 .created_node
@@ -948,7 +1105,7 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
             r2.start_group().unwrap();
             r2.apply(Command::SetColor {
                 id: n0.clone(),
-                color: Color::Green,
+                color: Color::GREEN,
             })
             .unwrap();
             if !grouped {
@@ -965,7 +1122,7 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
             r2.start_group().unwrap();
             r0.apply(Command::SetColor {
                 id: n1.clone(),
-                color: Color::Green,
+                color: Color::GREEN,
             })
             .unwrap();
             r0.apply(Command::DeleteNode { id: n0.clone() }).unwrap();

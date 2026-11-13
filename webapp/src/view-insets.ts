@@ -2,15 +2,25 @@
 // nodes.
 const VIEW_INSETS = { top: 76, right: 24, bottom: 72, left: 24 } as const;
 
-// How far the side panel reaches in from each canvas edge, 0 when closed. This
-// repeats its wrapper's classes: 12px from the right edge, `w-96 xl:w-[28rem]`.
-// Phones show it over the whole map, so it takes no room there.
-export function panelEdges(width: number, open: boolean) {
+// The style panel's `w-56`, 12px from the left edge.
+export const STYLE_PANEL_LEFT = 12;
+export const STYLE_PANEL_WIDTH = 224;
+
+// How far the panels reach in from each canvas edge, 0 when closed. The side
+// panel repeats its wrapper's classes: 12px from the right edge,
+// `w-96 xl:w-[28rem]`. The style panel stands at the left while an idea is
+// selected. Phones show both over the map, so they take no room there.
+export function panelEdges(width: number, open: boolean, style = false) {
   const wide = width >= 640;
-  return { left: 0, right: wide && open ? (width >= 1280 ? 460 : 396) : 0 };
+  return {
+    left: wide && style ? STYLE_PANEL_LEFT + STYLE_PANEL_WIDTH : 0,
+    right: wide && open ? (width >= 1280 ? 460 : 396) : 0,
+  };
 }
 
-// The map fits and follows the selection in the room left beside the panel.
+// The map fits and follows the selection in the room left beside the side
+// panel. The style panel takes only a corner of it, which the map keeps the
+// selected idea out of on its own.
 export function panelInsets(width: number, open: boolean) {
   const edges = panelEdges(width, open);
   return {
