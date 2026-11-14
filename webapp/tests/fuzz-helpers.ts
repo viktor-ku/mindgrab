@@ -1,7 +1,9 @@
 // Shared pieces for the document fuzzers: a seeded random source, random
 // edits through the same document API the editor uses, and checks that any
 // document view must satisfy.
-import { NODE_COLORS } from "../src/node-colors";
+import { DEFAULT_QUICK_COLORS } from "../src/generated/mindgrab-state/model";
+import { isNodeColor } from "../src/node-colors";
+import type { NodeColor } from "../src/node-colors";
 import {
   clearPositions,
   createChild,
@@ -21,6 +23,24 @@ import {
   translateSubtree,
 } from "../src/project-document";
 import type { DocumentView, ProjectDocument } from "../src/project-document";
+
+// What the fuzz tests color ideas with: every named color, the presets and a
+// spread of shades across light, mid and dark.
+export const FUZZ_COLORS: readonly NodeColor[] = [
+  "blue",
+  "teal",
+  "green",
+  "amber",
+  "orange",
+  "rose",
+  "violet",
+  "slate",
+  ...DEFAULT_QUICK_COLORS.filter((color) => color.includes("-")),
+  "sky-50",
+  "lime-400",
+  "fuchsia-600",
+  "mauve-950",
+];
 
 // Seeds and lengths can be raised for long runs:
 // FUZZ_SEEDS=500 FUZZ_STEPS=1000 bun test --conditions browser tests/fuzz-*
@@ -86,7 +106,7 @@ const ids = (view: DocumentView) => view.nodes.map((node) => node.id);
 export function randomEdit(rng: Random, doc: ProjectDocument): string {
   const view = doc.view();
   const id = rng.pick(ids(view));
-  const color = (rng.pick(NODE_COLORS) as (typeof NODE_COLORS)[number]).value;
+  const color = rng.pick(FUZZ_COLORS) as (typeof FUZZ_COLORS)[number];
   const text = () => randomText(rng);
   const roll = rng.int(19);
   if (!id || roll === 0) {
@@ -243,8 +263,7 @@ export function checkView(view: DocumentView) {
       fail(`node ${id} depth ${node.depth}, expected ${depth}`);
     if (node.text.length > LIMITS.text) fail(`node ${id} text over limit`);
     if (node.note.length > LIMITS.note) fail(`node ${id} note over limit`);
-    if (!NODE_COLORS.some((color) => color.value === node.color))
-      fail(`node ${id} has color ${node.color}`);
+    if (!isNodeColor(node.color)) fail(`node ${id} has color ${node.color}`);
     if (
       node.position &&
       !(Number.isFinite(node.position.x) && Number.isFinite(node.position.y))

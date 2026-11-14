@@ -1,7 +1,9 @@
 import init, {
   ProjectState as WasmState,
 } from "./generated/mindgrab-state/mindgrab_state";
+import { DEFAULT_QUICK_COLORS } from "./generated/mindgrab-state/model";
 import type {
+  ColorPreferences,
   Command,
   CommandResult,
   ProjectView as RustView,
@@ -46,7 +48,10 @@ export const ORIGIN = {
   persistence: Symbol("persistence"),
   import: Symbol("import"),
 } as const;
-export const DEFAULT_NODE_COLOR: NodeColor = "blue";
+// New ideas start slate. Maps made before that started blue, so their
+// untouched seed still counts as untouched.
+export const DEFAULT_NODE_COLOR: NodeColor = "slate";
+const EARLIER_DEFAULT_NODE_COLOR: NodeColor = "blue";
 export type { SavingPreferences };
 export const SavingPreferencesSchema = z.strictObject({
   local: z.boolean(),
@@ -224,6 +229,28 @@ export function projectName(doc: ProjectDocument) {
 export function savingPreferences(doc: ProjectDocument): SavingPreferences {
   return doc.ready ? doc.view().saving : { ...DEFAULT_SAVING_PREFERENCES };
 }
+export type { ColorPreferences };
+export const DEFAULT_COLOR_PREFERENCES: ColorPreferences = {
+  quick: [...DEFAULT_QUICK_COLORS],
+  newIdeas: "slate",
+};
+export function colorPreferences(doc: ProjectDocument): ColorPreferences {
+  return doc.ready ? doc.view().colors : DEFAULT_COLOR_PREFERENCES;
+}
+export const sameColorPreferences = (
+  a: ColorPreferences,
+  b: ColorPreferences,
+) =>
+  a.newIdeas === b.newIdeas &&
+  a.quick.length === b.quick.length &&
+  a.quick.every((color, index) => color === b.quick[index]);
+// Quick colors and the new-idea color: preferences, so not undoable.
+export function setColorPreferences(
+  doc: ProjectDocument,
+  value: ColorPreferences,
+) {
+  return doc.dispatch({ type: "setColors", ...value }).changed;
+}
 export function setSavingPreferences(
   doc: ProjectDocument,
   value: SavingPreferences,
@@ -249,20 +276,27 @@ export function projectForest(content: DocumentView): ForestNode[] {
   const convert = (nodes: MindMapNode[]): ForestNode[] =>
     nodes.map(({ next, ...node }) => ({
       ...node,
-      color: node.color ?? "blue",
+      color: node.color ?? DEFAULT_NODE_COLOR,
       children: convert(next ?? []),
     }));
   return convert(projectMindMap(content));
 }
 // The untouched seed every new map starts from: one "New idea" root with no
-// content and a generated name. A rename is work, so it counts as an edit.
-export function isPristineSeed(forest: ForestNode[], name: string) {
+// content and a generated name. A rename is work, so it counts as an edit,
+// and so does choosing the map's colors.
+export function isPristineSeed(
+  forest: ForestNode[],
+  name: string,
+  colors: ColorPreferences = DEFAULT_COLOR_PREFERENCES,
+) {
   if (forest.length !== 1 || !isGeneratedProjectName(name)) return false;
+  if (!sameColorPreferences(colors, DEFAULT_COLOR_PREFERENCES)) return false;
   const [root] = forest;
   return (
     root.text === "New idea" &&
     !root.note &&
-    root.color === DEFAULT_NODE_COLOR &&
+    (root.color === DEFAULT_NODE_COLOR ||
+      root.color === EARLIER_DEFAULT_NODE_COLOR) &&
     !root.position &&
     root.children.length === 0
   );
@@ -278,7 +312,7 @@ function create(
     parent,
     index,
     text: init.text ?? "",
-    color: init.color ?? "blue",
+    color: init.color ?? DEFAULT_NODE_COLOR,
   }).createdNode!;
   if (init.note) setNodeNote(doc, id, init.note);
   if (init.position)
@@ -307,7 +341,7 @@ export function createSibling(
     type: "createSibling",
     id,
     text: init.text ?? "",
-    color: init.color ?? "blue",
+    color: init.color ?? DEFAULT_NODE_COLOR,
   }).createdNode!;
   if (init.note) setNodeNote(doc, sibling, init.note);
   return sibling;
@@ -403,6 +437,8 @@ export function importProjectDocument(id: string, view: DocumentView) {
     }
     if (ids.size !== nodes.size) throw new Error("Invalid project hierarchy.");
     setSavingPreferences(doc, view.saving);
+    if (!sameColorPreferences(view.colors, DEFAULT_COLOR_PREFERENCES))
+      setColorPreferences(doc, view.colors);
     doc.importedIds = ids;
     doc.clearHistory();
     return doc;

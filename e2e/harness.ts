@@ -1,4 +1,6 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
+import { RouterProvider } from "@tanstack/solid-router";
+import { appRouter } from "./app-router";
 import { queryClient } from "../webapp/src/query-client";
 import { createComponent, render } from "solid-js/web";
 import type { ProjectDocument } from "../webapp/src/project-document";
@@ -45,7 +47,14 @@ const flatten = (nodes: MindMapNode[]): MindMapNode[] =>
   nodes.flatMap((node) => [node, ...flatten(node.next ?? [])]);
 const nodes = (doc: ProjectDocument) => flatten(projectMindMap(doc.view()));
 
+const router = appRouter(() => createComponent(App, { onDocument: link }));
+
 const harness = {
+  // The app's address, such as "/?preferences=true&tab=colors".
+  address: () => router.state.location.href,
+  back: () => router.history.back(),
+  // Opens an address, as a link or a typed URL would.
+  go: (href: string) => router.navigate({ href }),
   projectId: () => local.id,
   content: () => local.view(),
   ids: () => nodes(remote).map((node) => node.id),
@@ -98,7 +107,7 @@ render(
     createComponent(QueryClientProvider, {
       client: queryClient,
       get children() {
-        return createComponent(App, { onDocument: link });
+        return createComponent(RouterProvider, { router });
       },
     }),
   root,

@@ -8,6 +8,8 @@ import {
   createQuery,
   useQueryClient,
 } from "@tanstack/solid-query";
+import { getRouteApi, useRouter } from "@tanstack/solid-router";
+import type { PreferenceTab } from "./app-search";
 import { catalogKey, QUICK_RETRIES, saveRetryDelay } from "./query-client";
 import {
   batch,
@@ -22,7 +24,7 @@ import {
   Show,
   untrack,
 } from "solid-js";
-import type { ProjectDocument } from "./project-document";
+import type { ColorPreferences, ProjectDocument } from "./project-document";
 import { EditHistory } from "./undo-history";
 import {
   branchIds,
@@ -53,6 +55,7 @@ import {
   renameProject,
   setSavingPreferences,
   reorderNode,
+  setColorPreferences,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
@@ -69,7 +72,7 @@ import type {
   RepositoryScope,
 } from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
-import { NODE_COLORS } from "./node-colors";
+import { lineLook, nodeLook } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
 import {
@@ -161,7 +164,14 @@ import { SaveErrorDialog } from "./SaveErrorDialog";
 import { saveIndicator } from "./save-indicator";
 import { createPresence } from "./presence";
 import { type SideTab, SidePanel } from "./SidePanel";
-import { panelEdges, panelInsets } from "./view-insets";
+import {
+  panelEdges,
+  panelInsets,
+  STYLE_PANEL_LEFT,
+  STYLE_PANEL_WIDTH,
+} from "./view-insets";
+import { StylePanel } from "./StylePanel";
+import type { ColorScope } from "./StylePanel";
 import { press } from "./press";
 
 const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
@@ -174,6 +184,10 @@ const ARROW_DIRECTIONS: ReadonlyMap<string, "left" | "right" | "up" | "down"> =
 
 // Letter shortcuts follow the typed character, falling back to the physical key
 // when the active layout does not type Latin letters (for example Cyrillic).
+// A finger rather than a mouse; the palette's colors are larger for it.
+const COARSE_POINTER =
+  typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+
 function matchesLetter(event: KeyboardEvent, letter: string) {
   const key = event.key.toLowerCase();
   return (
@@ -360,10 +374,7 @@ export function Node(props: {
   onPointerDown: (event: PointerEvent) => void;
 }) {
   let container!: HTMLDivElement;
-  const color = () =>
-    NODE_COLORS.find((option) => option.value === props.color) ??
-    NODE_COLORS[0];
-  const fill = () => (props.root ? color().rootClass : color().nodeClass);
+  const look = () => nodeLook(props.color, props.root);
   onMount(() => {
     const observer = new ResizeObserver(([entry]) => {
       // Layout sizes stay in canvas units even when the viewport is zoomed.
@@ -404,20 +415,20 @@ export function Node(props: {
       <Show when={props.collapsed}>
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-[0.625rem] border pointer-events-none ${fill()}`}
+          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          style={look().style}
         />
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-[0.625rem] border pointer-events-none ${fill()}`}
+          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          style={look().style}
         />
       </Show>
       <div
-        class={`map-node-card relative flex items-center gap-2 box-border border ${fill()}`}
-        classList={{
-          "map-node-selected": props.selected,
-          "map-node-hinted": props.hinted && !props.selected,
-        }}
-        style={{ "min-height": `${NODE_MIN_HEIGHT}px` }}
+        // One class string: Solid rewrites it when the fill changes, which
+        // would drop a class added through classList.
+        class={`map-node-card relative flex items-center gap-2 box-border border ${look().class}${props.selected ? " map-node-selected" : props.hinted ? " map-node-hinted" : ""}`}
+        style={{ ...look().style, "min-height": `${NODE_MIN_HEIGHT}px` }}
       >
         <Show
           when={props.writing}
@@ -523,6 +534,9 @@ interface ContextMenuState {
   // Opens upward from (x, y), for menus anchored to the bottom toolbar.
   above?: boolean;
 }
+
+// The editor is the "/" route; its search carries what is open over the map.
+const editorRoute = getRouteApi("/");
 
 export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const deployment = backendDeployment();
@@ -1494,6 +1508,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         },
       ],
       view().name(),
+      view().colors(),
     );
   });
   // Set once the cloud lookup has said the account has no maps at all: the
@@ -1775,7 +1790,58 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
   const [showBackup, setShowBackup] = createSignal(false);
-  const [showPreferences, setShowPreferences] = createSignal(false);
+  // Project preferences live in the address, `?preferences=true&tab=colors`,
+  // so a reload or a link opens them again and Back closes them. The editor
+  // route's search is typed by its schema (see app-search.ts).
+  const router = useRouter();
+  const search = editorRoute.useSearch();
+  const navigate = editorRoute.useNavigate();
+  const preferencesInAddress = () => search().preferences === true;
+  // Asked for here, by a press, they open at once. From the address alone, as
+  // on a reload, they wait for the map: an open overlay holds the first map
+  // back, and they would show, and change, the placeholder's preferences.
+  const [preferencesAsked, setPreferencesAsked] = createSignal(false);
+  const showPreferences = () =>
+    preferencesInAddress() && (storageReady() || preferencesAsked());
+  const preferencesTab = () => search().tab;
+  // Opening adds a history entry; closing returns to the one before it when
+  // this tab opened them, so Back never reopens what was just closed.
+  let preferencesPushed = false;
+  let preferencesClosing = false;
+  function openPreferences(tab: PreferenceTab = "saving") {
+    setPreferencesAsked(true);
+    if (preferencesInAddress()) return setPreferencesTab(tab);
+    preferencesPushed = true;
+    void navigate({
+      search: (prev) => ({ ...prev, preferences: true, tab }),
+    });
+  }
+  function closePreferences() {
+    // The dialog can report one close twice; the address changes once.
+    if (!preferencesInAddress() || preferencesClosing) return;
+    preferencesClosing = true;
+    if (preferencesPushed) {
+      preferencesPushed = false;
+      router.history.back();
+    }
+    // Undefined keys leave the address.
+    else
+      void navigate({
+        search: (prev) => ({ ...prev, preferences: undefined, tab: undefined }),
+        replace: true,
+      });
+  }
+  createEffect(() => {
+    if (preferencesInAddress()) return;
+    preferencesClosing = false;
+    setPreferencesAsked(false);
+  });
+  // Tabs replace the entry: Back leaves the preferences, not the last tab.
+  function setPreferencesTab(tab: PreferenceTab) {
+    void navigate({ search: (prev) => ({ ...prev, tab }), replace: true });
+  }
+  const setShowPreferences = (open: boolean) =>
+    open ? openPreferences() : closePreferences();
   const [showShare, setShowShare] = createSignal(false);
   // Share sends people to the preferences to turn cloud saving on, and takes
   // them back once it is. An effect, not the dialog's onClose, which fires
@@ -1855,7 +1921,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const visibleForest = createMemo(() =>
     visibleMindMap(scopeForest(), collapsedIds()),
   );
-  const [colorScope, setColorScope] = createSignal<"node" | "branch">("node");
+  const [colorScope, setColorScope] = createSignal<ColorScope>("node");
   const [writing, setWriting] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<
     ContextMenuState | undefined
@@ -2077,15 +2143,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (bounds) fitBounds(bounds, 1.5);
   }
 
-  // Pans by the smallest amount that brings the node fully into view, so
-  // writing and keyboard navigation never continue offscreen.
-  function keepInView(id: string) {
+  // Pans by the smallest amount that brings the node fully into the room the
+  // open panels leave, so writing and keyboard navigation never continue
+  // offscreen. The style panel takes only a corner of that room, so an idea
+  // moves aside for it only when it would lie under it, unless `underPanel`
+  // lets it.
+  function keepInView(id: string, underPanel = false) {
     const node = positionedNodes().get(id);
     if (!node || !canvas) return;
     const origin = viewOrigin();
     const scale = zoom();
     const halfWidth = canvasSize().width / 2;
     const halfHeight = canvasSize().height / 2;
+    const insets = viewInsets();
     const screenLeft = left() + scale * (node.x - origin.x);
     const screenTop = top() + scale * (node.y - origin.y);
     const screenRight = screenLeft + scale * node.width;
@@ -2098,18 +2168,33 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           : end > max
             ? max - end
             : 0;
-    const dx = shift(
+    let dx = shift(
       screenLeft,
       screenRight,
-      -halfWidth + viewInsets().left,
-      halfWidth - viewInsets().right,
+      -halfWidth + insets.left,
+      halfWidth - insets.right,
     );
-    const dy = shift(
+    let dy = shift(
       screenTop,
       screenBottom,
-      -halfHeight + viewInsets().top,
-      halfHeight - viewInsets().bottom,
+      -halfHeight + insets.top,
+      halfHeight - insets.bottom,
     );
+    if (styleShown() && !underPanel) {
+      // The panel's box with 16px around it, from the canvas centre.
+      const clear = -halfWidth + STYLE_PANEL_LEFT + STYLE_PANEL_WIDTH + 16;
+      const foot = -halfHeight + styleTop() + stylePanelHeight() + 16;
+      if (screenLeft + dx < clear && screenTop + dy < foot) {
+        // Beside the panel while that keeps the idea clear of the side
+        // panel; in a window too narrow for both, under it while that keeps
+        // it above the window's foot. With room for neither it stays where
+        // the window has it, in view behind the panel.
+        const beside = clear - screenLeft;
+        const below = foot - screenTop;
+        if (screenRight + beside <= halfWidth - insets.right) dx = beside;
+        else if (screenBottom + below <= halfHeight - insets.bottom) dy = below;
+      }
+    }
     if (dx || dy) moveView({ left: left() + dx, top: top() + dy });
   }
 
@@ -2130,7 +2215,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         },
       ],
       ([id]) => {
-        if (id && !pointer) keepInView(id);
+        if (!id || pointer) return;
+        // An idea pressed on the map stays under the pointer, even in the
+        // corner the style panel then opens over: moving the map aside would
+        // slide the idea away from a double-click or a drag.
+        keepInView(id, pressSelecting);
       },
     ),
   );
@@ -2341,6 +2430,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           ?.focus(),
       );
   });
+  // Phones open the style panel from the selection toolbar; wider screens
+  // show it beside the map whenever an idea is selected.
   const [colorOpen, setColorOpen] = createSignal(false);
   createEffect(on(selectedId, () => setColorOpen(false), { defer: true }));
   // Keyboard users land on the current color when the popover opens.
@@ -2352,12 +2443,62 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queueMicrotask(() =>
           document
             .querySelector<HTMLButtonElement>(
-              '[aria-label="Selected node color controls"] .color-choice[aria-pressed="true"]',
+              '[aria-label="Idea style"] .style-swatch[aria-pressed="true"]',
             )
             ?.focus(),
         ),
       { defer: true },
     ),
+  );
+  // A color under the pointer (or keyboard focus) in the style panel shows on
+  // the ideas it would change, until the pointer leaves. Nothing is saved.
+  const [colorPreview, setColorPreview] = createSignal<NodeColor>();
+  createEffect(on(selectedId, () => setColorPreview(undefined)));
+  const previewIds = createMemo(() => {
+    const id = selectedId();
+    if (!id || !colorPreview()) return undefined;
+    return colorScope() === "branch" ? branchIds(forest(), id) : new Set([id]);
+  });
+  const shownColor = (id: string, color: NodeColor | undefined) =>
+    previewIds()?.has(id) ? colorPreview() : color;
+  // Drawn as a central idea: a root, or the idea a branch is focused on.
+  const selectedIsRoot = () =>
+    !details().get(selectedId() ?? "")?.parent || focusId() === selectedId();
+  const selectedLook = () => nodeLook(selectedNode()?.color, selectedIsRoot());
+  const stylePanel = (place: {
+    class: string;
+    ref?: (element: HTMLElement) => void;
+    palette?: "inline";
+  }) => (
+    <StylePanel
+      class={place.class}
+      ref={place.ref}
+      palette={place.palette}
+      color={selectedNode()?.color ?? DEFAULT_NODE_COLOR}
+      root={selectedIsRoot()}
+      descendants={details().get(selectedId() ?? "")?.descendants ?? 0}
+      scope={colorScope()}
+      quick={view().colors().quick}
+      onAddQuick={(color) =>
+        setColors({
+          ...view().colors(),
+          quick: [...view().colors().quick, color],
+        })
+      }
+      onManage={() => openPreferences("colors")}
+      onScope={(scope, e) => {
+        setColorScope(scope);
+        backToCanvas(e);
+      }}
+      onPick={(color, e) => {
+        // The pointer may rest on the color it picked; the map shows the
+        // document again, so an undo is seen.
+        setColorPreview(undefined);
+        colorSelectedNode(color);
+        if (!isPhone()) backToCanvas(e);
+      }}
+      onPreview={setColorPreview}
+    />
   );
 
   function resetPlacement(id: string) {
@@ -2479,7 +2620,30 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const sidePanel = createPresence(sideOpen, {
     restoreFocus: () => canvas.focus({ preventScroll: true }),
   });
+  const styleShown = () =>
+    !isPhone() && !!selectedId() && !writing() && !drag();
+  // The style panel takes a corner, not a side: the map fits and centres as
+  // if it were not there, and only an idea under it moves (see keepInView).
   const viewInsets = () => panelInsets(canvasSize().width, sideOpen());
+  // The style panel's height: its padding, the Apply to section and the Color
+  // label come to 118px, and each row of six colors (the plus is one) to 38px.
+  // The rows scroll past 30% of the window's height.
+  const stylePanelHeight = () =>
+    118 +
+    Math.min(
+      38 * Math.ceil((view().colors().quick.length + 1) / 6),
+      0.3 * canvasSize().height,
+    );
+  // Every color opens beside the style panel while there is room for it
+  // there, 12px clear of the side panel or the edge; otherwise inside the
+  // panel. It stands 20px from the panel and is 15rem wide, 20rem for a finger.
+  const paletteBeside = () =>
+    STYLE_PANEL_LEFT +
+      STYLE_PANEL_WIDTH +
+      20 +
+      (COARSE_POINTER ? 320 : 240) +
+      12 <=
+    canvasSize().width - panelEdges(canvasSize().width, sideOpen()).right;
   // A panel that opens over the selected idea moves the map aside, as
   // selecting that idea with the panel already open would.
   createEffect(
@@ -2510,22 +2674,42 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     right: `${strip.right}px`,
   });
   // The top bars keep to the strip between the open panels, 8px clear of
-  // each, so they never cover a panel's header.
-  const panelStrip = (): Strip => {
-    const edges = panelEdges(canvasSize().width, sideOpen());
+  // each, so they never cover a panel's header. Only they share a row with
+  // the style panel.
+  const panelStrip = (style = false): Strip => {
+    const edges = panelEdges(canvasSize().width, sideOpen(), style);
     return {
       left: edges.left ? edges.left + 8 : 12,
       right: edges.right ? edges.right + 8 : 12,
     };
   };
+  // The top bars share their row with the style panel while that leaves the
+  // breadcrumb its whole path; otherwise they keep the strip between the side
+  // panels and the style panel drops below them.
+  const CRUMB_ROOM = 480;
+  const styleInRow = () => {
+    const strip = panelStrip(true);
+    return canvasSize().width - strip.left - strip.right >= CRUMB_ROOM;
+  };
+  const topStrip = () => panelStrip(styleShown() && styleInRow());
+  const [topBarsHeight, setTopBarsHeight] = createSignal(0);
+  // The storage island shows in the corner where the style panel stands, so
+  // the panel starts 8px under it: the island's top is at 64px.
+  const [storageIslandHeight, setStorageIslandHeight] = createSignal(0);
+  const styleTop = () =>
+    Math.max(
+      72,
+      storageIslandHeight() ? 64 + storageIslandHeight() + 8 : 0,
+      !styleInRow() && topBarsHeight() ? 64 + topBarsHeight() + 8 : 0,
+    );
   // Beside open panels the breadcrumb keeps the focused branch readable: it
   // drops the steps above it first, then the label of the way out.
   const crumbRoom = () =>
     isPhone()
       ? Number.POSITIVE_INFINITY
-      : canvasSize().width - panelStrip().left - panelStrip().right;
+      : canvasSize().width - topStrip().left - topStrip().right;
   const crumbs = () =>
-    crumbRoom() < 480 ? focusPath().slice(-1) : focusPath();
+    crumbRoom() < CRUMB_ROOM ? focusPath().slice(-1) : focusPath();
   // Under about 900px the centred selection toolbar would run under the zoom
   // island, so it centres in the room left of it: the island's 241px, its
   // 12px margin and an 8px gap.
@@ -2595,7 +2779,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               if (entry.text.length > LIMITS.text) shortened = true;
               const init = {
                 text: entry.text.slice(0, LIMITS.text),
-                ...(entry.color && { color: entry.color }),
+                color: entry.color ?? view().colors().newIdeas,
               };
               const id = under
                 ? createChild(doc, under, init)
@@ -3308,7 +3492,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
       return;
     }
-    const init = { text: "New idea", ...(position && { position }) };
+    const init = {
+      text: "New idea",
+      color: view().colors().newIdeas,
+      ...(position && { position }),
+    };
     const id = selectedId();
     const anchorId =
       kind === "sibling"
@@ -3484,6 +3672,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
+  // The map's quick colors and new-idea color: preferences, not undoable.
+  function setColors(value: ColorPreferences) {
+    command((doc) => setColorPreferences(doc, value));
+  }
+
   function colorSelectedNode(color: NodeColor) {
     const id = selectedId();
     if (!id || writing()) return;
@@ -3532,6 +3725,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
   }
 
+  // True while a press on the map selects an idea; see the effect that keeps
+  // the selection in view.
+  let pressSelecting = false;
   function startPointer(e: PointerEvent, nodeId?: string) {
     if (
       !e.isPrimary ||
@@ -3545,7 +3741,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     suppressClick = false;
     if (nodeId) {
       finishWriting();
+      pressSelecting = true;
       select(nodeId);
+      pressSelecting = false;
     } else {
       finishWriting();
       setSelectedId(undefined);
@@ -4282,7 +4480,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     >
       <ProjectPreferences
         open={showPreferences()}
-        onClose={() => setShowPreferences(false)}
+        onClose={closePreferences}
+        section={preferencesTab()}
+        onSection={setPreferencesTab}
+        colors={view().colors()}
+        onColors={setColors}
         saving={view().saving()}
         onChange={(value) => {
           if (!savingMutation.isPending) savingMutation.mutate(value);
@@ -4517,6 +4719,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             data-no-pan
             data-toolbar
             class="map-toolbar pointer-events-auto flex w-80 max-w-full flex-col gap-1 p-2! text-xs text-stone-600 cursor-default"
+            ref={(el) => {
+              const observer = new ResizeObserver(() =>
+                setStorageIslandHeight(el.offsetHeight),
+              );
+              observer.observe(el);
+              onCleanup(() => {
+                observer.disconnect();
+                setStorageIslandHeight(0);
+              });
+            }}
           >
             <Show when={memoryOnly()}>
               <p role="status" class="text-amber-800">
@@ -4834,11 +5046,36 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           />
         </div>
       </Show>
+      {/* Like a drawing app's properties panel: the selected idea's style sits
+          at the left, under the storage island when that shows and under the
+          top bars when they need its room. */}
+      <Show when={styleShown()}>
+        <div
+          class="pointer-events-none absolute z-20 flex w-56"
+          style={{
+            left: `${STYLE_PANEL_LEFT}px`,
+            top: `${styleTop()}px`,
+            "--style-top": `${styleTop()}px`,
+          }}
+        >
+          {stylePanel({
+            class: "w-full",
+            palette: paletteBeside() ? undefined : "inline",
+          })}
+        </div>
+      </Show>
       <AnalyticsConsent />
       {/* One column, so these stack instead of covering each other. */}
       <div
         class="pointer-events-none absolute top-16 z-20 flex flex-col items-center gap-2"
-        style={stripStyle(panelStrip())}
+        style={stripStyle(topStrip())}
+        ref={(el) => {
+          const observer = new ResizeObserver(() =>
+            setTopBarsHeight(el.offsetHeight),
+          );
+          observer.observe(el);
+          onCleanup(() => observer.disconnect());
+        }}
       >
         <Show when={focusId()}>
           <nav
@@ -4976,110 +5213,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             aria-label="Selected idea"
             class="map-toolbar pointer-events-auto relative flex items-center gap-0.5 cursor-default"
           >
-            <Show when={colorOpen()}>
-              <section
-                aria-label="Selected node color controls"
-                class="map-toolbar absolute bottom-full left-1/2 mb-2 flex w-64 -translate-x-1/2 flex-col gap-2 outline-none"
-                // Opaque: it opens over the notice and the analytics banner,
-                // and inside the toolbar its own blur cannot hide them.
-                style={{ background: "var(--surface)" }}
-                ref={(el) =>
+            <Show when={isPhone() && colorOpen()}>
+              {stylePanel({
+                class:
+                  "absolute bottom-full left-1/2 mb-2 w-80 max-w-[calc(100vw-1.5rem)] -translate-x-1/2",
+                palette: "inline",
+                ref: (el) =>
                   transientLayer(el, {
                     trigger: () =>
                       document.querySelector<HTMLButtonElement>(
                         'button[aria-label="Color"]',
                       ),
                     close: () => setColorOpen(false),
-                  })
-                }
-              >
-                <fieldset class="grid grid-cols-2 gap-1 rounded-lg bg-stone-100 p-1">
-                  <legend class="sr-only">Apply color to</legend>
-                  <label
-                    class="color-scope"
-                    classList={{
-                      "color-scope-selected": colorScope() === "node",
-                    }}
-                  >
-                    <input
-                      class="sr-only"
-                      type="radio"
-                      name="node-color-scope"
-                      value="node"
-                      checked={colorScope() === "node"}
-                      onChange={() => setColorScope("node")}
-                    />
-                    <span>This idea</span>
-                  </label>
-                  <label
-                    class="color-scope"
-                    classList={{
-                      "color-scope-selected": colorScope() === "branch",
-                    }}
-                  >
-                    <input
-                      class="sr-only"
-                      type="radio"
-                      name="node-color-scope"
-                      value="branch"
-                      checked={colorScope() === "branch"}
-                      onChange={() => setColorScope("branch")}
-                    />
-                    <span>This branch</span>
-                  </label>
-                </fieldset>
-                <fieldset class="grid grid-cols-4 gap-1 px-1">
-                  <legend class="sr-only">
-                    Choose a color for{" "}
-                    {colorScope() === "node" ? "this idea" : "this branch"}
-                  </legend>
-                  <For each={NODE_COLORS}>
-                    {(color) => (
-                      <button
-                        type="button"
-                        class="color-choice"
-                        aria-label={`${color.label}${(selectedNode()?.color ?? "blue") === color.value ? ", selected" : ""}`}
-                        aria-pressed={
-                          (selectedNode()?.color ?? "blue") === color.value
-                        }
-                        title={`${color.label} · ${colorScope() === "node" ? "This idea" : "This branch"}`}
-                        {...press(() => colorSelectedNode(color.value))}
-                      >
-                        <span
-                          aria-hidden="true"
-                          class={`grid size-7 place-items-center rounded-full border-2 ${color.swatchClass}`}
-                        >
-                          <Show
-                            when={
-                              (selectedNode()?.color ?? "blue") === color.value
-                            }
-                          >
-                            <svg
-                              viewBox="0 0 20 20"
-                              fill="none"
-                              class="size-4 text-slate-950"
-                              aria-hidden="true"
-                            >
-                              <path
-                                d="m4 10 4 4 8-8"
-                                stroke="currentColor"
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                stroke-width="2.5"
-                              />
-                            </svg>
-                          </Show>
-                        </span>
-                      </button>
-                    )}
-                  </For>
-                </fieldset>
-                <p class="px-2 pb-1 text-xs text-stone-500">
-                  {colorScope() === "node"
-                    ? "Changes only the selected idea."
-                    : "Changes this idea and everything under it."}
-                </p>
-              </section>
+                  }),
+              })}
             </Show>
             <button
               type="button"
@@ -5104,7 +5251,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <span class="toolbar-divider" />
             <button
               type="button"
-              class="icon-button"
+              class="icon-button phone-only"
               aria-label="Color"
               title="Color"
               aria-expanded={colorOpen()}
@@ -5115,7 +5262,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               <span
                 aria-hidden="true"
-                class={`size-4.5 rounded-full border-2 ${(NODE_COLORS.find((color) => color.value === (selectedNode()?.color ?? "blue")) ?? NODE_COLORS[0]).swatchClass}`}
+                class={`color-dot ${selectedLook().class}`}
+                style={selectedLook().style}
               />
             </button>
             <button
@@ -5229,11 +5377,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                     d={connectionPath(connection())}
                     fill="none"
                     class={
-                      (
-                        NODE_COLORS.find(
-                          (option) => option.value === connection().to.color,
-                        ) ?? NODE_COLORS[0]
-                      ).lineClass
+                      lineLook(
+                        shownColor(connection().to.id, connection().to.color),
+                      ).class
+                    }
+                    style={
+                      lineLook(
+                        shownColor(connection().to.id, connection().to.color),
+                      ).style
                     }
                   />
                 )}
@@ -5249,7 +5400,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 doc={session().doc}
                 id={id}
                 text={view().text(id)}
-                color={node().color}
+                color={shownColor(id, node().color)}
                 x={node().x}
                 y={node().y}
                 selected={selectedId() === id}

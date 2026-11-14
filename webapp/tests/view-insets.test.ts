@@ -18,3 +18,10 @@ test("a phone's full-screen panel takes no room from the map", () => {
   expect(panelEdges(639, true)).toEqual({ left: 0, right: 0 });
   expect(panelInsets(390, true)).toMatchObject({ left: 24, right: 24 });
 });
+
+test("the style panel reaches in from the left while it shows", () => {
+  expect(panelEdges(1024, false, true)).toEqual({ left: 236, right: 0 });
+  expect(panelEdges(1024, true, true)).toEqual({ left: 236, right: 396 });
+  // On phones it opens over the toolbar instead.
+  expect(panelEdges(390, false, true)).toEqual({ left: 0, right: 0 });
+});

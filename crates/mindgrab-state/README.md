@@ -14,7 +14,7 @@ let root = project.apply(Command::CreateNode {
     parent: None,
     index: None,
     text: "An idea 🦀".into(),
-    color: Color::Blue,
+    color: Color::shade("sky", 400).unwrap(),
 })?.created_node.unwrap();
 project.apply(Command::SetText { id: root, text: "A better idea 🦀".into() })?;
 let bytes = project.snapshot()?;
@@ -35,6 +35,18 @@ undo recreates an internal tree node. Concurrent undo can recreate the same
 application node twice; the projection chooses the first visible branch in
 Loro's deterministic order. This also keeps rendered hierarchies acyclic.
 Tree deletion hides descendants, and Loro resolves concurrent move conflicts.
+
+A node's color is stored as text: one of Tailwind's shades, such as `sky-400`
+(26 hue families × 11 shades, `COLOR_FAMILIES` and `COLOR_SHADES`), or one of
+the eight named colors from before shades (`NAMED_COLORS`), which keep their own
+look. Any other text makes the document invalid, so clients older than a new
+color reject maps that use it.
+
+`SetColors { quick, new_ideas }` stores a map's color choices: the quick colors
+its style panel offers, in order, and the color new ideas start with. Both take
+white (`slate`) or shades, each once; maps without them use
+`ColorPreferences::default()` (`DEFAULT_QUICK_COLORS`, white for new ideas). Like
+saving preferences, they are excluded from undo.
 
 The flat Rust view contains ordered nodes, parents, children, depth, colors and
 positions. JSON projections serve rendering and inspection. Sync and browser

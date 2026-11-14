@@ -100,7 +100,8 @@
   border-radius: var(--radius-island);
   box-shadow: var(--shadow-island);
 }
-.map-canvas {
+.map-canvas,
+.color-map {
   background-color: var(--paper);
   background-image: radial-gradient(var(--grid) 1px, transparent 1px);
   background-size: 24px 24px;
@@ -251,8 +252,15 @@
 .primary-button:focus-visible,
 .notice-action:focus-visible,
 .map-control:focus-visible,
-.color-choice:focus-visible,
-.color-scope:has(:focus-visible),
+.style-segment:focus-visible,
+.style-swatch:focus-visible,
+.color-cell:focus-visible,
+.style-manage:focus-visible,
+.style-add-quick:focus-visible,
+.quick-pick:focus-visible,
+.quick-add:focus-visible,
+.quick-remove:focus-visible,
+.color-new-idea:focus-visible,
 .choice-card:has(:focus-visible),
 .save-state:focus-visible,
 .saving-switch:focus-visible {
@@ -514,47 +522,711 @@ kbd {
   color: inherit;
 }
 
-/* Color picker. */
-.color-scope {
+/* Style panel. A properties panel in the manner of a drawing app: short
+   labelled sections, one per thing about the idea's look. */
+.style-panel {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 0.4rem;
-  padding: 0.375rem 0.5rem;
+  flex-direction: column;
+  gap: 0.875rem;
+  padding: 0.75rem;
+  /* Opaque: it opens over the notice on phones, and over ideas elsewhere. */
+  background: var(--surface);
+  animation: style-panel-in 120ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+/* `transform`, not `translate`: on phones the panel is centred with
+   `translate`, which this must not replace. */
+@keyframes style-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+}
+.style-section {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* Floated, a legend sits in the fieldset's flow like any other line, so
+   controls beside it (Manage) can line up with it. */
+.style-label {
+  float: left;
+  width: 100%;
+  margin-bottom: 0.4rem;
+  padding: 0 0 0 0.125rem;
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1rem;
+}
+.style-segments {
+  clear: both;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.125rem;
+  padding: 0.1875rem;
+  border-radius: 0.6rem;
+  background: var(--color-stone-100);
+}
+.style-segment {
+  height: 1.875rem;
+  border-radius: 0.45rem;
   color: var(--ink-2);
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
+  transition:
+    background-color 80ms ease,
+    color 80ms ease;
 }
-.color-scope:hover {
+.style-segment:hover:not(:disabled) {
   color: var(--ink);
 }
-.color-scope:active:not(.color-scope-selected) {
+.style-segment:active:not(:disabled, [aria-pressed="true"]) {
   background: var(--pressed);
 }
-.color-scope-selected {
+.style-segment[aria-pressed="true"] {
   background: var(--surface);
   color: var(--ink);
   box-shadow:
     0 0 0 1px rgb(27 31 38 / 0.06),
     0 1px 2px rgb(27 31 38 / 0.1);
 }
-.color-choice {
+.style-segment:disabled {
+  color: var(--ink-4);
+  cursor: default;
+}
+/* The map's quick colors, six to a row, then the way to every other color. */
+.style-colors {
+  clear: both;
   display: grid;
-  min-height: 2.75rem;
-  place-items: center;
-  border-radius: 0.6rem;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.125rem;
+  /* A map may keep any number of quick colors. Past a few rows they scroll,
+     so the plus and the panel's foot stay in the window; the room around
+     them is for the rings a pressed or focused color wears. */
+  max-height: 30dvh;
+  margin: -0.25rem;
+  padding: 0.25rem;
+  overflow-y: auto;
+}
+/* Beside the Color label, quiet until pointed at. */
+.style-manage {
+  position: absolute;
+  top: -0.125rem;
+  right: -0.25rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.375rem;
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1rem;
   cursor: pointer;
-  transition: background-color 80ms ease;
 }
-.color-choice:hover {
-  background: var(--hover);
+.style-manage:hover {
+  color: var(--accent-deep);
 }
-.color-choice[aria-pressed="true"] {
+.style-swatch {
+  display: grid;
+  min-width: 0;
+  height: 2.25rem;
+  place-items: center;
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+/* A small idea card: the same fill, edge and text as on the map. */
+.style-chip {
+  display: grid;
+  place-items: center;
+  width: 1.625rem;
+  height: 1.375rem;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 0.4rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.style-chip-root {
+  border-radius: 0.5rem;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.18);
+}
+/* The plus: an empty card waiting for a color. */
+.style-chip-more {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--ink-2);
+}
+.style-swatch[aria-expanded="true"] .style-chip-more {
+  border-color: var(--accent);
+  color: var(--accent-deep);
+}
+/* The ring an idea wears on the map when it is selected. */
+.style-swatch[aria-pressed="true"] .style-chip {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 3.5px var(--accent);
+}
+/* Tailwind's palette. Beside the panel where there is room; inside it on
+   phones, where the panel already floats over the toolbar, and wherever
+   there is no room beside. */
+.style-palette {
+  margin-top: 0.625rem;
+  outline: none;
+  animation: pop-in 70ms ease-out;
+}
+/* Its top is 72px under the panel's (--style-top); it ends 16px short of
+   the window's foot. */
+.style-panel:not([data-palette="inline"]) .style-palette {
+  position: absolute;
+  top: -0.75rem;
+  left: calc(100% + 1.25rem);
+  width: 15rem;
+  max-height: calc(100dvh - var(--style-top, 72px) - 5.5rem);
+  margin-top: 0;
+  overflow-y: auto;
+  padding: 0.625rem 0.75rem 0.75rem;
+  border-radius: var(--radius-island);
+  background: var(--surface);
+  box-shadow: var(--shadow-island);
+}
+.style-palette-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0 0.125rem 0.5rem;
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1rem;
+}
+/* Every color: white on its own row, then a row per hue. */
+.color-grid {
+  display: grid;
+  grid-template-columns: repeat(11, 1fr);
+  gap: 0.1875rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+/* Inside the panel the grid scrolls on its own, with room around it for the
+   rings a pressed or focused color wears. */
+.style-panel[data-palette="inline"] .color-grid {
+  max-height: 40dvh;
+  margin: -0.25rem;
+  padding: 0.25rem;
+  overflow-y: auto;
+}
+.color-cell {
+  aspect-ratio: 1;
+  border-radius: 0.25rem;
+  box-shadow: inset 0 0 0 1px rgb(27 31 38 / 0.08);
+  cursor: pointer;
+}
+.color-cell-white {
+  grid-column: 1 / -1;
+  aspect-ratio: auto;
+  height: 1.5rem;
+  margin-bottom: 0.25rem;
+  background: white;
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--ink-2);
+  font-size: 0.6875rem;
+  font-weight: 500;
+}
+/* Pointed at: an outline, still, so the grid never moves under the pointer. */
+.color-cell:hover {
+  box-shadow:
+    0 0 0 1.5px var(--surface),
+    0 0 0 2.5px var(--ink-3);
+  position: relative;
+  z-index: 1;
+}
+/* The one chosen color wears the ring. Among quick colors, where several
+   are on at once, a dot marks them instead. */
+.color-cell[aria-pressed="true"]:not([data-choice="quick"] *) {
+  box-shadow:
+    0 0 0 1.5px var(--surface),
+    0 0 0 3px var(--accent);
+  position: relative;
+  z-index: 1;
+}
+/* Makes the idea's color one of the map's quick colors. */
+.style-add-quick {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  margin-top: 0.625rem;
+  padding: 0.375rem 0.5rem;
+  border-radius: var(--radius-control);
   background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
 }
-.color-choice:active:not(:disabled) {
+.style-add-quick:hover {
+  background: #e4dcff;
+}
+
+/* The Colors tab in project preferences: the whole tab is the map, with the
+   style panel's color row and a new idea on it. Every color opens beside
+   them only when asked for, and they stay where they are when it does: their
+   place is worked out as if it were open. Too narrow for both side by side,
+   they sit at the top and every color opens under them. */
+.preferences-body:has(> .color-settings) {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.color-settings {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.color-settings-intro {
+  margin-bottom: 1rem;
+  color: var(--ink-2);
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+}
+.color-map {
+  /* The colors, the gap and every color beside them; the colors sit in the
+     middle unless every color would then run off the edge. */
+  --group: 22rem;
+  --gap: 1.5rem;
+  --picker: 22.5rem;
+  --edge: 1.5rem;
+  --left: max(
+    0px,
+    min(
+      (100cqw - var(--group)) /
+      2,
+      100cqw -
+      var(--group) -
+      var(--gap) -
+      var(--picker) -
+      var(--edge)
+    )
+  );
+  position: relative;
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  align-items: center;
+  min-height: 26rem;
+  padding: 2rem 1rem;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 1.125rem;
+  container: color-map / inline-size;
+}
+.color-group {
+  width: var(--group);
+  max-width: 100%;
+}
+@container color-map (min-width: 49rem) {
+  .color-group {
+    margin: auto auto auto var(--left);
+  }
+  .color-picker {
+    position: absolute;
+    top: 1.5rem;
+    bottom: 1.5rem;
+    left: calc(1rem + var(--left) + var(--group) + var(--gap));
+    height: fit-content;
+    max-height: calc(100% - 3rem);
+    margin: auto 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+}
+
+/* The style panel's color row, at a size to take hold of: six to a row, so
+   the colors wrap where the panel's do. */
+.color-panel {
+  padding: 0.875rem 0.875rem 1rem;
+}
+.color-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.625rem;
+}
+.color-panel-head .style-label {
+  float: none;
+  width: auto;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+/* Where the panel says Manage. */
+.color-panel-head .style-manage {
+  position: static;
+  margin: -0.125rem -0.25rem;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+}
+.quick-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.75rem 0.125rem;
+}
+.quick-item {
+  position: relative;
+  justify-self: center;
+  width: 100%;
+  max-width: 3.125rem;
+}
+.quick-pick,
+.quick-add {
+  display: grid;
+  width: 100%;
+  place-items: center;
+  padding: 0.1875rem;
+  border-radius: 0.625rem;
+  cursor: pointer;
+}
+/* A swipe up or down that starts on a color still scrolls the tab. */
+.quick-pick {
+  cursor: grab;
+  touch-action: pan-y;
+  user-select: none;
+}
+.quick-item[data-dragging] .quick-pick {
+  cursor: grabbing;
+}
+.quick-chip {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 2.25rem;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 0.625rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.quick-item[data-dragging] .quick-chip {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 3.5px var(--accent),
+    0 8px 16px -6px rgb(27 31 38 / 0.35);
+}
+/* Pointing at a quick color among every color marks what pressing it takes
+   out. */
+.quick-item[data-removing] .quick-chip {
+  opacity: 0.35;
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 3.5px var(--ink-3);
+}
+/* Pointing at a new color shows it in the place it would take. */
+.quick-chip-ghost {
+  opacity: 0.6;
+  outline: 1.5px dashed var(--ink-3);
+  outline-offset: 2px;
+}
+/* The plus: an empty card waiting for a color, as in the style panel. */
+.quick-chip-more {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  color: var(--ink-2);
+}
+.quick-add[aria-expanded="true"] .quick-chip-more {
+  border-color: var(--accent);
+  color: var(--accent-deep);
+}
+
+/* The small round handles that say "this can be changed": remove on a
+   color, choose on the new idea. */
+.color-badge {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-2);
+  box-shadow:
+    0 0 0 1px var(--line-strong),
+    0 1px 2px rgb(27 31 38 / 0.14);
+}
+.color-badge svg {
+  stroke-width: 2.2;
+}
+/* Hung off the color's corner, so its face is all handle. */
+.quick-remove {
+  top: calc(0.1875rem - 0.5rem);
+  right: calc(0.1875rem - 0.5rem);
+  cursor: pointer;
+  transition: opacity 80ms ease;
+}
+/* A finger needs more than the handle shows. */
+.quick-remove::before {
+  content: "";
+  position: absolute;
+  inset: -0.375rem;
+  border-radius: 999px;
+}
+.quick-remove:hover,
+.color-new-idea:hover .color-badge {
+  color: var(--ink);
+  box-shadow:
+    0 0 0 1px var(--ink-3),
+    0 1px 2px rgb(27 31 38 / 0.14);
+}
+.quick-remove:active {
   background: var(--pressed);
+}
+.quick-row:has([data-dragging]) .quick-remove {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* One caption for each thing that can be changed. */
+.color-note {
+  display: block;
+  font-size: 0.875rem;
+  line-height: 1.375rem;
+}
+.color-note-title {
+  display: block;
+  color: var(--ink);
+  font-weight: 600;
+}
+.color-note-line {
+  display: block;
+  color: var(--ink-2);
+}
+.color-note-line b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.color-quick-note {
+  margin-top: 0.875rem;
+  padding-left: 0.125rem;
+}
+
+/* A new idea as it will start: a card like the ones on the map, on the end
+   of its link, which comes in level from a parent off to the left. */
+.color-new {
+  --lead: 3rem;
+  position: relative;
+  margin-top: 2rem;
+  padding-left: var(--lead);
+}
+.color-new-link {
+  position: absolute;
+  top: 50%;
+  right: calc(100% - var(--lead));
+  height: 3rem;
+  margin-top: -1.5rem;
+  overflow: visible;
+  fill: none;
+  stroke-width: 1.75;
+  pointer-events: none;
+}
+.color-new-link path {
+  transition: stroke 120ms ease;
+}
+.color-new-idea {
+  display: flex;
+  align-items: center;
+  gap: 1.125rem;
+  border-radius: 0.75rem;
+  cursor: pointer;
+  text-align: left;
+}
+.color-new-face {
+  position: relative;
+  flex-shrink: 0;
+}
+.color-new-card {
+  display: inline-flex;
+  align-items: center;
+  min-height: 3rem;
+  padding: 0.4rem 1rem;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 0.75rem;
+  font-size: 1rem;
+  line-height: 1.5rem;
+  white-space: nowrap;
+}
+.color-new-badge {
+  top: -0.5rem;
+  right: -0.5rem;
+}
+/* Being chosen: the ring an idea wears on the map when it is selected. */
+.color-new-idea[aria-expanded="true"] .color-new-card {
+  box-shadow:
+    0 0 0 2px var(--paper),
+    0 0 0 4px var(--accent);
+}
+.color-new-idea[aria-expanded="true"] .color-badge {
+  color: var(--accent-deep);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 1px 2px rgb(27 31 38 / 0.14);
+}
+.color-new-idea .color-note {
+  white-space: nowrap;
+}
+
+/* Every color, with its hue names and shade numbers. */
+.color-picker {
+  z-index: 1;
+  width: 100%;
+  max-width: var(--picker);
+  margin-top: 1.5rem;
+  padding: 0.5rem 0.75rem 0.75rem;
+  border-radius: var(--radius-island);
+  background: var(--surface);
+  box-shadow: var(--shadow-island);
+  outline: none;
+  animation: pop-in 70ms ease-out;
+}
+.color-picker-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2rem;
+  margin-bottom: 0.25rem;
+  padding-left: 0.125rem;
+}
+.color-picker-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+  white-space: nowrap;
+}
+.color-picker-named {
+  min-width: 0;
+  flex: 1;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25rem;
+  text-align: right;
+  white-space: nowrap;
+}
+.color-picker-close {
+  width: 1.75rem;
+  height: 1.75rem;
+  margin-right: -0.25rem;
+}
+/* The quick colors first: the likeliest choice for new ideas. */
+.color-picker-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.125rem;
+  min-width: 0;
+  margin: 0 -0.25rem 0.5rem;
+  padding: 0;
+  border: 0;
+}
+.color-picker-quick .style-swatch {
+  width: 2.25rem;
+}
+.color-grid-labeled {
+  grid-template-columns: 3.5rem repeat(11, minmax(0, 1fr));
+}
+/* Rows shorter than they are wide, so every color shows without scrolling. */
+.color-grid-labeled .color-cell {
+  aspect-ratio: auto;
+  height: 1rem;
+}
+.color-grid-labeled .color-cell-white {
+  grid-column: span 11;
+  height: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+@media (pointer: coarse) {
+  .color-grid-labeled .color-cell {
+    height: 1.75rem;
+  }
+}
+.color-grid-shade {
+  padding-bottom: 0.125rem;
+  color: var(--ink-3);
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1rem;
+  text-align: center;
+}
+.color-grid-hue {
+  align-self: center;
+  color: var(--ink-3);
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+.color-cell {
+  display: grid;
+  place-items: center;
+}
+.color-cell-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+}
+.color-cell-white .color-cell-dot {
+  display: inline-block;
+  margin-left: 0.375rem;
+  vertical-align: 0.05em;
+}
+.color-cell-white {
+  display: block;
+}
+@media (max-width: 639px) {
+  .color-grid-labeled {
+    grid-template-columns: 3rem repeat(11, minmax(0, 1fr));
+  }
+  .color-grid-shade {
+    font-size: 0.5rem;
+  }
+  .color-map {
+    margin: 0 -1.5rem;
+    padding: 1.5rem 1rem;
+    border-width: 1px 0;
+    border-radius: 0;
+  }
+  .color-picker {
+    max-width: none;
+  }
+}
+
+/* The selected idea's color on the phone toolbar's Color button: its fill
+   and edge, and a ring that shows on the toolbar whatever the fill. */
+.color-dot {
+  width: 1.125rem;
+  height: 1.125rem;
+  border-width: 2px;
+  border-style: solid;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--ink-4);
+}
+
+/* Ideas and their links ease into a previewed or picked color. */
+.map-node-card {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+.map-links path {
+  transition: stroke 120ms ease;
+}
+@media (min-width: 640px) {
+  .phone-only {
+    display: none;
+  }
 }
 
 /* Drag feedback. */
@@ -606,9 +1278,17 @@ kbd {
 .dialog-center[data-size="small"] {
   width: min(26rem, calc(100vw - 2rem));
 }
+/* Project preferences: most of the window, with the map still showing
+   around it. */
 .dialog-center[data-size="large"] {
-  width: min(60rem, calc(100vw - 2rem));
-  height: min(40rem, calc(100dvh - 2rem));
+  width: min(76rem, calc(100vw - 3rem));
+  height: min(64rem, calc(100dvh - 3rem));
+  max-height: none;
+}
+/* Each tab uses the dialog's full width; running text keeps a line length
+   that reads comfortably. */
+.preferences-body p {
+  max-width: 42rem;
 }
 .preferences-nav .menu-item {
   font-size: 0.875rem;
@@ -1130,11 +1810,21 @@ kbd {
 
 /* Motion only answers an action; people who prefer less get none. */
 @media (prefers-reduced-motion: reduce) {
-  .map-layer-easing {
+  .map-layer-easing,
+  .map-node-card,
+  .map-links path {
+    transition: none;
+  }
+  .style-palette,
+  .color-picker {
+    animation: none;
+  }
+  .color-new-link path {
     transition: none;
   }
   .notice,
   .menu-panel,
+  .style-panel,
   .dialog-center[open],
   .dialog-center[data-size="large"][open],
   .dialog-center[data-size="large"][open]::backdrop,
@@ -1182,8 +1872,13 @@ kbd {
   .menu-item {
     min-height: 2.75rem;
   }
-  .color-scope {
+  .style-segment,
+  .style-swatch {
     min-height: 2.75rem;
+  }
+  /* Wider, so each color is a size to tap. */
+  .style-panel:not([data-palette="inline"]) .style-palette {
+    width: 20rem;
   }
 }
 /* The narrowest phones keep the selection toolbar on one line; branch focus

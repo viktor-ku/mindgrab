@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  DEFAULT_COLOR_PREFERENCES,
   LIMITS,
   SavingPreferencesSchema,
   DEFAULT_SAVING_PREFERENCES,
@@ -8,11 +9,13 @@ import {
 } from "./project-document";
 import type { ProjectDocument, DocumentView } from "./project-document";
 import { escapeLine } from "./outline-text";
-import { isNodeColor } from "./node-colors";
+import { isNodeColor, isPickable } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
-export const PROJECT_FILE_VERSION = 4;
+// 5 added Tailwind shade colors and the map's color choices; earlier apps
+// cannot read them, so they report the version instead of damage.
+export const PROJECT_FILE_VERSION = 5;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
@@ -41,6 +44,7 @@ export interface ProjectFile {
   project: { name: string; nodes: ProjectFileNode[] };
   preferences?: {
     saving?: import("./project-document").SavingPreferences;
+    colors?: import("./project-document").ColorPreferences;
     viewport?: { left: number; top: number; zoom: number };
     anchor?: { id: string; centerY: number };
   };
@@ -62,6 +66,20 @@ const ViewportSchema = z.strictObject({
   top: z.number().finite(),
   // The editor zooms out to 10% to fit large maps; backups keep that view.
   zoom: z.number().finite().min(0.1).max(2.5),
+});
+// White or a shade, each once, as the document requires.
+const PickableColor = z.custom<NodeColor>(
+  (value) => isNodeColor(value) && isPickable(value),
+  "Invalid color choice.",
+);
+const ColorsSchema = z.strictObject({
+  quick: z
+    .array(PickableColor)
+    .refine(
+      (quick) => new Set(quick).size === quick.length,
+      "Quick colors must be unique.",
+    ),
+  newIdeas: PickableColor,
 });
 const AnchorSchema = z.strictObject({
   id: z.string().min(1),
@@ -116,6 +134,7 @@ const PortableProjectSchema = z
     preferences: z
       .strictObject({
         saving: SavingPreferencesSchema.optional(),
+        colors: ColorsSchema.optional(),
         viewport: ViewportSchema.optional(),
         anchor: AnchorSchema.optional(),
       })
@@ -180,6 +199,7 @@ export function projectFileFromContent(
   const anchor = preferences?.anchor;
   const localPreferences = {
     saving: content.saving,
+    colors: content.colors,
     ...preferences,
     // A deleted layout anchor is only a stale local preference.
     anchor:
@@ -229,7 +249,7 @@ export function parseProjectFile(json: string): ProjectFile {
   const header = value as { format?: unknown; version?: unknown };
   if (header.format !== PROJECT_FILE_FORMAT)
     throw new ProjectFileError("File is not a Mindgrab project.");
-  if (header.version !== 3 && header.version !== PROJECT_FILE_VERSION)
+  if (![3, 4, PROJECT_FILE_VERSION].includes(header.version as number))
     throw new ProjectFileError(
       `Unsupported Mindgrab project version: ${String(header.version)}.`,
     );
@@ -274,6 +294,7 @@ export function prepareProjectImport(input: ProjectFile) {
     schemaVersion: SCHEMA_VERSION,
     name: file.project.name,
     saving: file.preferences?.saving ?? { ...DEFAULT_SAVING_PREFERENCES },
+    colors: file.preferences?.colors ?? DEFAULT_COLOR_PREFERENCES,
     roots: file.project.nodes.map((node) => ids.get(node.id)!),
     nodes,
   };

@@ -1,4 +1,10 @@
-import { createEffect, createUniqueId, type JSX, Show } from "solid-js";
+import {
+  createEffect,
+  createUniqueId,
+  type JSX,
+  onCleanup,
+  Show,
+} from "solid-js";
 import { backdropDismiss } from "./dialog-backdrop";
 import { CloseIcon } from "./icons";
 import { press } from "./press";
@@ -24,10 +30,29 @@ export function Dialog(props: {
 }) {
   let dialog!: HTMLDialogElement;
   const titleId = createUniqueId();
+  // Shows the dialog modally while `open`. Taking a modal dialog out of the
+  // page drops it from the top layer, though it stays open: the router puts
+  // the app back in place as its first load settles, so a dialog opened from
+  // the address on load would end up under the map. While open, it watches
+  // for that and reopens on top. Dropping the attribute, unlike close(), does
+  // not report a close.
+  const sync = () => {
+    if (!props.open) {
+      if (dialog.open) dialog.close();
+      return;
+    }
+    if (!dialog.isConnected || dialog.matches(":modal")) return;
+    if (dialog.open) dialog.removeAttribute("open");
+    dialog.showModal();
+  };
+  const moved = new MutationObserver(sync);
   createEffect(() => {
-    if (props.open && !dialog.open) dialog.showModal();
-    else if (!props.open && dialog.open) dialog.close();
+    sync();
+    if (props.open)
+      moved.observe(document.body, { childList: true, subtree: true });
+    else moved.disconnect();
   });
+  onCleanup(() => moved.disconnect());
   return (
     <dialog
       ref={dialog}

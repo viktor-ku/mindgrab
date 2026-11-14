@@ -2,11 +2,14 @@ import { batch, createSignal, onCleanup } from "solid-js";
 import type { Accessor, Setter } from "solid-js";
 import type { MindMapNode } from "./mind-map";
 import {
+  colorPreferences,
   projectMindMap,
+  sameColorPreferences,
   readProject,
   savingPreferences,
 } from "./project-document";
 import type {
+  ColorPreferences,
   ProjectDocument,
   ProjectState,
   SavingPreferences,
@@ -15,6 +18,7 @@ export interface ProjectView {
   status: Accessor<ProjectState["status"]>;
   name: Accessor<string>;
   saving: Accessor<SavingPreferences>;
+  colors: Accessor<ColorPreferences>;
   forest: Accessor<MindMapNode[]>;
   text(id: string): string;
   note(id: string): string;
@@ -23,6 +27,9 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
   const [name, setName] = createSignal("");
   const [saving, setSaving] = createSignal(savingPreferences(doc));
+  const [colors, setColors] = createSignal(colorPreferences(doc), {
+    equals: sameColorPreferences,
+  });
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
   const notes = new Map<string, [Accessor<string>, Setter<string>]>();
@@ -42,6 +49,7 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
     batch(() => {
       setStatus(state.status);
       setSaving(savingPreferences(doc));
+      setColors(colorPreferences(doc));
       if (state.status !== "ready") {
         setForest([]);
         return;
@@ -68,6 +76,7 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
     status,
     name,
     saving,
+    colors,
     forest,
     text: (id) => textSignal(id)[0](),
     note: (id) => noteSignal(id)[0](),

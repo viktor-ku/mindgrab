@@ -1,4 +1,6 @@
 import { QueryClientProvider } from "@tanstack/solid-query";
+import { RouterProvider } from "@tanstack/solid-router";
+import { appRouter } from "./app-router";
 import { queryClient } from "../webapp/src/query-client";
 import { render } from "solid-js/web";
 import type { ProjectDocument } from "../webapp/src/project-document";
@@ -350,11 +352,15 @@ window.accountHarness = accountHarness;
 render(
   () => (
     <QueryClientProvider client={queryClient}>
-      <App
-        onDocument={(doc) => {
-          if (current) retired.push(current);
-          current = doc;
-        }}
+      <RouterProvider
+        router={appRouter(() => (
+          <App
+            onDocument={(doc) => {
+              if (current) retired.push(current);
+              current = doc;
+            }}
+          />
+        ))}
       />
     </QueryClientProvider>
   ),
