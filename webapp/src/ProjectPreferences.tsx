@@ -3,9 +3,9 @@ import type { PreferenceTab } from "./app-search";
 import { ColorSettings } from "./ColorSettings";
 import { Dialog } from "./Dialog";
 import { LockIcon } from "./icons";
+import { press } from "./press";
 import type { ColorPreferences, SavingPreferences } from "./project-document";
 import type { CloudStatus } from "./project-sync";
-import { press } from "./press";
 
 export function ProjectPreferences(props: {
   open: boolean;
@@ -68,7 +68,7 @@ export function ProjectPreferences(props: {
             )}
           </For>
         </nav>
-        <div class="min-h-0 flex-1 overflow-y-auto px-6 pt-5 pb-8">
+        <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pt-5 pb-8">
           <div class="preferences-body">
             <h3 class="mb-2 text-base font-semibold text-stone-900">
               {sections().find((item) => item.id === current())?.label}

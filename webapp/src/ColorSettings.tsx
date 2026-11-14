@@ -2,11 +2,11 @@ import { makeEventListener } from "@solid-primitives/event-listener";
 import { createSignal, For, Show } from "solid-js";
 import { ColorGrid } from "./ColorGrid";
 import { ChevronDownIcon, CloseIcon, PlusIcon } from "./icons";
-import { colorLabel, lineLook, nodeLook } from "./node-colors";
 import type { NodeColor } from "./node-colors";
-import { DEFAULT_COLOR_PREFERENCES } from "./project-document";
-import type { ColorPreferences } from "./project-document";
+import { colorLabel, lineLook, nodeLook } from "./node-colors";
 import { press } from "./press";
+import type { ColorPreferences } from "./project-document";
+import { DEFAULT_COLOR_PREFERENCES } from "./project-document";
 import { transientLayer } from "./transient-layer";
 
 const moved = (list: readonly NodeColor[], from: number, to: number) => {
@@ -30,11 +30,12 @@ function Chip(props: { color: NodeColor; class: string }) {
   );
 }
 
-// The map's colors, in project preferences: a piece of the map, edited in
-// place. The style panel's color row is there to drag into order, prune and
-// add to; under it, a new idea in the color new ideas start with. Every color
-// opens beside them only when asked for, to add quick colors or to choose the
-// new idea's. Pointing at a color shows on the map what pressing it would do.
+// The map's colors, in project preferences: the whole tab is the map, edited
+// in place. The style panel's color row is there to drag into order, prune
+// and add to; under it, a new idea in the color new ideas start with. Every
+// color opens beside them only when asked for, to add quick colors or to
+// choose the new idea's, without moving them. Pointing at a color shows on
+// the map what pressing it would do.
 export function ColorSettings(props: {
   colors: ColorPreferences;
   onChange: (value: ColorPreferences) => void;
@@ -88,7 +89,12 @@ export function ColorSettings(props: {
     setPicking(undefined);
     setPointed(undefined);
   };
-  const toggle = (choice: "quick" | "new") => {
+  // Opened from the keyboard, every color takes the keyboard's focus on the
+  // color already chosen; opened by pointer, it takes focus without pointing
+  // at anything, so no color looks chosen or about to be removed.
+  let keyboardOpen = false;
+  const toggle = (choice: "quick" | "new", event: MouseEvent) => {
+    keyboardOpen = event.detail === 0;
     setPointed(undefined);
     setPicking((open) => (open === choice ? undefined : choice));
   };
@@ -182,16 +188,14 @@ export function ColorSettings(props: {
       <p class="color-settings-intro">
         What this map's style panel offers, for everyone who opens it.
       </p>
-      <div class="color-settings-work">
-        <div ref={map} class="color-map">
+      <div ref={map} class="color-map">
+        <div class="color-group">
           <section
             class="map-toolbar color-panel"
             aria-labelledby="quick-colors-title"
           >
             <div class="color-panel-head">
-              <span id="quick-colors-title" class="style-label">
-                Quick colors
-              </span>
+              <span class="style-label">Color</span>
               <Show when={!isDefault()}>
                 <button
                   type="button"
@@ -258,12 +262,12 @@ export function ColorSettings(props: {
                     </button>
                     <button
                       type="button"
-                      class="quick-remove"
+                      class="color-badge quick-remove"
                       aria-label={`Remove ${colorLabel(color)}`}
                       title={`Remove ${colorLabel(color)}`}
                       {...press(() => remove(color))}
                     >
-                      <CloseIcon class="size-3" />
+                      <CloseIcon class="size-2.5" />
                     </button>
                   </li>
                 )}
@@ -276,7 +280,7 @@ export function ColorSettings(props: {
                   aria-label="Add quick colors"
                   aria-expanded={picking() === "quick"}
                   title="Add quick colors"
-                  {...press(() => toggle("quick"))}
+                  {...press((e) => toggle("quick", e))}
                 >
                   {/* Pointing at a color shows it where it would land. */}
                   <Show
@@ -300,28 +304,34 @@ export function ColorSettings(props: {
                 </button>
               </li>
             </ol>
-            <p class="color-panel-foot">
+            <p id="quick-colors-keys" class="sr-only">
+              Alt and the arrow keys move a color; Delete removes it.
+            </p>
+          </section>
+          <div class="color-note color-quick-note">
+            <p id="quick-colors-title" class="color-note-title">
+              Quick colors
+            </p>
+            <p class="color-note-line">
               {!quick().length
                 ? "No quick colors. Press + to add some."
                 : keyed()
                   ? "Alt + arrow keys move it. Delete removes it."
                   : "Drag to reorder."}
             </p>
-            <p id="quick-colors-keys" class="sr-only">
-              Alt and the arrow keys move a color; Delete removes it.
-            </p>
-          </section>
+          </div>
           <div class="color-new">
-            {/* The link an idea hangs from, in the color its link would take. */}
+            {/* The link an idea hangs from, in the color its link would
+                take, coming in level from a parent off to the left. */}
             <svg
               aria-hidden="true"
               class="color-new-link"
-              viewBox="0 0 64 48"
-              width="64"
+              viewBox="0 0 2000 48"
+              width="2000"
               height="48"
             >
               <path
-                d="M0 2 C 35 2, 29 24, 64 24"
+                d="M0 2 L1860 2 C 1937 2, 1923 24, 2000 24"
                 class={lineLook(newIdeas()).class}
                 style={lineLook(newIdeas()).style}
               />
@@ -333,17 +343,24 @@ export function ColorSettings(props: {
               aria-expanded={picking() === "new"}
               aria-label={`New ideas start as ${colorLabel(props.colors.newIdeas)}. Choose a color`}
               title="Choose the color new ideas start as"
-              {...press(() => toggle("new"))}
+              {...press((e) => toggle("new", e))}
             >
-              <span
-                class={`map-node-card color-new-card ${nodeLook(newIdeas(), false).class}`}
-                style={nodeLook(newIdeas(), false).style}
-              >
-                New idea
+              <span class="color-new-face">
+                <span
+                  class={`map-node-card color-new-card ${nodeLook(newIdeas(), false).class}`}
+                  style={nodeLook(newIdeas(), false).style}
+                >
+                  New idea
+                </span>
+                <span aria-hidden="true" class="color-badge color-new-badge">
+                  <ChevronDownIcon class="size-2.5" />
+                </span>
               </span>
-              <span class="color-new-name">
-                starts as {colorLabel(newIdeas())}
-                <ChevronDownIcon class="size-4" />
+              <span class="color-note">
+                <span class="color-note-title">New ideas</span>
+                <span class="color-note-line">
+                  Start as <b>{colorLabel(newIdeas())}</b>
+                </span>
               </span>
             </button>
           </div>
@@ -361,6 +378,7 @@ export function ColorSettings(props: {
               onPoint={setPointed}
               onChoose={choose}
               onClose={close}
+              focusGrid={keyboardOpen}
             />
           )}
         </Show>
@@ -372,9 +390,9 @@ export function ColorSettings(props: {
   );
 }
 
-// Every color, beside the map (under it on phones). For quick colors a press
-// adds one or takes it out, and it stays open for more; for new ideas it is
-// one choice, with the quick colors first.
+// Every color, beside the colors on the map (under them on narrow screens).
+// For quick colors a press adds one or takes it out, and it stays open for
+// more; for new ideas it is one choice, with the quick colors first.
 function ColorPicker(props: {
   choice: "quick" | "new";
   colors: ColorPreferences;
@@ -384,6 +402,7 @@ function ColorPicker(props: {
   onPoint: (color: NodeColor | undefined) => void;
   onChoose: (color: NodeColor, event: MouseEvent) => void;
   onClose: () => void;
+  focusGrid: boolean;
 }) {
   const inQuick = (color: NodeColor) => props.colors.quick.includes(color);
   const title = () =>
@@ -408,9 +427,10 @@ function ColorPicker(props: {
           close: props.onClose,
         });
         queueMicrotask(() =>
-          grid
-            .querySelector<HTMLButtonElement>('button[tabindex="0"]')
-            ?.focus({ preventScroll: true }),
+          (props.focusGrid
+            ? grid.querySelector<HTMLButtonElement>('button[tabindex="0"]')
+            : el
+          )?.focus({ preventScroll: true }),
         );
       }}
     >

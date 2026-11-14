@@ -772,63 +772,115 @@ kbd {
   background: #e4dcff;
 }
 
-/* The Colors tab in project preferences: a piece of the map, top left, with
-   the style panel's color row and a new idea on it. Every color opens beside
-   it (under it on phones) only when asked for. */
+/* The Colors tab in project preferences: the whole tab is the map, with the
+   style panel's color row and a new idea on it. Every color opens beside
+   them only when asked for, and they stay where they are when it does: their
+   place is worked out as if it were open. Too narrow for both side by side,
+   they sit at the top and every color opens under them. */
+.preferences-body:has(> .color-settings) {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.color-settings {
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
 .color-settings-intro {
   margin-bottom: 1rem;
   color: var(--ink-2);
   font-size: 0.875rem;
   line-height: 1.5rem;
 }
-.color-settings-work {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 1rem;
-}
 .color-map {
-  --pad: 1.25rem;
-  flex-shrink: 0;
-  max-width: 100%;
-  padding: var(--pad);
+  /* The colors, the gap and every color beside them; the colors sit in the
+     middle unless every color would then run off the edge. */
+  --group: 22rem;
+  --gap: 1.5rem;
+  --picker: 22.5rem;
+  --edge: 1.5rem;
+  --left: max(
+    0px,
+    min(
+      (100cqw - var(--group)) /
+      2,
+      100cqw -
+      var(--group) -
+      var(--gap) -
+      var(--picker) -
+      var(--edge)
+    )
+  );
+  position: relative;
+  display: flex;
+  flex: 1 0 auto;
+  flex-direction: column;
+  align-items: center;
+  min-height: 26rem;
+  padding: 2rem 1rem;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 1.125rem;
+  container: color-map / inline-size;
+}
+.color-group {
+  width: var(--group);
+  max-width: 100%;
+}
+@container color-map (min-width: 49rem) {
+  .color-group {
+    margin: auto auto auto var(--left);
+  }
+  .color-picker {
+    position: absolute;
+    top: 1.5rem;
+    bottom: 1.5rem;
+    left: calc(1rem + var(--left) + var(--group) + var(--gap));
+    height: fit-content;
+    max-height: calc(100% - 3rem);
+    margin: auto 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
 }
 
-/* The style panel's color row, at a size to grab: six to a row, so the
-   colors wrap where the panel's do. */
+/* The style panel's color row, at a size to take hold of: six to a row, so
+   the colors wrap where the panel's do. */
 .color-panel {
-  width: 18rem;
-  max-width: 100%;
-  padding: 0.75rem 0.75rem 0.625rem;
+  padding: 0.875rem 0.875rem 1rem;
 }
 .color-panel-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.625rem;
 }
 .color-panel-head .style-label {
   float: none;
   width: auto;
   margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
 }
 /* Where the panel says Manage. */
 .color-panel-head .style-manage {
   position: static;
   margin: -0.125rem -0.25rem;
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
 }
 .quick-row {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 0.375rem 0.125rem;
+  gap: 0.75rem 0.125rem;
 }
 .quick-item {
   position: relative;
-  display: grid;
-  place-items: center;
+  justify-self: center;
+  width: 100%;
+  max-width: 3.125rem;
 }
 .quick-pick,
 .quick-add {
@@ -852,12 +904,11 @@ kbd {
   display: grid;
   place-items: center;
   width: 100%;
-  max-width: 2.25rem;
-  height: 1.875rem;
+  height: 2.25rem;
   border-width: 1px;
   border-style: solid;
-  border-radius: 0.55rem;
-  font-size: 0.75rem;
+  border-radius: 0.625rem;
+  font-size: 0.875rem;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -891,54 +942,90 @@ kbd {
   border-color: var(--accent);
   color: var(--accent-deep);
 }
-.quick-remove {
+
+/* The small round handles that say "this can be changed": remove on a
+   color, choose on the new idea. */
+.color-badge {
   position: absolute;
-  top: -0.375rem;
-  right: -0.375rem;
   display: grid;
   place-items: center;
-  width: 1.25rem;
-  height: 1.25rem;
+  width: 1.125rem;
+  height: 1.125rem;
   border-radius: 999px;
-  background: var(--ink);
-  color: white;
-  box-shadow: 0 0 0 2px var(--surface);
-  cursor: pointer;
-  opacity: 0;
+  background: var(--surface);
+  color: var(--ink-2);
+  box-shadow:
+    0 0 0 1px var(--line-strong),
+    0 1px 2px rgb(27 31 38 / 0.14);
 }
-.quick-item:hover .quick-remove,
-.quick-item:focus-within .quick-remove {
-  opacity: 1;
+.color-badge svg {
+  stroke-width: 2.2;
+}
+/* Hung off the color's corner, so its face is all handle. */
+.quick-remove {
+  top: calc(0.1875rem - 0.5rem);
+  right: calc(0.1875rem - 0.5rem);
+  cursor: pointer;
+  transition: opacity 80ms ease;
+}
+/* A finger needs more than the handle shows. */
+.quick-remove::before {
+  content: "";
+  position: absolute;
+  inset: -0.375rem;
+  border-radius: 999px;
+}
+.quick-remove:hover,
+.color-new-idea:hover .color-badge {
+  color: var(--ink);
+  box-shadow:
+    0 0 0 1px var(--ink-3),
+    0 1px 2px rgb(27 31 38 / 0.14);
+}
+.quick-remove:active {
+  background: var(--pressed);
 }
 .quick-row:has([data-dragging]) .quick-remove {
   opacity: 0;
+  pointer-events: none;
 }
-@media (pointer: coarse) {
-  .quick-remove {
-    opacity: 1;
-  }
+
+/* One caption for each thing that can be changed. */
+.color-note {
+  display: block;
+  font-size: 0.875rem;
+  line-height: 1.375rem;
 }
-.color-panel-foot {
-  margin-top: 0.5rem;
+.color-note-title {
+  display: block;
+  color: var(--ink);
+  font-weight: 600;
+}
+.color-note-line {
+  display: block;
+  color: var(--ink-2);
+}
+.color-note-line b {
+  color: var(--ink);
+  font-weight: 600;
+}
+.color-quick-note {
+  margin-top: 0.875rem;
   padding-left: 0.125rem;
-  color: var(--ink-3);
-  font-size: 0.6875rem;
-  line-height: 1rem;
 }
 
 /* A new idea as it will start: a card like the ones on the map, on the end
-   of its link, which comes in from the edge of the piece. */
+   of its link, which comes in level from a parent off to the left. */
 .color-new {
-  --lead: 2.75rem;
+  --lead: 3rem;
   position: relative;
-  margin-top: 1.25rem;
+  margin-top: 2rem;
   padding-left: var(--lead);
 }
 .color-new-link {
   position: absolute;
   top: 50%;
-  left: calc(-1 * var(--pad));
-  width: calc(var(--pad) + var(--lead));
+  right: calc(100% - var(--lead));
   height: 3rem;
   margin-top: -1.5rem;
   overflow: visible;
@@ -952,18 +1039,30 @@ kbd {
 .color-new-idea {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
-  border-radius: 0.625rem;
+  gap: 1.125rem;
+  border-radius: 0.75rem;
   cursor: pointer;
   text-align: left;
+}
+.color-new-face {
+  position: relative;
+  flex-shrink: 0;
 }
 .color-new-card {
   display: inline-flex;
   align-items: center;
+  min-height: 3rem;
+  padding: 0.4rem 1rem;
   border-width: 1px;
   border-style: solid;
+  border-radius: 0.75rem;
+  font-size: 1rem;
   line-height: 1.5rem;
   white-space: nowrap;
+}
+.color-new-badge {
+  top: -0.5rem;
+  right: -0.5rem;
 }
 /* Being chosen: the ring an idea wears on the map when it is selected. */
 .color-new-idea[aria-expanded="true"] .color-new-card {
@@ -971,25 +1070,22 @@ kbd {
     0 0 0 2px var(--paper),
     0 0 0 4px var(--accent);
 }
-.color-new-name {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.125rem;
-  color: var(--ink-2);
-  font-size: 0.8125rem;
-  line-height: 1.25rem;
-  white-space: nowrap;
+.color-new-idea[aria-expanded="true"] .color-badge {
+  color: var(--accent-deep);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 1px 2px rgb(27 31 38 / 0.14);
 }
-.color-new-idea:hover .color-new-name,
-.color-new-idea[aria-expanded="true"] .color-new-name {
-  color: var(--ink);
+.color-new-idea .color-note {
+  white-space: nowrap;
 }
 
 /* Every color, with its hue names and shade numbers. */
 .color-picker {
-  flex: 1 1 20rem;
-  min-width: 0;
-  max-width: 24rem;
+  z-index: 1;
+  width: 100%;
+  max-width: var(--picker);
+  margin-top: 1.5rem;
   padding: 0.5rem 0.75rem 0.75rem;
   border-radius: var(--radius-island);
   background: var(--surface);
@@ -1096,11 +1192,10 @@ kbd {
     font-size: 0.5rem;
   }
   .color-map {
-    --pad: 0.75rem;
-    width: 100%;
-  }
-  .color-panel {
-    width: auto;
+    margin: 0 -1.5rem;
+    padding: 1.5rem 1rem;
+    border-width: 1px 0;
+    border-radius: 0;
   }
   .color-picker {
     max-width: none;

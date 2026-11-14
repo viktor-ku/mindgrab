@@ -2296,6 +2296,63 @@ describe("map colors", () => {
     expect(await fill("Default")).toBe(dark);
   });
 
+  test("every color opens beside the colors, or under them, without moving them", async () => {
+    const root = await rootId();
+    await node(root).click();
+    await panel().getByRole("button", { name: "Manage" }).click();
+    await dialog().waitFor();
+    const group = dialog().locator(".color-group");
+    const add = dialog().getByRole("button", { name: "Add quick colors" });
+    const palette = everyColor("Add quick colors");
+    const place = async () => {
+      const colors = await group.boundingBox();
+      const every = await palette.boundingBox();
+      if (!colors || !every) throw new Error("The colors are not visible.");
+      return { colors, every };
+    };
+
+    const before = await group.boundingBox();
+    await add.click();
+    await palette.waitFor();
+    const beside = await place();
+    expect(beside.colors).toEqual(before ?? beside.every);
+    expect(beside.every.x).toBeGreaterThanOrEqual(
+      beside.colors.x + beside.colors.width,
+    );
+    // Opened by pointer, nothing in it is pointed at, so no quick color
+    // looks about to be removed.
+    expect(await dialog().locator("[data-removing]").count()).toBe(0);
+    expect(await palette.evaluate((el) => el === document.activeElement)).toBe(
+      true,
+    );
+    await page.keyboard.press("Escape");
+    await palette.waitFor({ state: "detached" });
+
+    // From the keyboard it takes the focus onto a color.
+    await add.focus();
+    await page.keyboard.press("Enter");
+    await palette.waitFor();
+    expect(
+      await palette.evaluate(
+        (el) =>
+          el.contains(document.activeElement) && el !== document.activeElement,
+      ),
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await palette.waitFor({ state: "detached" });
+
+    // Too narrow for both side by side, it opens under them.
+    await page.setViewportSize({ width: 800, height: 800 });
+    const narrow = await group.boundingBox();
+    await add.click();
+    await palette.waitFor();
+    const under = await place();
+    expect(under.colors).toEqual(narrow ?? under.every);
+    expect(under.every.y).toBeGreaterThanOrEqual(
+      under.colors.y + under.colors.height,
+    );
+  });
+
   test("new ideas start in the chosen color, and color choices stay out of undo", async () => {
     const root = await rootId();
     await node(root).click();
