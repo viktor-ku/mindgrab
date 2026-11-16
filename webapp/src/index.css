@@ -1659,6 +1659,147 @@ kbd {
   outline-offset: -2px;
 }
 
+/* The notes' rich text. Enter starts a block a little apart from the last;
+   Shift+Enter, and lines of notes written as plain text, stay close. */
+.note-content :is(p, h1, h2, h3, ul, ol, blockquote, pre, hr) {
+  margin: 0;
+}
+.note-content > * + *,
+.note-content blockquote > * + * {
+  margin-top: 0.5rem;
+}
+.note-content li:not([data-checked]) > * + *,
+.note-content li[data-checked] > div > * + * {
+  margin-top: 0.125rem;
+}
+.note-content > :is(h1, h2, h3):not(:first-child) {
+  margin-top: 1rem;
+}
+.note-content :is(h1, h2, h3) {
+  color: var(--ink);
+  font-weight: 600;
+}
+.note-content h1 {
+  font-size: 1.375rem;
+  line-height: 1.875rem;
+}
+.note-content h2 {
+  font-size: 1.1875rem;
+  line-height: 1.625rem;
+}
+.note-content h3 {
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+.note-content strong {
+  font-weight: 650;
+}
+.note-content ul {
+  padding-left: 1.375rem;
+  list-style: disc;
+}
+.note-content ul ul {
+  list-style: circle;
+}
+.note-content ol {
+  padding-left: 1.5rem;
+  list-style: decimal;
+}
+.note-content li + li {
+  margin-top: 0.125rem;
+}
+.note-content li::marker {
+  color: var(--ink-3);
+}
+.note-content ul[data-type="taskList"] {
+  padding-left: 0.125rem;
+  list-style: none;
+}
+.note-content ul[data-type="taskList"] li {
+  display: flex;
+  gap: 0.5rem;
+}
+.note-content ul[data-type="taskList"] li > label {
+  display: flex;
+  flex-shrink: 0;
+  height: 1.5rem;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+.note-content ul[data-type="taskList"] li > div {
+  min-width: 0;
+  flex: 1;
+}
+.note-content ul[data-type="taskList"] li[data-checked="true"] > div {
+  color: var(--ink-4);
+  text-decoration: line-through;
+}
+.note-content input[type="checkbox"] {
+  width: 0.875rem;
+  height: 0.875rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.note-content blockquote {
+  border-left: 3px solid var(--line);
+  padding-left: 0.75rem;
+  color: var(--ink-2);
+}
+.note-content code {
+  border-radius: 0.25rem;
+  background: var(--color-stone-100);
+  padding: 0.0625rem 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+}
+.note-content pre {
+  overflow-x: auto;
+  border-radius: var(--radius-control);
+  background: var(--color-stone-100);
+  padding: 0.5rem 0.75rem;
+  white-space: pre;
+}
+.note-content pre code {
+  background: none;
+  padding: 0;
+}
+.note-content a {
+  color: var(--accent-deep);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.note-content hr {
+  border-color: var(--line);
+}
+.note-content p.is-editor-empty:first-child::before {
+  float: left;
+  height: 0;
+  color: var(--color-stone-400);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+/* The notes' text size, at the head of their formatting toolbar. */
+.note-style-select {
+  height: 2rem;
+  border-radius: var(--radius-control);
+  background: transparent;
+  padding: 0 0.5rem;
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 80ms ease;
+}
+.note-style-select:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.note-style-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* The outline toggle's lines, each drawn 12.728 long around its own origin.
    Closed, a dash shows the line's part of the outline glyph; open, the top
    and bottom lines turn into the close cross and the rest fades into its

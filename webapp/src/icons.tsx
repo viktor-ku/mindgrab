@@ -197,3 +197,61 @@ export const NoteIcon = (props: IconProps) => (
     <path d="M12 3.5v3h3M7.5 10h5M7.5 13h3.5" />
   </Icon>
 );
+
+// Note formatting.
+export const BoldIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path
+      stroke-width="2"
+      d="M6.5 4.5h4.25a2.75 2.75 0 0 1 0 5.5H6.5zM6.5 10h5a2.75 2.75 0 0 1 0 5.5h-5z"
+    />
+  </Icon>
+);
+
+export const ItalicIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M9 4.5h6M5 15.5h6M12 4.5l-4 11" />
+  </Icon>
+);
+
+export const StrikeIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M3.5 10h13" />
+    <path d="M13.5 6.25c-.5-1.15-1.75-1.75-3.4-1.75-1.95 0-3.35.95-3.35 2.45 0 .75.35 1.35 1 1.8" />
+    <path d="M6.5 13.6c.5 1.2 1.8 1.9 3.6 1.9 2.05 0 3.4-1 3.4-2.55 0-.5-.15-.95-.45-1.3" />
+  </Icon>
+);
+
+export const BulletListIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M8 5.5h8.5M8 10h8.5M8 14.5h8.5" />
+    <circle cx="4.5" cy="5.5" r="1" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="10" r="1" fill="currentColor" stroke="none" />
+    <circle cx="4.5" cy="14.5" r="1" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const NumberedListIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M9 6h7.5M9 14h7.5" />
+    <path stroke-width="1.3" d="M3.75 4.6 5 3.75V8.5" />
+    <path
+      stroke-width="1.3"
+      d="M3.6 12.6a1.2 1.2 0 0 1 2.3.45c0 .9-2.3 2.55-2.3 2.55h2.4"
+    />
+  </Icon>
+);
+
+export const ChecklistIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <rect x="3" y="3.75" width="4.5" height="4.5" rx="1" />
+    <rect x="3" y="11.75" width="4.5" height="4.5" rx="1" />
+    <path d="M10 6h6.5M10 14h6.5M4.2 6l.9.9L6.5 5" />
+  </Icon>
+);
+
+export const QuoteIcon = (props: IconProps) => (
+  <Icon class={props.class}>
+    <path d="M4.5 4.5v11M8.5 6.5h8M8.5 10h8M8.5 13.5h5" />
+  </Icon>
+);

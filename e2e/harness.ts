@@ -9,6 +9,7 @@ import "../webapp/src/index.css";
 import {
   createChild,
   deleteSubtree,
+  editNodeNote,
   editNodeText,
   openProjectDocument,
   ORIGIN,
@@ -67,6 +68,9 @@ const harness = {
   // Remote edits, as another device would make them.
   edit: (id: string, index: number, deleteCount: number, insert: string) =>
     editNodeText(remote, id, index, deleteCount, insert),
+  editNote: (id: string, index: number, deleteCount: number, insert: string) =>
+    editNodeNote(remote, id, index, deleteCount, insert),
+  note: (id: string) => nodes(remote).find((node) => node.id === id)?.note,
   addChild: (parent: string, text: string) =>
     createChild(remote, parent, { text }),
   remove: (id: string) => deleteSubtree(remote, id),

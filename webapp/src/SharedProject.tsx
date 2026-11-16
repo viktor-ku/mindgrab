@@ -32,7 +32,7 @@ import {
 } from "./mind-map";
 import type { NodeSize } from "./mind-map";
 import { lineLook } from "./node-colors";
-import { NoteHeading } from "./NotesPanel";
+import { NoteHeading, NoteView } from "./NotesPanel";
 import { Outline } from "./Outline";
 import { createPresence } from "./presence";
 import {
@@ -515,9 +515,7 @@ export function SharedProject(props: { token: string }) {
               <p class="p-4 text-sm text-stone-500">This idea has no notes.</p>
             }
           >
-            <p class="min-h-0 flex-1 overflow-y-auto px-3.5 py-3 text-sm leading-6 whitespace-pre-wrap wrap-anywhere text-stone-900 select-text">
-              {selectedNote()}
-            </p>
+            <NoteView note={selectedNote()} />
           </Show>
         </>
       )}
