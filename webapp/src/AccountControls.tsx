@@ -66,12 +66,16 @@ export function AccountControls(props: {
 
   // With only the sign-in button to show, the button is the island itself.
   const bare = () =>
+    !props.state.user &&
     props.state.status !== "authenticated" &&
     props.state.status !== "checking" &&
-    props.state.status !== "unavailable" &&
-    props.state.status !== "expired" &&
-    !message() &&
-    !props.state.message;
+    !message();
+  // On the map the island stays one row: a lost session shows the avatar and
+  // one action, and its explanation is the action's tooltip, so the island
+  // never grows over the side panel or search below it.
+  const retryOnly = () =>
+    !props.inline && props.state.status === "unavailable" && !!props.state.user;
+  const hint = () => (props.inline ? undefined : props.state.message);
   return (
     <section
       data-no-pan
@@ -131,15 +135,13 @@ export function AccountControls(props: {
               <Show
                 when={props.state.status === "authenticated"}
                 fallback={
-                  <>
-                    <span class="ml-1 flex">{avatar}</span>
-                    <span
-                      class="min-w-0 max-w-36 truncate px-1 text-stone-700"
-                      title={user().email}
-                    >
-                      {name()}
-                    </span>
-                  </>
+                  <span
+                    class="ml-1 flex"
+                    title={[name(), hint()].filter(Boolean).join("\n")}
+                  >
+                    {avatar}
+                    <span class="sr-only">{name()}</span>
+                  </span>
                 }
               >
                 <button
@@ -196,10 +198,21 @@ export function AccountControls(props: {
             Checking account…
           </p>
         </Show>
+        <Show when={retryOnly()}>
+          <button
+            type="button"
+            class="map-control outlined"
+            title={hint()}
+            {...press(props.onRetry)}
+          >
+            Retry
+          </button>
+        </Show>
         <Show
           when={
             props.state.status !== "authenticated" &&
-            props.state.status !== "checking"
+            props.state.status !== "checking" &&
+            !retryOnly()
           }
         >
           <button
@@ -209,9 +222,10 @@ export function AccountControls(props: {
                 ? `primary-button ${props.state.user ? "compact shrink-0" : "w-full"}`
                 : bare()
                   ? "primary-button account-signin"
-                  : // The name truncates instead, so the label stays on one line.
+                  : // Beside the avatar, kept on one line.
                     "primary-button compact shrink-0"
             }
+            title={hint()}
             disabled={navigating()}
             {...press(() => void navigate("login"))}
           >
@@ -219,13 +233,18 @@ export function AccountControls(props: {
           </button>
         </Show>
       </div>
-      <p role="status" class="px-2 text-xs text-stone-600 empty:hidden">
+      <p
+        role="status"
+        class="px-2 text-xs text-stone-600 empty:hidden"
+        classList={{ "sr-only": !props.inline && !message() }}
+      >
         {accountMessage()}
       </p>
       <Show
         when={
-          props.state.status === "unavailable" ||
-          props.state.status === "expired"
+          props.inline &&
+          (props.state.status === "unavailable" ||
+            props.state.status === "expired")
         }
       >
         <button

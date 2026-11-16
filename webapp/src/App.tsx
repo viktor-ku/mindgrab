@@ -2579,7 +2579,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         !!returnView(),
         focusId(),
         consentOpen(),
-        // "Check account again" goes away once the check succeeds.
+        // "Retry" or "Check account again" goes away once the check succeeds.
         account().status === "unavailable" || account().status === "expired",
       ],
       () => {

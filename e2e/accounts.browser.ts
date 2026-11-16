@@ -1429,11 +1429,21 @@ test("checking the account again from the keyboard leaves focus on the map", asy
   await cloudSaved();
   backend.meStatus = 503;
   await refreshAccount();
-  const again = page.getByRole("button", { name: "Check account again" });
+  const account = page.getByRole("region", { name: "Account" });
+  const again = account.getByRole("button", { name: "Retry", exact: true });
   await again.waitFor();
   expect(
     await again.evaluate((button) => getComputedStyle(button).borderTopWidth),
   ).toBe("1px");
+  // The island stays one row, as tall as the editing island beside it; the
+  // explanation is the button's tooltip.
+  expect((await account.boundingBox())?.height).toBe(
+    (await page.getByRole("navigation", { name: "Editing" }).boundingBox())
+      ?.height,
+  );
+  expect(await again.getAttribute("title")).toBe(
+    "Account check unavailable. Your local work is still available.",
+  );
   backend.meStatus = undefined;
   await again.focus();
   await page.keyboard.press("Enter");
@@ -1443,6 +1453,18 @@ test("checking the account again from the keyboard leaves focus on the map", asy
       document.activeElement?.getAttribute("aria-label"),
     ),
   ).toBe("Mind map canvas");
+
+  // An expired session is one row too: the avatar and Sign in again.
+  backend.meStatus = 401;
+  await refreshAccount();
+  const signIn = account.getByRole("button", { name: "Sign in again" });
+  await signIn.waitFor();
+  expect(await account.getByRole("button").count()).toBe(1);
+  expect((await account.boundingBox())?.height).toBe(44);
+  expect(await signIn.getAttribute("title")).toBe(
+    "Sign in again to resume cloud saving. Your local work is retained.",
+  );
+  backend.meStatus = undefined;
 });
 
 test("retrying a failed storage change from the keyboard keeps focus in the dialog", async () => {
