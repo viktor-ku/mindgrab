@@ -209,7 +209,8 @@ export function AccountControls(props: {
                 ? `primary-button ${props.state.user ? "compact shrink-0" : "w-full"}`
                 : bare()
                   ? "primary-button account-signin"
-                  : "primary-button compact"
+                  : // The name truncates instead, so the label stays on one line.
+                    "primary-button compact shrink-0"
             }
             disabled={navigating()}
             {...press(() => void navigate("login"))}
