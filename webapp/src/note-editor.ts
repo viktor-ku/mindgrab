@@ -8,6 +8,17 @@ import StarterKit from "@tiptap/starter-kit";
 import type { ProjectDocument } from "./project-document";
 import { compositionEnded, compositionStarted } from "./text-binding";
 
+// Notes written as plain text keep their lines: a newline is a line break.
+export const NOTE_MARKED_OPTIONS = { gfm: true, breaks: true };
+
+// A link's address as Markdown writes it: in angle brackets when it holds
+// spaces, parentheses or brackets that would otherwise end it early.
+function linkDestination(href: string) {
+  return /[\s()<>\\]/.test(href)
+    ? `<${href.replace(/[<>\\]/g, "\\$&")}>`
+    : href;
+}
+
 // Notes are Markdown in the shared note text, so they stay readable wherever
 // they go as text (copies, exports, older clients), and the rich editor only
 // shows them formatted. The extensions are limited to what Markdown can hold:
@@ -28,17 +39,18 @@ export function noteExtensions(placeholder?: string): Extensions {
     // lines, since they are read with `breaks` on.
     HardBreak.extend({ renderMarkdown: () => "\n" }),
     Link.extend({
-      // A pasted or typed address stays a bare address, as it was written.
+      // The link's text arrives as a placeholder the serializer wraps, so
+      // every link is written as `[text](address "title")`.
       renderMarkdown: (node, helpers) => {
         const href = String(node.attrs?.href ?? "");
-        const text = helpers.renderChildren(node);
-        if (text.replace(/\\(.)/g, "$1") !== href) return `[${text}](${href})`;
-        return /[\\*_~`<>[\]()]/.test(href) ? `<${href}>` : href;
+        const title = node.attrs?.title ? String(node.attrs.title) : "";
+        const quoted = title && ` "${title.replace(/["\\]/g, "\\$&")}"`;
+        return `[${helpers.renderChildren(node)}](${linkDestination(href)}${quoted})`;
       },
     }).configure({ openOnClick: false, autolink: true, linkOnPaste: true }),
     TaskList,
     TaskItem.configure({ nested: true }),
-    Markdown.configure({ markedOptions: { gfm: true, breaks: true } }),
+    Markdown.configure({ markedOptions: NOTE_MARKED_OPTIONS }),
     ...(placeholder ? [Placeholder.configure({ placeholder })] : []),
   ];
 }
