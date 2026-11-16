@@ -129,6 +129,7 @@
   background: var(--surface);
   /* Its own, so the button is 36px whatever text it stands in. */
   line-height: 1.25rem;
+  padding-block: calc(0.5rem - 1px);
 }
 .map-control:hover:not(:disabled) {
   background: var(--hover);
