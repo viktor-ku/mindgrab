@@ -64,17 +64,19 @@ export function AccountControls(props: {
     form.submit();
   }
 
+  // On the map the island stays one row: a lost session shows the avatar and
+  // one action, and its explanation is the action's tooltip, so the island
+  // never grows over the side panel or search below it. A failed check offers
+  // Retry, with or without a remembered account: signing in needs the same
+  // server.
+  const retryOnly = () => !props.inline && props.state.status === "unavailable";
   // With only the sign-in button to show, the button is the island itself.
   const bare = () =>
     !props.state.user &&
     props.state.status !== "authenticated" &&
     props.state.status !== "checking" &&
+    !retryOnly() &&
     !message();
-  // On the map the island stays one row: a lost session shows the avatar and
-  // one action, and its explanation is the action's tooltip, so the island
-  // never grows over the side panel or search below it.
-  const retryOnly = () =>
-    !props.inline && props.state.status === "unavailable" && !!props.state.user;
   const hint = () => (props.inline ? undefined : props.state.message);
   return (
     <section

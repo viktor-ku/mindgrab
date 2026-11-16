@@ -1467,6 +1467,24 @@ test("checking the account again from the keyboard leaves focus on the map", asy
   backend.meStatus = undefined;
 });
 
+test("a failed account check in a fresh browser offers Retry, not Sign in", async () => {
+  // Signing in needs the same server, so Retry is the one action.
+  backend.meStatus = 503;
+  await page.reload();
+  await ready();
+  const account = page.getByRole("region", { name: "Account" });
+  const retry = account.getByRole("button", { name: "Retry", exact: true });
+  await retry.waitFor();
+  // No avatar, since no account is remembered, and Retry is the only button.
+  expect(await account.locator('[aria-hidden="true"]').count()).toBe(0);
+  expect(await account.getByRole("button").count()).toBe(1);
+  expect((await account.boundingBox())?.height).toBe(44);
+  backend.meStatus = undefined;
+  await retry.click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
+  await retry.waitFor({ state: "detached" });
+});
+
 test("retrying a failed storage change from the keyboard keeps focus in the dialog", async () => {
   await projectMenu("Project preferences…");
   const dialog = page.getByRole("dialog", { name: "Project preferences" });
