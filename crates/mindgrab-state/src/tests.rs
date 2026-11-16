@@ -1313,7 +1313,7 @@ fn gaps_are_set_cleared_and_validated() {
         .unwrap();
     assert_eq!(gaps(&project, &root), (Some(10.0), Some(20.0)));
     let before = project.snapshot().unwrap();
-    for gap in [-1.0, f64::NAN, f64::INFINITY] {
+    for gap in [-1.0, f64::NAN, f64::INFINITY, MAX_GAP * 2.0, 1e308] {
         assert!(
             project
                 .apply(Command::SetGaps {
@@ -1341,4 +1341,35 @@ fn gaps_are_set_cleared_and_validated() {
         })
         .unwrap();
     assert_eq!(gaps(&project, &root), (None, None));
+}
+
+#[test]
+fn gaps_that_add_up_past_the_limit_are_capped() {
+    let mut project = Project::new("Gaps").unwrap();
+    let root = create(&mut project, None, "root");
+    let [a, b, c] = ["a", "b", "c"].map(|t| create(&mut project, Some(&root), t));
+    for id in [&a, &b, &c] {
+        project
+            .apply(Command::SetGaps {
+                id: id.clone(),
+                gap: Some(MAX_GAP),
+                end_gap: Some(MAX_GAP),
+            })
+            .unwrap();
+    }
+    // Moving A leaves its gap on B; deleting B leaves both on C.
+    project
+        .apply(Command::MoveNode {
+            id: a.clone(),
+            parent: None,
+            index: 0,
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &b), (Some(MAX_GAP), Some(MAX_GAP)));
+    delete(&mut project, &b, MAX_GAP);
+    assert_eq!(gaps(&project, &c), (Some(MAX_GAP), Some(MAX_GAP)));
+    delete(&mut project, &c, MAX_GAP);
+    assert_eq!(gaps(&project, &root), (None, Some(MAX_GAP)));
+    let restored = Project::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    assert_eq!(restored.view().unwrap(), project.view().unwrap());
 }

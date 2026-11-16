@@ -707,6 +707,8 @@ impl Project {
         Ok((read(GAP)?, read(END_GAP)?))
     }
     fn set_gap(&self, id: TreeID, key: &str, space: f64) -> Result<()> {
+        // Sums of stored gaps stay finite, and capping them keeps them valid.
+        let space = space.min(MAX_GAP);
         let meta = self.tree().get_meta(id)?;
         let current = meta.get(key).is_some();
         if space > MIN_GAP {
@@ -897,10 +899,10 @@ const END_GAP: &str = "endGap";
 /// Gaps this small are rounding left over from filling one, not space.
 const MIN_GAP: f64 = 1e-6;
 fn validate_gap(space: f64) -> Result<()> {
-    if space.is_finite() && space >= 0.0 {
+    if (0.0..=MAX_GAP).contains(&space) {
         Ok(())
     } else {
-        invalid("A gap must be a finite, non-negative size")
+        invalid("A gap must be a non-negative size of at most MAX_GAP")
     }
 }
 fn validate_position(position: Position) -> Result<()> {

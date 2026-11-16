@@ -58,7 +58,8 @@ own gap behind the same way. `CreateNode` and `CreateSibling` take an optional
 `fill`: the space the new idea needs, taken first from the gap where it goes,
 so adding where an idea was deleted fills its place. `SetGaps` sets or clears
 both on one idea, for import and for returning a branch to automatic layout.
-Gaps are finite, non-negative layout units; clients older than gaps reject
+Gaps are non-negative layout units of at most `MAX_GAP`; gaps that add up past
+it are capped, so a sum can never overflow. Clients older than gaps reject
 documents that have them.
 
 The flat Rust view contains ordered nodes, parents, children, depth, colors and

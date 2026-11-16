@@ -64,7 +64,7 @@ const PositionSchema = z.strictObject({
   x: z.number().finite(),
   y: z.number().finite(),
 });
-const GapSchema = z.number().finite().nonnegative();
+const GapSchema = z.number().finite().nonnegative().max(LIMITS.gap);
 const ViewportSchema = z.strictObject({
   left: z.number().finite(),
   top: z.number().finite(),

@@ -40,6 +40,8 @@ export const LIMITS = {
   text: 65_536,
   note: 65_536,
   nameBytes: 200,
+  // MAX_GAP in Rust: the most space one gap keeps.
+  gap: 1e9,
 } as const;
 export const ORIGIN = {
   create: Symbol("create"),
@@ -388,7 +390,11 @@ export const editNodeNote = (
 ) => doc.dispatch({ type: "editNote", id, index, deleteCount, insert }).changed;
 // `gap` is the space the branch took, kept empty so no other idea moves.
 export const deleteSubtree = (doc: ProjectDocument, id: string, gap?: number) =>
-  doc.dispatch({ type: "deleteNode", id, ...(gap && { gap }) }).changed;
+  doc.dispatch({
+    type: "deleteNode",
+    id,
+    ...(gap && { gap: Math.min(gap, LIMITS.gap) }),
+  }).changed;
 export const setNodeColor = (
   doc: ProjectDocument,
   id: string,

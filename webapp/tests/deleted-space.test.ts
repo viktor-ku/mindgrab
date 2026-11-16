@@ -231,6 +231,13 @@ describe("deleted space", () => {
         next: strip(next ?? []),
       }));
     expect(strip(restored)).toEqual(strip(original));
+
+    // A backup cannot carry a gap larger than the document allows.
+    const huge = structuredClone(file);
+    huge.project.nodes[0].gap = 1e308;
+    expect(() => parseProjectFile(JSON.stringify(huge))).toThrow(
+      /backup is damaged/,
+    );
     doc.destroy();
   });
 });
