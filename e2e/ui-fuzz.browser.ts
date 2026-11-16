@@ -493,9 +493,10 @@ function readState(page: Page): Promise<State> {
       value: t.value,
       focused: active === t,
     }));
-    const notesInput = document.querySelector<HTMLTextAreaElement>(
-      'textarea[aria-label="Idea notes"]',
-    );
+    // The rich notes editor; Tiptap hangs itself on its element.
+    const notesInput = document.querySelector<
+      HTMLElement & { editor?: { getMarkdown(): string } }
+    >('[aria-label="Idea notes"]');
     const tree = document.querySelector(
       '[role="tree"][aria-label="Map outline"]',
     );
@@ -508,7 +509,7 @@ function readState(page: Page): Promise<State> {
     let focus = active?.tagName.toLowerCase() ?? "none";
     if (active?.matches('textarea[aria-label="Node text"]'))
       focus = `text:${active.closest<HTMLElement>("[data-node-id]")?.dataset.nodeId}`;
-    else if (active?.matches('textarea[aria-label="Idea notes"]'))
+    else if (active?.matches('[aria-label="Idea notes"]'))
       focus = `note:${selected ?? "?"}`;
     else if (active?.matches("input, textarea, [contenteditable=true]"))
       focus = `input:${active.getAttribute("aria-label")}`;
@@ -525,7 +526,10 @@ function readState(page: Page): Promise<State> {
       rendered,
       editors,
       notes: notesInput
-        ? { value: notesInput.value, focused: active === notesInput }
+        ? {
+            value: notesInput.editor?.getMarkdown() ?? "",
+            focused: active === notesInput,
+          }
         : undefined,
       outline: tree
         ? [...tree.querySelectorAll<HTMLElement>("[data-outline-id]")].map(

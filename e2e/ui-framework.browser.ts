@@ -757,7 +757,129 @@ describe("capture flow", () => {
     await node(child).click();
     expect(await notes.count()).toBe(0);
     await page.getByRole("button", { name: "Notes", exact: true }).click();
-    expect(await notes.inputValue()).toBe("Details here");
+    expect(await notes.innerText()).toBe("Details here");
+  });
+});
+
+describe("notes", () => {
+  // The editor reads a click's caret a moment later; waits until it has.
+  const caretIn = (text: string) =>
+    page.waitForFunction((text) => {
+      const editor = document.querySelector<
+        HTMLElement & {
+          editor?: {
+            state: {
+              selection: {
+                $from: {
+                  parent: {
+                    textBetween(
+                      from: number,
+                      to: number,
+                      block: string,
+                      leaf: string,
+                    ): string;
+                    content: { size: number };
+                  };
+                };
+              };
+            };
+          };
+        }
+      >('[aria-label="Idea notes"]')?.editor;
+      const parent = editor?.state.selection.$from.parent;
+      return parent?.textBetween(0, parent.content.size, "", "\n") === text;
+    }, text);
+  test("notes are rich text kept as Markdown, with a toolbar, shortcuts, undo and remote edits", async () => {
+    const root = await rootId();
+    await node(root).click();
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("textbox", { name: "Idea notes" });
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
+    );
+    const toolbar = page.getByRole("toolbar", { name: "Formatting" });
+    const bold = toolbar.getByRole("button", { name: "Bold" });
+
+    // The toolbar formats what comes next and gives the keyboard back.
+    await bold.click();
+    expect(await activeLabel()).toBe("Idea notes");
+    expect(await bold.getAttribute("aria-pressed")).toBe("true");
+    await page.keyboard.type("Plan");
+    await page.keyboard.press("ControlOrMeta+b");
+    await page.keyboard.type(" for the week");
+    expect(await bold.getAttribute("aria-pressed")).toBe("false");
+    expect(await call("note", root)).toBe("**Plan** for the week");
+
+    // Markdown shortcuts start lists; the toolbar switches their kind.
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("- Monday");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Tuesday");
+    expect(await call("note", root)).toBe(
+      "**Plan** for the week\n\n- Monday\n- Tuesday",
+    );
+    await toolbar.getByRole("button", { name: "Numbered list" }).click();
+    expect(
+      await toolbar
+        .getByRole("button", { name: "Numbered list" })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(await call("note", root)).toBe(
+      "**Plan** for the week\n\n1. Monday\n2. Tuesday",
+    );
+
+    // Sizes are headings.
+    await notes
+      .locator("p")
+      .first()
+      .click({ position: { x: 4, y: 4 } });
+    await caretIn("Plan for the week");
+    await toolbar
+      .getByRole("combobox", { name: "Text size" })
+      .selectOption({ label: "Heading 1" });
+    expect(await activeLabel()).toBe("Idea notes");
+    expect(await call("note", root)).toBe(
+      "# **Plan** for the week\n\n1. Monday\n2. Tuesday",
+    );
+    expect(await notes.locator("h1").innerText()).toBe("Plan for the week");
+
+    // Undo is the map's: it steps the note back and keeps the writer there.
+    await page.keyboard.press("ControlOrMeta+z");
+    expect(await call("note", root)).toBe(
+      "**Plan** for the week\n\n1. Monday\n2. Tuesday",
+    );
+    expect(await notes.locator("h1").count()).toBe(0);
+    expect(await activeLabel()).toBe("Idea notes");
+
+    // Another device's edit shows without moving the caret.
+    await notes.locator("li").last().click();
+    await caretIn("Tuesday");
+    await page.keyboard.press("End");
+    await call("editNote", root, 0, 0, "Agenda\n\n");
+    await notes.locator("p", { hasText: "Agenda" }).waitFor();
+    await page.keyboard.type(" and Wednesday");
+    expect(await call("note", root)).toBe(
+      "Agenda\n\n**Plan** for the week\n\n1. Monday\n2. Tuesday and Wednesday",
+    );
+  });
+
+  test("notes written as plain text keep their lines", async () => {
+    const root = await rootId();
+    await call("editNote", root, 0, 0, "first line\nsecond line\n\nnext 2*3");
+    await node(root).click();
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("textbox", { name: "Idea notes" });
+    expect(await notes.innerText()).toBe("first line\nsecond line\n\nnext 2*3");
+    await notes
+      .locator("p")
+      .first()
+      .click({ position: { x: 4, y: 4 } });
+    await caretIn("first line\nsecond line");
+    await page.keyboard.press("End");
+    await page.keyboard.type("!");
+    expect(await call("note", root)).toBe(
+      "first line!\nsecond line\n\nnext 2\\*3",
+    );
   });
 });
 
@@ -1022,7 +1144,7 @@ describe("dialogs, panels and search", () => {
       return stops;
     };
     const stops = await cycle();
-    expect(stops).toContain("Notes: textarea");
+    expect(stops).toContain("Notes: textbox");
     expect(stops).toContain("View and help: button");
     // The panel shows one tab at a time; on the outline it enters the tree.
     await page.keyboard.press("Alt+o");

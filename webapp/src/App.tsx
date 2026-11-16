@@ -1445,7 +1445,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const resumeWriting =
         selection.writing &&
         !document.activeElement?.matches(
-          'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
+          '[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
         );
       setSelectedId(selection.id);
       setWriting(resumeWriting);
@@ -2562,7 +2562,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const isTextField = (target: EventTarget) =>
     target instanceof Element &&
     target.matches(
-      'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input[aria-label="Project name"]',
+      '[aria-label="Idea notes"], textarea[aria-label="Idea title"], input[aria-label="Project name"]',
     );
   // Chrome that closes while it holds focus (a panel, a menu item, a banner
   // button, a breadcrumb) hands focus back to the map, so keyboard users never
@@ -2602,9 +2602,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (open && selectedId())
       queueMicrotask(() =>
         document
-          .querySelector<HTMLTextAreaElement>(
-            'textarea[aria-label="Idea notes"]',
-          )
+          .querySelector<HTMLElement>('[aria-label="Idea notes"]')
           ?.focus(),
       );
     else canvas.focus({ preventScroll: true });
@@ -2876,7 +2874,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     else
       (
         next.querySelector<HTMLElement>(
-          'textarea[aria-label="Idea notes"], [role="tree"] [tabindex="0"]',
+          '[aria-label="Idea notes"], [role="tree"] [tabindex="0"]',
         ) ?? next.querySelector<HTMLElement>(focusable)
       )?.focus();
   }
@@ -3331,7 +3329,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           editor &&
           active !== editor &&
           !active?.matches(
-            'textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"], input',
+            '[aria-label="Idea notes"], textarea[aria-label="Idea title"], input',
           )
         )
           editor.focus({ preventScroll: true });
@@ -4136,7 +4134,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const textEditor =
         target instanceof Element &&
         target.matches(
-          'textarea[aria-label="Node text"], textarea[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
+          'textarea[aria-label="Node text"], [aria-label="Idea notes"], textarea[aria-label="Idea title"]',
         );
       if (
         target instanceof Element &&

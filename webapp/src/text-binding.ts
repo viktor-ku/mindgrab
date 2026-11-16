@@ -5,6 +5,9 @@ import type { ProjectDocument } from "./project-document";
 // document swap has to wait for it: it can neither be read reliably nor moved.
 const [compositions, setCompositions] = createSignal(0);
 export const composing = () => compositions() > 0;
+// For editors other than textareas (the rich notes editor) to hold swaps too.
+export const compositionStarted = () => setCompositions((count) => count + 1);
+export const compositionEnded = () => setCompositions((count) => count - 1);
 
 // The DOM adapter keeps composition local. Rust computes the text delta and
 // resolves Loro cursors, including edits received while an IME draft is open.
