@@ -18,13 +18,10 @@ const links = (note: string) =>
       })),
   );
 
-test("plain text notes keep their lines", () => {
+test("plain lines and links keep their text and destination through a save", () => {
   expect(roundTrip("first line\nsecond line\n\nnext")).toBe(
     "first line\nsecond line\n\nnext",
   );
-});
-
-test("links keep their destination and title through a save", () => {
   for (const note of [
     "[guide](<https://example.com/a)b>)",
     "[guide](<https://example.com/a b>)",

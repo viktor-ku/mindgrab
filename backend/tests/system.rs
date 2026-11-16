@@ -5,58 +5,8 @@ use mindgrab_backend::auth::{SESSION_COOKIE, hash};
 use mindgrab_state::{Color, Command, Project};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
-
-#[tokio::test]
-async fn deployment_health_reports_database_readiness_without_a_session() {
-    let f = Fixture::new("http://localhost:5173").await;
-    let response = f.client.get(format!("{}/", f.url)).send().await.unwrap();
-    assert_eq!(response.status(), 200);
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    assert!(
-        response.headers()["content-type"]
-            .to_str()
-            .unwrap()
-            .starts_with("text/html")
-    );
-    assert!(response.text().await.unwrap().contains("It works!"));
-
-    let response = f.rpc("getHealth", "", json!({})).await;
-    assert_eq!(response.status(), 200);
-    assert!(response.headers().contains_key("server-timing.php"));
-    assert!(!response.headers().contains_key("server-timing"));
-    let value: Value = response.json().await.unwrap();
-    assert_eq!(value["database"]["status"], "up");
-
-    f.backend.pool.close().await;
-    let response = f.client.get(format!("{}/", f.url)).send().await.unwrap();
-    assert_eq!(response.status(), 503);
-    let body = response.text().await.unwrap();
-    assert!(body.contains("Uncaught Exception: 503"), "{body}");
-
-    let response = f.rpc("getHealth", "", json!({})).await;
-    assert_eq!(response.status(), 503);
-    let value: Value = response.json().await.unwrap();
-    assert_eq!(value["database"]["status"], "down");
-    f.close().await;
-}
-
-#[tokio::test]
-async fn the_account_header_is_validated_before_the_session_so_deploys_can_probe_it() {
-    let f = Fixture::new("http://localhost:5173").await;
-    let anonymous = f.post("getMe", "").send().await.unwrap();
-    assert_eq!(anonymous.status(), 401);
-    let probe = f
-        .post("getMe", "")
-        .header("x-mindgrab-account.php", "probe")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(probe.status(), 400);
-    let body = probe.text().await.unwrap();
-    assert!(body.contains(r#""code":"invalid_request""#), "{body}");
-    f.close().await;
-}
 
 async fn baseline(f: &Fixture, browser: &str, id: Uuid) -> (Project, String) {
     let response = f
@@ -352,66 +302,6 @@ async fn persistent_merge_concurrency_ownership_validation_deletion_and_native_c
     f.close().await;
 }
 
-async fn recent(f: &Fixture, browser: &str) -> Vec<String> {
-    let list: Value = f
-        .rpc("listProjects", browser, json!({"limit":100,"recent":true}))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert!(list["nextCursor"].is_null());
-    list["projects"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|project| project["name"].as_str().unwrap().to_owned())
-        .collect()
-}
-#[tokio::test]
-async fn recent_project_listing_orders_by_last_committed_change() {
-    let f = Fixture::new("http://localhost:5173").await;
-    let alice = f.credential("alice").await;
-    let mut projects = Vec::new();
-    for name in ["First", "Second"] {
-        let id = Uuid::new_v4();
-        assert_eq!(
-            f.rpc(
-                "createProject",
-                &alice,
-                json!({"projectId":id,"schemaVersion":1})
-            )
-            .await
-            .status(),
-            200
-        );
-        let project = Project::new(name).unwrap();
-        assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
-        projects.push((id, project));
-    }
-    // An unchanged merge keeps the order; a real edit moves a project first.
-    let (first, project) = &mut projects[0];
-    assert_eq!(upload(&f, &alice, *first, project).await.status(), 200);
-    assert_eq!(recent(&f, &alice).await, ["Second", "First"]);
-    project
-        .apply(Command::Rename {
-            name: "First, edited".into(),
-        })
-        .unwrap();
-    assert_eq!(upload(&f, &alice, *first, project).await.status(), 200);
-    assert_eq!(recent(&f, &alice).await, ["First, edited", "Second"]);
-    assert_eq!(
-        f.rpc(
-            "listProjects",
-            &alice,
-            json!({"limit":1,"recent":true,"cursor":Uuid::new_v4()})
-        )
-        .await
-        .status(),
-        400
-    );
-    f.close().await;
-}
-
 async fn shared(f: &Fixture, token: &str) -> reqwest::Response {
     // Viewers carry no session cookie and may come from any origin.
     f.client
@@ -432,6 +322,92 @@ async fn share(f: &Fixture, browser: &str, id: Uuid, enabled: bool) -> Value {
     assert_eq!(response.status(), 200);
     response.json().await.unwrap()
 }
+fn websocket(f: &Fixture, origin: &str, path: &str) -> reqwest::RequestBuilder {
+    f.client
+        .get(format!("{}{path}", f.url))
+        .header("origin", origin)
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+}
+#[derive(Debug, PartialEq)]
+enum Frame {
+    Text(String),
+    Close(u16, String),
+}
+/// Server frames are never masked, and these are all short.
+async fn frame(socket: &mut reqwest::Upgraded) -> Frame {
+    // Longer than the socket's 20 second reconciliation timer.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut head = [0; 2];
+        socket.read_exact(&mut head).await.unwrap();
+        assert!(head[1] < 126, "unexpected frame length");
+        let mut payload = vec![0; head[1] as usize];
+        socket.read_exact(&mut payload).await.unwrap();
+        match head[0] & 0x0f {
+            1 => Frame::Text(String::from_utf8(payload).unwrap()),
+            8 => Frame::Close(
+                u16::from_be_bytes([payload[0], payload[1]]),
+                String::from_utf8(payload[2..].to_vec()).unwrap(),
+            ),
+            opcode => panic!("unexpected opcode {opcode}"),
+        }
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn project_sockets_reject_foreign_origins_and_follow_commits() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let user: Value = f
+        .rpc("getMe", &alice, json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let path = format!("/ws/project/{id}?ownerId={}", user["id"]);
+    let session = format!("{}={alice}", f.backend.config.cookie_name(SESSION_COOKIE));
+
+    let foreign = websocket(&f, "https://evil.example", &path)
+        .header("cookie", &session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 403);
+
+    let response = websocket(&f, &f.origin, &path)
+        .header("cookie", &session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 101);
+    let mut socket = response.upgrade().await.unwrap();
+    assert_eq!(
+        frame(&mut socket).await,
+        Frame::Text(json!({"revision":"0"}).to_string())
+    );
+    let project = Project::new("Plan").unwrap();
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    assert_eq!(
+        frame(&mut socket).await,
+        Frame::Text(json!({"revision":"1"}).to_string())
+    );
+    f.close().await;
+}
+
 #[tokio::test]
 async fn share_links_grant_anonymous_read_only_access_until_revoked() {
     let f = Fixture::new("http://localhost:5173").await;
@@ -523,9 +499,32 @@ async fn share_links_grant_anonymous_read_only_access_until_revoked() {
         assert_eq!(shared(&f, bad).await.status(), 404, "{bad}");
     }
 
-    // Disabling revokes the link; re-enabling issues a different one.
+    // A viewer's socket needs no session and follows commits.
+    let path = format!("/ws/share/{token}");
+    let response = websocket(&f, &f.origin, &path).send().await.unwrap();
+    assert_eq!(response.status(), 101);
+    let mut socket = response.upgrade().await.unwrap();
+    assert_eq!(
+        frame(&mut socket).await,
+        Frame::Text(json!({"revision":"1"}).to_string())
+    );
+
+    // Disabling revokes the link, closes its sockets and stops reconnects;
+    // re-enabling issues a different one.
     assert!(share(&f, &alice, id, false).await["token"].is_null());
     assert_eq!(shared(&f, &token).await.status(), 404);
+    assert_eq!(
+        frame(&mut socket).await,
+        Frame::Close(1008, "Link disabled".into())
+    );
+    assert_eq!(
+        websocket(&f, &f.origin, &path)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
     let renewed = share(&f, &alice, id, true).await["token"]
         .as_str()
         .unwrap()

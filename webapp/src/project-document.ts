@@ -110,9 +110,6 @@ export class ProjectDocument {
   get ready() {
     return !!this.#state;
   }
-  get observerCount() {
-    return this.#snapshots.size;
-  }
   native() {
     if (!this.#state || this.#destroyed)
       throw new Error("The project has not loaded.");

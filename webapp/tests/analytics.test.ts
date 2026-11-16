@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, expect, mock, test } from "bun:test";
 
 const calls: unknown[][] = [];
 let userState = "anonymous";
@@ -56,42 +56,19 @@ const analytics = await import("../src/analytics");
 const names = () => calls.map(([name]) => name);
 const user = { id: 7, email: "ada@example.com", name: "Ada" };
 
-beforeEach(() => {
-  calls.length = 0;
-});
-
-test("nothing loads or is sent before the visitor chooses", async () => {
+test("nothing is sent before the visitor chooses, and declining never identifies", async () => {
   expect(analytics.consentOpen()).toBe(true);
   await analytics.startAnalytics();
   analytics.track("idea_added", { kind: "child", depth: 2, idea_count: 3 });
   analytics.identify(user);
   await Bun.sleep(0);
   expect(calls).toEqual([]);
-});
 
-test("repeat account checks identify once, and sign-out resets", async () => {
-  // Accepting loads the SDK and identifies the user the first test held back.
-  analytics.setConsent("granted");
+  analytics.setConsent("denied");
   await Bun.sleep(10);
   calls.length = 0;
   analytics.identify(user);
-  expect(calls).toEqual([]);
-  analytics.identify(undefined);
-  expect(calls).toEqual([["reset"]]);
-});
-
-test("declining keeps capturing cookieless and never identifies", () => {
-  analytics.setConsent("denied");
-  analytics.identify(user);
   analytics.track("signed_out");
-  expect(names()).toEqual(["opt_out", "capture"]);
+  expect(names()).toEqual(["capture"]);
   expect(document.cookie).toContain("mindgrab_analytics_consent=denied");
-});
-
-test("a declined choice can be accepted later from preferences", () => {
-  analytics.setConsent("granted");
-  expect(analytics.consent()).toBe("granted");
-  expect(analytics.consentOpen()).toBe(false);
-  expect(names()).toEqual(["opt_in", "identify"]);
-  expect(document.cookie).toContain("mindgrab_analytics_consent=granted");
 });

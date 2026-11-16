@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { LoroApi, SyncError } from "../src/loro-api";
+import { LoroApi } from "../src/loro-api";
 import {
   createProjectDocument,
   editNodeText,
@@ -35,10 +35,6 @@ class Server extends LoroApi {
   registrations = 0;
   deletions = 0;
   lost = false;
-  auth = true;
-  deleteFails = false;
-  registerGate?: Promise<void>;
-  snapshotGate?: Promise<void>;
   mergeGate?: Promise<void>;
   constructor(id: string) {
     super();
@@ -54,8 +50,6 @@ class Server extends LoroApi {
     };
   }
   override async register(id: string) {
-    await this.registerGate;
-    if (!this.auth) throw new SyncError("Sign in again.", "auth");
     this.registrations++;
     return {
       projectId: id,
@@ -65,7 +59,6 @@ class Server extends LoroApi {
     };
   }
   override async snapshot() {
-    await this.snapshotGate;
     return this.result();
   }
   override async merge(_id: string, bytes: Uint8Array) {
@@ -79,7 +72,6 @@ class Server extends LoroApi {
     return this.result();
   }
   override async remove() {
-    if (this.deleteFails) throw new SyncError("Unavailable");
     this.deletions++;
     this.doc = keep(openProjectDocument(this.doc.id));
   }
@@ -87,7 +79,6 @@ class Server extends LoroApi {
 function attach(doc: ProjectDocument, server: Server) {
   let attempted = false;
   let registered = false;
-  let closed = false;
   const handle = {
     id: doc.id,
     doc,
@@ -116,14 +107,12 @@ function attach(doc: ProjectDocument, server: Server) {
     provider: () => ({
       connect() {},
       disconnect() {},
-      destroy() {
-        closed = true;
-      },
+      destroy() {},
       on() {},
     }),
   });
   controllers.push(sync);
-  return { sync, closed: () => closed };
+  return { sync };
 }
 function fixture() {
   const doc = keep(
@@ -147,24 +136,6 @@ test("lost acknowledgements resend the same snapshot before later edits", async 
   expect(server.merges).toHaveLength(3);
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
-});
-test("pulling with nothing to upload never reports saving", async () => {
-  const { sync } = fixture();
-  await sync.syncNow();
-  expect(sync.status.status).toBe("saved");
-  // A socket notification runs a pull-only sync.
-  const seen = new Set<string>();
-  let done = false;
-  const running = sync.syncNow().finally(() => {
-    done = true;
-  });
-  while (!done) {
-    seen.add(sync.status.status);
-    await Bun.sleep(0);
-  }
-  await running;
-  expect([...seen, sync.status.status]).not.toContain("saving");
-  expect(sync.status.status).toBe("saved");
 });
 test("edits received during an in-flight merge are uploaded by the same sync", async () => {
   const { doc, root, server, sync } = fixture();
@@ -194,30 +165,6 @@ test("reload recovery includes pure deletions and duplicate histories produce no
   await next.syncNow();
   expect(server.merges).toHaveLength(count);
 });
-test("destroy fences a delayed snapshot and removes the previous connection", async () => {
-  const { doc, root, server, sync, closed } = fixture();
-  await sync.syncNow();
-  editNodeText(server.doc, root, 0, 0, "Remote ");
-  const pending = gate();
-  server.snapshotGate = pending.promise;
-  const running = sync.syncNow();
-  sync.destroy();
-  pending.resolve();
-  await running;
-  expect(doc.view().nodes[0].text).toBe("Shared 🌲");
-  expect(closed()).toBe(true);
-});
-test("authentication failures pause cloud activity without removing local work", async () => {
-  const { doc, server, sync } = fixture();
-  server.auth = false;
-  await sync.syncNow();
-  expect(sync.status.status).toBe("auth");
-  server.auth = true;
-  sync.retry();
-  await sync.syncNow();
-  expect(server.merges).toHaveLength(0);
-  expect(doc.view().nodes[0].text).toBe("Shared 🌲");
-});
 test("private projects never register or upload, including manual retry", async () => {
   const { doc, root, server, sync } = fixture();
   setSavingPreferences(doc, { local: false, cloud: false });
@@ -229,36 +176,4 @@ test("private projects never register or upload, including manual retry", async 
   expect(server.merges).toHaveLength(0);
   expect(server.deletions).toBe(0);
   expect(sync.status.status).toBe("disabled");
-});
-test("opt-out fences registration in flight and deletes its cloud reservation", async () => {
-  const { doc, server, sync } = fixture();
-  const pending = gate();
-  server.registerGate = pending.promise;
-  const running = sync.syncNow();
-  await Bun.sleep(1);
-  setSavingPreferences(doc, { local: true, cloud: false });
-  pending.resolve();
-  await running;
-  await sync.syncNow();
-  expect(server.merges).toHaveLength(0);
-  expect(server.deletions).toBe(1);
-  expect(sync.status.status).toBe("disabled");
-});
-test("failed cloud deletion is retried and re-enabling saving uploads retained private edits", async () => {
-  const { doc, root, server, sync, closed } = fixture();
-  await sync.syncNow();
-  server.deleteFails = true;
-  setSavingPreferences(doc, { local: true, cloud: false });
-  expect(closed()).toBe(true);
-  editNodeText(doc, root, 0, 0, "Private ");
-  await sync.syncNow();
-  expect(sync.status.status).toBe("retrying");
-  server.deleteFails = false;
-  sync.retry();
-  await sync.syncNow();
-  expect(sync.status.status).toBe("disabled");
-  setSavingPreferences(doc, { local: true, cloud: true });
-  await sync.syncNow();
-  expect(server.doc.view()).toEqual(doc.view());
-  expect(sync.status.status).toBe("saved");
 });

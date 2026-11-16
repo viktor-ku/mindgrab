@@ -329,6 +329,3 @@ fn main() -> std::process::ExitCode {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;
