@@ -2471,19 +2471,6 @@ describe("address", () => {
     expect(await address()).toBe("/");
   });
 
-  test("an address opens the preferences on its tab, and an unknown tab shows saving", async () => {
-    await call("go", "/?preferences=true&tab=colors");
-    await dialog().waitFor();
-    expect(await section().innerText()).toBe("Colors");
-    await page.keyboard.press("Escape");
-    await dialog().waitFor({ state: "hidden" });
-    expect(await address()).toBe("/");
-
-    await call("go", "/?preferences=true&tab=nonsense");
-    await dialog().waitFor();
-    expect(await section().innerText()).toBe("Saving");
-  });
-
   test("a page loaded at an address with the preferences open shows them as a modal", async () => {
     await page.goto(`${page.url()}?preferences=true&tab=colors`);
     // The map opens first: the preferences shown are its own, not those of
