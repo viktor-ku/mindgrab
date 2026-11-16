@@ -132,13 +132,7 @@ import {
 } from "./icons";
 import { searchNodes } from "./search";
 import { AccountControls } from "./AccountControls";
-import {
-  analyticsEnabled,
-  consentOpen,
-  identify,
-  reviewConsent,
-  track,
-} from "./analytics";
+import { consentOpen, identify, track } from "./analytics";
 import { AnalyticsConsent } from "./AnalyticsConsent";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
@@ -4495,15 +4489,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
         onSignIn={signInFrom(setShowPreferences)}
-        onReviewAnalytics={
-          isPhone() && analyticsEnabled
-            ? () => {
-                returnToShare = false;
-                setShowPreferences(false);
-                reviewConsent();
-              }
-            : undefined
-        }
       />
       <ShareDialog
         open={showShare()}
@@ -4698,19 +4683,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               >
                 Project preferences…
               </button>
-              <Show when={analyticsEnabled}>
-                <button
-                  type="button"
-                  role="menuitem"
-                  class="menu-item"
-                  {...press(() => {
-                    setMenuOpen(false);
-                    reviewConsent();
-                  })}
-                >
-                  Analytics choice…
-                </button>
-              </Show>
             </fieldset>
           </div>
         </Show>

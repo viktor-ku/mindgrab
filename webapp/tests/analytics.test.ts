@@ -88,11 +88,10 @@ test("declining keeps capturing cookieless and never identifies", () => {
   expect(document.cookie).toContain("mindgrab_analytics_consent=denied");
 });
 
-test("a choice reopened for review can be put away unchanged", () => {
-  analytics.reviewConsent();
-  expect(analytics.consentOpen()).toBe(true);
-  analytics.closeConsent();
+test("a declined choice can be accepted later from preferences", () => {
+  analytics.setConsent("granted");
+  expect(analytics.consent()).toBe("granted");
   expect(analytics.consentOpen()).toBe(false);
-  expect(analytics.consent()).toBe("denied");
-  expect(calls).toEqual([]);
+  expect(names()).toEqual(["opt_in", "identify"]);
+  expect(document.cookie).toContain("mindgrab_analytics_consent=granted");
 });

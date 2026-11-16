@@ -1,4 +1,5 @@
 import { For, Show } from "solid-js";
+import { analyticsEnabled, consent, setConsent } from "./analytics";
 import type { PreferenceTab } from "./app-search";
 import { ColorSettings } from "./ColorSettings";
 import { Dialog } from "./Dialog";
@@ -24,19 +25,17 @@ export function ProjectPreferences(props: {
   onExport: () => void;
   // Starts sign-in; absent while signed in or while the account is checked.
   onSignIn?: () => void;
-  onReviewAnalytics?: () => void;
 }) {
   let firstSwitch: HTMLButtonElement | undefined;
   const sections = () => [
     { id: "saving" as const, label: "Saving" },
     { id: "colors" as const, label: "Colors" },
     { id: "backup" as const, label: "Backup" },
-    // Only where the dialog is the way to it: on phones.
-    ...(props.onReviewAnalytics
-      ? [{ id: "privacy" as const, label: "Privacy" }]
-      : []),
+    // Only in builds that collect analytics.
+    ...(analyticsEnabled ? [{ id: "privacy" as const, label: "Privacy" }] : []),
   ];
-  // A section that went away, such as Privacy off the phone, shows saving.
+  // A section that is not offered, such as Privacy without analytics, shows
+  // saving.
   const current = () =>
     sections().some((item) => item.id === props.section)
       ? (props.section as PreferenceTab)
@@ -255,16 +254,43 @@ export function ProjectPreferences(props: {
               </button>
             </Show>
             <Show when={current() === "privacy"}>
-              <p class="mb-4 text-sm leading-6 text-stone-600">
-                Choose whether Mindgrab may collect anonymous usage analytics.
+              <p class="mb-6 max-w-2xl text-sm leading-6 text-stone-600">
+                With your permission, we use cookies to learn how Mindgrab is
+                used, such as how many ideas a map has and which features are
+                opened, and link this to your account when you sign in. Your
+                maps, notes, and project names are never sent. If you decline,
+                we only count usage anonymously, without cookies.
               </p>
-              <button
-                type="button"
-                class="map-control outlined"
-                {...press(() => props.onReviewAnalytics?.())}
-              >
-                Analytics choice…
-              </button>
+              <fieldset class="max-w-xs">
+                <legend id="analytics-choice" class="mb-2 font-medium">
+                  Usage analytics
+                </legend>
+                <div class="style-segments">
+                  <button
+                    type="button"
+                    class="style-segment"
+                    aria-pressed={consent() === "granted"}
+                    {...press(() => setConsent("granted"))}
+                  >
+                    Accept
+                  </button>
+                  <button
+                    type="button"
+                    class="style-segment"
+                    aria-pressed={consent() === "denied"}
+                    {...press(() => setConsent("denied"))}
+                  >
+                    Decline
+                  </button>
+                </div>
+              </fieldset>
+              <p role="status" class="mt-3 text-sm text-stone-500">
+                {consent() === "granted"
+                  ? "You accepted analytics."
+                  : consent() === "denied"
+                    ? "You declined analytics."
+                    : "You have not chosen yet."}
+              </p>
             </Show>
           </div>
         </div>
