@@ -40,6 +40,8 @@ export const LIMITS = {
   text: 65_536,
   note: 65_536,
   nameBytes: 200,
+  // MAX_GAP in Rust: the most space one gap keeps.
+  gap: 1e9,
 } as const;
 export const ORIGIN = {
   create: Symbol("create"),
@@ -75,6 +77,10 @@ export interface NewNode {
   note?: string;
   color?: NodeColor;
   position?: NodePosition;
+  gap?: number;
+  endGap?: number;
+  // The space the idea takes, taken first from a gap where it goes.
+  fill?: number;
 }
 export interface ForestNode {
   id: string;
@@ -82,6 +88,8 @@ export interface ForestNode {
   note?: string;
   color: NodeColor;
   position?: NodePosition;
+  gap?: number;
+  endGap?: number;
   children: ForestNode[];
 }
 export type SnapshotListener = (snapshot: Uint8Array, origin: unknown) => void;
@@ -266,6 +274,8 @@ export function projectMindMap(view: DocumentView): MindMapNode[] {
       ...(node.note && { note: node.note }),
       color: node.color,
       ...(node.position && { position: node.position }),
+      ...(node.gap && { gap: node.gap }),
+      ...(node.endGap && { endGap: node.endGap }),
     });
   for (const node of view.nodes)
     if (node.children.length)
@@ -313,10 +323,18 @@ function create(
     index,
     text: init.text ?? "",
     color: init.color ?? DEFAULT_NODE_COLOR,
+    ...(init.fill && { fill: init.fill }),
   }).createdNode!;
   if (init.note) setNodeNote(doc, id, init.note);
   if (init.position)
     doc.dispatch({ type: "setPosition", id, position: init.position });
+  if (init.gap || init.endGap)
+    doc.dispatch({
+      type: "setGaps",
+      id,
+      gap: init.gap ?? null,
+      endGap: init.endGap ?? null,
+    });
   return id;
 }
 export const createNodeAt = (
@@ -342,6 +360,7 @@ export function createSibling(
     id,
     text: init.text ?? "",
     color: init.color ?? DEFAULT_NODE_COLOR,
+    ...(init.fill && { fill: init.fill }),
   }).createdNode!;
   if (init.note) setNodeNote(doc, sibling, init.note);
   return sibling;
@@ -369,8 +388,13 @@ export const editNodeNote = (
   deleteCount: number,
   insert: string,
 ) => doc.dispatch({ type: "editNote", id, index, deleteCount, insert }).changed;
-export const deleteSubtree = (doc: ProjectDocument, id: string) =>
-  doc.dispatch({ type: "deleteNode", id }).changed;
+// `gap` is the space the branch took, kept empty so no other idea moves.
+export const deleteSubtree = (doc: ProjectDocument, id: string, gap?: number) =>
+  doc.dispatch({
+    type: "deleteNode",
+    id,
+    ...(gap && { gap: Math.min(gap, LIMITS.gap) }),
+  }).changed;
 export const setNodeColor = (
   doc: ProjectDocument,
   id: string,
@@ -396,6 +420,15 @@ export function clearPositions(doc: ProjectDocument, ids: Iterable<string>) {
   for (const id of ids)
     changed =
       doc.dispatch({ type: "setPosition", id, position: null }).changed ||
+      changed;
+  return changed;
+}
+// Closes the space kept where ideas were deleted, above and inside these ideas.
+export function clearGaps(doc: ProjectDocument, ids: Iterable<string>) {
+  let changed = false;
+  for (const id of ids)
+    changed =
+      doc.dispatch({ type: "setGaps", id, gap: null, endGap: null }).changed ||
       changed;
   return changed;
 }

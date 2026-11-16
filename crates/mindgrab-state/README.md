@@ -15,6 +15,7 @@ let root = project.apply(Command::CreateNode {
     index: None,
     text: "An idea 🦀".into(),
     color: Color::shade("sky", 400).unwrap(),
+    fill: None,
 })?.created_node.unwrap();
 project.apply(Command::SetText { id: root, text: "A better idea 🦀".into() })?;
 let bytes = project.snapshot()?;
@@ -47,6 +48,19 @@ its style panel offers, in order, and the color new ideas start with. Both take
 white (`slate`) or shades, each once; maps without them use
 `ColorPreferences::default()` (`DEFAULT_QUICK_COLORS`, white for new ideas). Like
 saving preferences, they are excluded from undo.
+
+Deleting an idea never moves another one. `DeleteNode { id, gap }` takes the
+layout space the branch took (the client measures it) and keeps it empty with
+the idea's own gap: as `gap` (space above) on the next sibling, else as
+`endGap` (space after the last child) on the parent. A last top-level idea
+leaves nothing, since nothing is below it. `MoveNode` leaves the moved idea's
+own gap behind the same way. `CreateNode` and `CreateSibling` take an optional
+`fill`: the space the new idea needs, taken first from the gap where it goes,
+so adding where an idea was deleted fills its place. `SetGaps` sets or clears
+both on one idea, for import and for returning a branch to automatic layout.
+Gaps are non-negative layout units of at most `MAX_GAP`; gaps that add up past
+it are capped, so a sum can never overflow. Clients older than gaps reject
+documents that have them.
 
 The flat Rust view contains ordered nodes, parents, children, depth, colors and
 positions. JSON projections serve rendering and inspection. Sync and browser

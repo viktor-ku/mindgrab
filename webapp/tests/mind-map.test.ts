@@ -6,6 +6,7 @@ import {
   dropTargetAt,
   findNode,
   layoutMindMap,
+  NODE_MIN_HEIGHT,
   translateSubtree,
 } from "../src/mind-map";
 
@@ -106,7 +107,12 @@ describe("layout stability", () => {
     );
     expect(
       layoutMindMap([], new Map(), { id: "missing", centerY: 100 }),
-    ).toEqual({ nodes: [], connections: [] });
+    ).toEqual({
+      nodes: [],
+      connections: [],
+      anchors: new Map(),
+      heights: new Map(),
+    });
     expect(
       layoutMindMap(original, new Map(), { id: "missing", centerY: 100 }),
     ).toEqual(before);
@@ -159,6 +165,86 @@ describe("layout stability", () => {
     }
     expect(nodeAt(after, "new").x).toBe(parent.x + parent.width + 64);
     expect(nodeAt(after, "new").y).toBeGreaterThan(parent.y);
+  });
+
+  const wide = (): MindMapNode[] => [
+    {
+      id: "r",
+      text: "R",
+      next: [
+        {
+          id: "p",
+          text: "P",
+          next: ["a", "b", "c"].map((id) => ({ id, text: id })),
+        },
+        {
+          id: "q",
+          text: "Q",
+          next: ["d", "e"].map((id) => ({ id, text: id })),
+        },
+      ],
+    },
+    { id: "s", text: "S", next: [{ id: "f", text: "F" }] },
+  ];
+  const remove = (nodes: MindMapNode[], id: string): MindMapNode[] =>
+    nodes
+      .filter((node) => node.id !== id)
+      .map((node) => ({ ...node, next: remove(node.next ?? [], id) }));
+
+  test("deleting an idea leaves its parent and ancestors in place", () => {
+    const before = layoutMindMap(wide());
+    const anchor = before.anchors.get("p")!;
+    const after = layoutMindMap(remove(wide(), "a"), new Map(), anchor);
+    for (const id of ["r", "p"])
+      expect(nodeAt(after, id)).toEqual(nodeAt(before, id));
+    // The remaining children close the gap around their parent.
+    expect(centerY(nodeAt(after, "b")) + centerY(nodeAt(after, "c"))).toBe(
+      2 * centerY(nodeAt(after, "p")),
+    );
+  });
+
+  test("deleting a top-level idea leaves the ones above it in place", () => {
+    const roots = [...wide(), { id: "t", text: "T" }];
+    const before = layoutMindMap(roots);
+    const anchor = before.anchors.get("r")!;
+    const after = layoutMindMap(remove(roots, "s"), new Map(), anchor);
+    for (const id of ["r", "p", "a", "q", "e"])
+      expect(nodeAt(after, id)).toEqual(nodeAt(before, id));
+    // S had one child; T moves up into its slot.
+    expect(nodeAt(after, "t").y).toBe(
+      nodeAt(before, "t").y - (NODE_MIN_HEIGHT + 24),
+    );
+  });
+
+  test("a stale anchor shifts the whole layout together instead of pulling one node out of line", () => {
+    const before = layoutMindMap(wide());
+    // Anchored on Q, then a branch above Q is deleted without re-anchoring.
+    const anchor = before.anchors.get("q")!;
+    const current = remove(wide(), "a");
+    const after = layoutMindMap(current, new Map(), anchor);
+    const flow = layoutMindMap(current);
+    expect(centerY(nodeAt(after, "q"))).toBe(anchor.centerY);
+    const shift = nodeAt(after, "q").y - nodeAt(flow, "q").y;
+    expect(shift).not.toBe(0);
+    for (const node of flow.nodes)
+      expect(nodeAt(after, node.id)).toEqual({ ...node, y: node.y + shift });
+  });
+
+  test("dragged branches cannot anchor and resolve to their nearest automatic ancestor", () => {
+    const before = layoutMindMap(wide());
+    const moved = translateSubtree(
+      wide(),
+      "q",
+      new Map(before.nodes.map((node) => [node.id, node])),
+      { x: 40, y: 300 },
+    );
+    const layout = layoutMindMap(moved);
+    expect(layout.anchors.get("q")).toEqual(before.anchors.get("r"));
+    expect(layout.anchors.get("e")).toEqual(before.anchors.get("r"));
+    // An anchor on a dragged node is ignored rather than shifting the map.
+    expect(layoutMindMap(moved, new Map(), { id: "q", centerY: 999 })).toEqual(
+      layout,
+    );
   });
 });
 

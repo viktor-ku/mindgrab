@@ -602,6 +602,48 @@ describe("existing interactions", () => {
       await page.getByRole("button", { name: "Zoom to 100%" }).textContent(),
     ).toBe("120%");
   });
+
+  test("deleting an idea moves no other idea, and a new one fills its place", async () => {
+    const root = await rootId();
+    await node(root).click();
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("First");
+    await page.keyboard.press("Enter");
+    for (const text of ["Second", "Third"]) {
+      await page.keyboard.press("Enter");
+      await page.keyboard.type(text);
+      await page.keyboard.press("Enter");
+    }
+    const [, first, second, third] = await call("ids");
+    const places = async (ids: string[]) => {
+      await frame();
+      await frame();
+      return Promise.all(ids.map(translation));
+    };
+    const before = await places([root, first, second, third]);
+
+    await node(second).click();
+    await page.keyboard.press("Delete");
+    expect(await call("ids")).toEqual([root, first, third]);
+    expect(await places([root, first, third])).toEqual([
+      before[0],
+      before[1],
+      before[3],
+    ]);
+
+    await node(first).click();
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Again");
+    await page.keyboard.press("Enter");
+    const [, , added] = await call("ids");
+    expect(await places([root, first, added, third])).toEqual(before);
+
+    await page.keyboard.press("Control+z");
+    await page.keyboard.press("Control+z");
+    await page.keyboard.press("Control+z");
+    expect(await call("ids")).toEqual([root, first, second, third]);
+    expect(await places([root, first, second, third])).toEqual(before);
+  });
 });
 
 async function uploadProject(json: string) {

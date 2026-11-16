@@ -1265,7 +1265,7 @@ test("backups with other versions, headers and top-level shapes", () => {
       "{}",
       '{"format":"mindgrab-project"}',
       JSON.stringify({ ...valid, version: 2 }),
-      JSON.stringify({ ...valid, version: 6 }),
+      JSON.stringify({ ...valid, version: 7 }),
       JSON.stringify({ ...valid, format: "x" }),
       "# Title\n- a\n",
       "- a",
