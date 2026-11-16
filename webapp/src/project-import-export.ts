@@ -13,9 +13,10 @@ import { isNodeColor, isPickable } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
-// 5 added Tailwind shade colors and the map's color choices; earlier apps
-// cannot read them, so they report the version instead of damage.
-export const PROJECT_FILE_VERSION = 5;
+// 5 added Tailwind shade colors and the map's color choices, 6 the space kept
+// where ideas were deleted; earlier apps cannot read them, so they report the
+// version instead of damage.
+export const PROJECT_FILE_VERSION = 6;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
@@ -25,6 +26,8 @@ export interface ProjectFileNode {
   note?: string;
   color: NodeColor;
   position?: { x: number; y: number };
+  gap?: number;
+  endGap?: number;
   children: ProjectFileNode[];
 }
 
@@ -61,6 +64,7 @@ const PositionSchema = z.strictObject({
   x: z.number().finite(),
   y: z.number().finite(),
 });
+const GapSchema = z.number().finite().nonnegative();
 const ViewportSchema = z.strictObject({
   left: z.number().finite(),
   top: z.number().finite(),
@@ -108,6 +112,8 @@ function nodeSchema(depth: number): z.ZodType<ProjectFileNode> {
         .optional(),
       color: z.custom<NodeColor>(isNodeColor, "Invalid node color."),
       position: PositionSchema.optional(),
+      gap: GapSchema.optional(),
+      endGap: GapSchema.optional(),
       children:
         depth < PROJECT_FILE_MAX_DEPTH
           ? z.array(nodeSchema(depth + 1))
@@ -249,7 +255,7 @@ export function parseProjectFile(json: string): ProjectFile {
   const header = value as { format?: unknown; version?: unknown };
   if (header.format !== PROJECT_FILE_FORMAT)
     throw new ProjectFileError("File is not a Mindgrab project.");
-  if (![3, 4, PROJECT_FILE_VERSION].includes(header.version as number))
+  if (![3, 4, 5, PROJECT_FILE_VERSION].includes(header.version as number))
     throw new ProjectFileError(
       `Unsupported Mindgrab project version: ${String(header.version)}.`,
     );
@@ -283,6 +289,8 @@ export function prepareProjectImport(input: ProjectFile) {
         text: node.text,
         note: node.note ?? "",
         position: node.position ? { ...node.position } : null,
+        ...(node.gap && { gap: node.gap }),
+        ...(node.endGap && { endGap: node.endGap }),
         color: node.color,
       });
       add(node.children, id, depth + 1);

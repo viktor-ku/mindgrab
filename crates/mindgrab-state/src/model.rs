@@ -174,6 +174,16 @@ pub struct Node {
     #[cfg_attr(feature = "bindings", ts(type = "Color"))]
     pub color: Color,
     pub position: Option<Position>,
+    /// Empty space above this idea among its siblings, kept where an idea
+    /// was deleted so the others stay where they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub gap: Option<f64>,
+    /// Empty space after this idea's last child, or in place of its children
+    /// when it has none left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub end_gap: Option<f64>,
     pub depth: usize,
 }
 
@@ -212,12 +222,19 @@ pub enum Command {
         #[serde(default)]
         #[cfg_attr(feature = "bindings", ts(type = "Color"))]
         color: Color,
+        /// Space the new idea takes, filled first from the gap where it goes.
+        #[serde(default)]
+        #[cfg_attr(feature = "bindings", ts(optional))]
+        fill: Option<f64>,
     },
     CreateSibling {
         id: String,
         text: String,
         #[cfg_attr(feature = "bindings", ts(type = "Color"))]
         color: Color,
+        #[serde(default)]
+        #[cfg_attr(feature = "bindings", ts(optional))]
+        fill: Option<f64>,
     },
     ReorderNode {
         id: String,
@@ -240,6 +257,10 @@ pub enum Command {
     },
     DeleteNode {
         id: String,
+        /// Space the branch took besides its own gap, left empty in its place.
+        #[serde(default)]
+        #[cfg_attr(feature = "bindings", ts(optional))]
+        gap: Option<f64>,
     },
     SetText {
         id: String,
@@ -269,6 +290,11 @@ pub enum Command {
     SetPosition {
         id: String,
         position: Option<Position>,
+    },
+    SetGaps {
+        id: String,
+        gap: Option<f64>,
+        end_gap: Option<f64>,
     },
     /// Not an edit: excluded from undo, like saving preferences.
     SetColors {

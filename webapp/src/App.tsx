@@ -34,11 +34,14 @@ import {
   layoutMindMap,
   navigationTarget,
   NODE_MIN_HEIGHT,
+  newIdeaSpace,
   nodeDetails,
+  slotSpace,
   translateSubtree as translatePreview,
   visibleMindMap,
 } from "./mind-map";
 import {
+  clearGaps,
   clearPositions,
   createChild,
   createNodeAt,
@@ -1993,6 +1996,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const positionedNodes = createMemo(
     () => new Map(layout().nodes.map((node) => [node.id, node])),
   );
+  // Before an edit, anchors the layout on the first of `ids` that can hold
+  // still, so the edit closes or opens space around it and nothing else on
+  // the map drifts. Anchoring where a node already is never moves anything.
+  function holdStill(...ids: (string | undefined)[]) {
+    for (const id of ids) {
+      const anchor = id && baseLayout().anchors.get(id);
+      if (anchor) return setLayoutAnchor(anchor);
+    }
+  }
+  // Top-level ideas that an edit to `ids` leaves where they are in the list.
+  const otherRoots = (...ids: string[]) =>
+    forest()
+      .map((root) => root.id)
+      .filter((id) => !ids.includes(id));
   const visibleIds = createMemo(() => {
     const ids = new Set<string>();
     const visit = (nodes: MindMapNode[]) => {
@@ -2268,11 +2285,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
 
   let focusReturn: ViewSnapshot | undefined;
+  // Anchors set inside focus hold the branch in the focus view's coordinates;
+  // the whole map gets its own anchor back when focus ends.
+  let focusReturnAnchor: LayoutAnchor | undefined;
+  const mapAnchor = () => (focusId() ? focusReturnAnchor : layoutAnchor());
   function focusBranch(id = selectedId()) {
     if (!id || !details().has(id)) return;
     finishWriting();
     setContextMenu(undefined);
-    if (!focusId()) focusReturn = snapshotView();
+    if (!focusId()) {
+      focusReturn = snapshotView();
+      focusReturnAnchor = layoutAnchor();
+    }
     batch(() => {
       setFocusId(id);
       setSelectedId(id);
@@ -2290,7 +2314,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const back = focusReturn;
     focusReturn = undefined;
     const selected = selectedId();
-    setFocusId(undefined);
+    batch(() => {
+      if (focusId()) setLayoutAnchor(focusReturnAnchor);
+      setFocusId(undefined);
+    });
     if (back) restoreView(back, false);
     if (selected) keepInView(selected);
     canvas.focus({ preventScroll: true });
@@ -2495,9 +2522,19 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     />
   );
 
+  // Also closes the space kept where ideas in the branch were deleted.
   function resetPlacement(id: string) {
     const placed = placedIds(id);
-    if (command((doc) => clearPositions(doc, placed)))
+    const spaced = spacedIds(id);
+    holdStill(id);
+    if (
+      command((doc) =>
+        doc.batch(() => {
+          const moved = clearPositions(doc, placed);
+          return clearGaps(doc, spaced) || moved;
+        }),
+      )
+    )
       showNotice({
         message: `Returned “${nodeLabel(id)}” to automatic placement`,
         action: { label: "Undo", run: undo },
@@ -2761,6 +2798,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     // allowed level instead of making the map impossible to back up.
     let flattened = false;
     let shortened = false;
+    holdStill(parent, forest()[0]?.id);
     try {
       command((doc) =>
         doc.batch(() => {
@@ -2910,7 +2948,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       left: left(),
       top: top(),
       zoom: zoom(),
-      anchor: layoutAnchor(),
+      anchor: mapAnchor(),
       collapsed: [...collapsedIds()],
     };
     if (!handle || handle.doc !== currentDoc) return;
@@ -3163,7 +3201,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         left: left(),
         top: top(),
         zoom: zoom(),
-        anchor: layoutAnchor(),
+        anchor: mapAnchor(),
         collapsed: [...collapsedIds()],
       });
       await handle.flush();
@@ -3223,7 +3261,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const name = view().name();
       const json = exportProjectDocument(session().doc, {
         viewport: { left: left(), top: top(), zoom: zoom() },
-        ...(layoutAnchor() && { anchor: layoutAnchor() }),
+        ...(mapAnchor() && { anchor: mapAnchor() }),
       });
       await writeProjectFile(name, json);
       showNotice({ message: `Exported “${truncate(name, 40)}”` });
@@ -3383,9 +3421,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   function toggleCollapse(id: string, focusCanvas = true) {
     if (!details().get(id)?.descendants) return;
     cancelPointer();
-    const node = positionedNodes().get(id);
     batch(() => {
-      if (node) setLayoutAnchor({ id, centerY: node.y + node.height / 2 });
+      holdStill(id);
       setCollapsedIds((current) => {
         const next = new Set(current);
         if (!next.delete(id)) next.add(id);
@@ -3486,12 +3523,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       });
       return;
     }
+    const id = selectedId();
+    // A new idea fills space a deleted one left where it goes.
+    const siblings =
+      kind === "child"
+        ? childrenOf(id)
+        : kind === "sibling" && id
+          ? childrenOf(details().get(id)?.parent)
+          : undefined;
     const init = {
       text: "New idea",
       color: view().colors().newIdeas,
       ...(position && { position }),
+      ...(siblings && { fill: newIdeaSpace(siblings.length + 1) }),
     };
-    const id = selectedId();
     const anchorId =
       kind === "sibling"
         ? (layout().connections.find(({ to }) => to.id === id)?.from.id ?? id)
@@ -3499,10 +3544,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           ? id
           : undefined;
     batch(() => {
-      const anchor = positionedNodes().get(anchorId ?? forest()[0]?.id);
-      setLayoutAnchor(
-        anchor && { id: anchor.id, centerY: anchor.y + anchor.height / 2 },
-      );
+      holdStill(anchorId ?? forest()[0]?.id);
       const created = command((doc) =>
         kind === "root" || !id
           ? createRoot(doc, init)
@@ -3530,6 +3572,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     [...branchIds(forest(), id)].filter(
       (key) => findNode(forest(), key)?.position,
     );
+  // Ideas in the branch keeping space where ideas were deleted.
+  const spacedIds = (id: string) =>
+    [...branchIds(forest(), id)].filter((key) => {
+      const node = findNode(forest(), key);
+      return node?.gap || node?.endGap;
+    });
 
   function moveBranch(id: string, target: DropTarget) {
     if (blockedByFocus(id, "move")) return;
@@ -3552,6 +3600,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         : siblings.findIndex((node) => node.id === target.id) +
           (target.kind === "after" ? 1 : 0);
     const placed = placedIds(id);
+    holdStill(parent, details().get(id)?.parent, ...otherRoots(id));
     const moved = command((doc) => {
       const changed = moveNode(doc, id, parent ?? null, index);
       return clearPositions(doc, placed) || changed;
@@ -3620,6 +3669,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const index = childrenOf(parent).findIndex((node) => node.id === id);
     const color = findNode(forest(), id)?.color;
     const placed = placedIds(id);
+    holdStill(parent, ...otherRoots(id));
     const created = command((doc) => {
       const wrapper = createNodeAt(doc, parent ?? null, index, {
         text: "New idea",
@@ -3652,7 +3702,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const nextId = siblings[index + 1]?.id ?? siblings[index - 1]?.id ?? parent;
     const text = view().text(id).trim() || "New idea";
     const removed = 1 + (details().get(id)?.descendants ?? 0);
-    if (!command((doc) => deleteSubtree(doc, id))) return;
+    // The deleted space is kept, so the layout only shifts as a whole when
+    // the first top-level idea goes; any idea that stays holds it still.
+    holdStill(
+      parent,
+      siblings[index - 1]?.id,
+      siblings[index + 1]?.id,
+      ...otherRoots(id),
+    );
+    // Its space stays empty, so no other idea moves.
+    const height = baseLayout().heights.get(id);
+    const gap =
+      height === undefined
+        ? undefined
+        : slotSpace(height, childrenOf(parent).length);
+    if (!command((doc) => deleteSubtree(doc, id, gap))) return;
     track("idea_deleted", { removed });
     setSelectedId(nextId);
     setColorScope("node");
@@ -3772,6 +3836,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       const bounds = canvas.getBoundingClientRect();
       const origin = viewOrigin();
       batch(() => {
+        // A dragged branch no longer places itself automatically, so it
+        // cannot anchor the rest of the map.
+        if (!drag()) holdStill(details().get(id)?.parent, ...otherRoots(id));
         setDrag({
           id,
           delta: { x: dx / pointer!.zoom, y: dy / pointer!.zoom },
@@ -4016,8 +4083,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         e.preventDefault();
         if (arrow === "right") indentSelected();
         else if (arrow === "left") outdentSelected();
-        else if (!blockedByFocus(id, "move"))
+        else if (!blockedByFocus(id, "move")) {
+          const parent = details().get(id)?.parent;
+          const siblings = childrenOf(parent);
+          const index = siblings.findIndex((node) => node.id === id);
+          const swapped = siblings[index + (arrow === "up" ? -1 : 1)]?.id;
+          holdStill(parent, ...otherRoots(id, swapped ?? id));
           command((doc) => reorderNode(doc, id, arrow === "up" ? -1 : 1));
+        }
       } else if (
         (plain && (e.key === "Delete" || e.key === "Backspace")) ||
         (e.metaKey &&
@@ -5588,7 +5661,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                         : "Add notes"}
                       <kbd class="ml-auto">{ALT_LABEL}N</kbd>
                     </button>
-                    <Show when={placedIds(nodeId()).length}>
+                    <Show
+                      when={
+                        placedIds(nodeId()).length || spacedIds(nodeId()).length
+                      }
+                    >
                       <button
                         type="button"
                         role="menuitem"

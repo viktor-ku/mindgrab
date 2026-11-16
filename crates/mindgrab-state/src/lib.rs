@@ -268,6 +268,7 @@ impl Project {
                 index,
                 text,
                 color,
+                fill,
             } => {
                 validate_text(&text)?;
                 // Counting live nodes walks every tombstone, so only do it once the
@@ -281,6 +282,10 @@ impl Project {
                 if index > count {
                     return invalid("The insertion index is outside the siblings");
                 }
+                if let Some(space) = fill {
+                    validate_gap(space)?;
+                    self.fill_gap(parent, index, space)?;
+                }
                 let id = tree.create_at(parent, index)?;
                 let meta = tree.get_meta(id)?;
                 meta.insert("id", id.to_string())?;
@@ -293,7 +298,12 @@ impl Project {
                 meta.ensure_mergeable_text("note")?;
                 created_node = Some(id.to_string());
             }
-            Command::CreateSibling { id, text, color } => {
+            Command::CreateSibling {
+                id,
+                text,
+                color,
+                fill,
+            } => {
                 let id = self.node(&id)?;
                 let parent = tree.parent(id).and_then(|p| p.tree_id());
                 let siblings = tree.children(parent).unwrap_or_default();
@@ -303,6 +313,7 @@ impl Project {
                     index: Some(index),
                     text,
                     color,
+                    fill,
                 });
             }
             Command::ReorderNode { id, direction } => {
@@ -382,11 +393,18 @@ impl Project {
                 if tree.parent(id).and_then(|p| p.tree_id()) != parent
                     || siblings.iter().position(|n| *n == id) != Some(index)
                 {
+                    // The space above it stays where it was.
+                    self.leave_gap(id, 0.0)?;
                     tree.mov_to(id, parent, index)?;
                 }
             }
-            Command::DeleteNode { id } => {
-                tree.delete(self.node(&id)?)?;
+            Command::DeleteNode { id, gap } => {
+                let id = self.node(&id)?;
+                if let Some(space) = gap {
+                    validate_gap(space)?;
+                    self.leave_gap(id, space)?;
+                }
+                tree.delete(id)?;
             }
             Command::SetText { id, text } => {
                 validate_text(&text)?;
@@ -436,6 +454,14 @@ impl Project {
                 } else {
                     meta.delete("position")?;
                 }
+            }
+            Command::SetGaps { id, gap, end_gap } => {
+                let node = self.node(&id)?;
+                for space in [gap, end_gap].into_iter().flatten() {
+                    validate_gap(space)?;
+                }
+                self.set_gap(node, GAP, gap.unwrap_or(0.0))?;
+                self.set_gap(node, END_GAP, end_gap.unwrap_or(0.0))?;
             }
             Command::SetColors { quick, new_ideas } => {
                 origin = "preferences";
@@ -554,6 +580,7 @@ impl Project {
             let children = tree.children(id).unwrap_or_default();
             pending.extend(children.iter().rev().map(|child| (*child, depth + 1)));
             let note = self.note_data(id)?;
+            let (gap, end_gap) = self.gaps(id)?;
             nodes.push(Node {
                 id: stable,
                 parent: tree
@@ -566,6 +593,8 @@ impl Project {
                 note,
                 color,
                 position,
+                gap,
+                end_gap,
                 depth,
             });
         }
@@ -638,10 +667,9 @@ impl Project {
         let fields = value
             .as_object()
             .ok_or_else(|| StateError::Invalid("Expected node metadata".into()))?;
-        if fields
-            .keys()
-            .any(|key| !["id", "text", "note", "color", "position"].contains(&key.as_str()))
-        {
+        if fields.keys().any(|key| {
+            !["id", "text", "note", "color", "position", GAP, END_GAP].contains(&key.as_str())
+        }) {
             return invalid("Unexpected node metadata");
         }
         self.stable_id(id)?;
@@ -657,7 +685,71 @@ impl Project {
         if let Some(position) = position {
             validate_position(position)?;
         }
+        self.gaps(id)?;
         Ok((text, color, position))
+    }
+
+    /// A node's gap above it and its end gap, each absent when there is none.
+    fn gaps(&self, id: TreeID) -> Result<(Option<f64>, Option<f64>)> {
+        let meta = self.tree().get_meta(id)?;
+        let read = |key| -> Result<Option<f64>> {
+            let Some(value) = meta.get(key) else {
+                return Ok(None);
+            };
+            let space = match value {
+                ValueOrContainer::Value(loro::LoroValue::Double(space)) => space,
+                ValueOrContainer::Value(loro::LoroValue::I64(space)) => space as f64,
+                _ => return invalid("Expected a numeric gap"),
+            };
+            validate_gap(space)?;
+            Ok(Some(space))
+        };
+        Ok((read(GAP)?, read(END_GAP)?))
+    }
+    fn set_gap(&self, id: TreeID, key: &str, space: f64) -> Result<()> {
+        let meta = self.tree().get_meta(id)?;
+        let current = meta.get(key).is_some();
+        if space > MIN_GAP {
+            meta.insert(key, space)?;
+        } else if current {
+            meta.delete(key)?;
+        }
+        Ok(())
+    }
+    /// Keeps the space a node holds among its siblings, `space` plus its own
+    /// gap, empty when it leaves: above its next sibling, else after its
+    /// parent's last child. A last top-level idea has nothing below to keep.
+    fn leave_gap(&self, id: TreeID, space: f64) -> Result<()> {
+        let tree = self.tree();
+        let space = space + self.gaps(id)?.0.unwrap_or(0.0);
+        self.set_gap(id, GAP, 0.0)?;
+        let parent = tree.parent(id).and_then(|p| p.tree_id());
+        let siblings = tree.children(parent).unwrap_or_default();
+        let index = siblings.iter().position(|n| *n == id).unwrap_or(0);
+        let (holder, key) = match (siblings.get(index + 1), parent) {
+            (Some(next), _) => (*next, GAP),
+            (None, Some(parent)) => (parent, END_GAP),
+            (None, None) => return Ok(()),
+        };
+        let gaps = self.gaps(holder)?;
+        let current = if key == GAP { gaps.0 } else { gaps.1 };
+        self.set_gap(holder, key, current.unwrap_or(0.0) + space)
+    }
+    /// A new idea at `index` takes up to `space` from the gap at that place,
+    /// so adding where an idea was deleted fills its space instead of moving
+    /// the ideas around it.
+    fn fill_gap(&self, parent: Option<TreeID>, index: usize, space: f64) -> Result<()> {
+        let siblings = self.tree().children(parent).unwrap_or_default();
+        let (holder, key) = match (siblings.get(index), parent) {
+            (Some(next), _) => (*next, GAP),
+            (None, Some(parent)) => (parent, END_GAP),
+            (None, None) => return Ok(()),
+        };
+        let gaps = self.gaps(holder)?;
+        match if key == GAP { gaps.0 } else { gaps.1 } {
+            Some(current) => self.set_gap(holder, key, (current - space).max(0.0)),
+            None => Ok(()),
+        }
     }
 
     fn subtree(&self, id: &str) -> Result<Vec<TreeID>> {
@@ -798,6 +890,17 @@ fn validate_text(text: &str) -> Result<()> {
         Err(StateError::ResourceLimit)
     } else {
         Ok(())
+    }
+}
+const GAP: &str = "gap";
+const END_GAP: &str = "endGap";
+/// Gaps this small are rounding left over from filling one, not space.
+const MIN_GAP: f64 = 1e-6;
+fn validate_gap(space: f64) -> Result<()> {
+    if space.is_finite() && space >= 0.0 {
+        Ok(())
+    } else {
+        invalid("A gap must be a finite, non-negative size")
     }
 }
 fn validate_position(position: Position) -> Result<()> {

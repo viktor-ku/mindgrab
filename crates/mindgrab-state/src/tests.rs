@@ -7,6 +7,7 @@ fn create(project: &mut Project, parent: Option<&str>, text: &str) -> String {
             index: None,
             text: text.into(),
             color: Color::BLUE,
+            fill: None,
         })
         .unwrap()
         .created_node
@@ -198,7 +199,12 @@ fn delete_hides_subtree_and_undo_restores_it() {
     let mut project = Project::new("Delete").unwrap();
     let root = create(&mut project, None, "root");
     create(&mut project, Some(&root), "child");
-    project.apply(Command::DeleteNode { id: root }).unwrap();
+    project
+        .apply(Command::DeleteNode {
+            id: root,
+            gap: None,
+        })
+        .unwrap();
     assert!(project.view().unwrap().nodes.is_empty());
     project.apply(Command::Undo).unwrap();
     assert_eq!(project.view().unwrap().nodes.len(), 2);
@@ -263,6 +269,7 @@ fn invalid_commands_do_not_change_state() {
             index: Some(10),
             text: "invalid".into(),
             color: Color::BLUE,
+            fill: None,
         },
         Command::SetPosition {
             id: root.clone(),
@@ -538,7 +545,10 @@ fn grouped_delete_undo_preserves_application_identity_after_replication() {
     let mut remote = Project::from_snapshot(&local.snapshot().unwrap()).unwrap();
     local.start_group().unwrap();
     local
-        .apply(Command::DeleteNode { id: child.clone() })
+        .apply(Command::DeleteNode {
+            id: child.clone(),
+            gap: None,
+        })
         .unwrap();
     local.stop_group();
     remote.merge(&local.snapshot().unwrap()).unwrap();
@@ -562,8 +572,16 @@ fn concurrent_delete_undo_projects_one_stable_application_node() {
     let bytes = seed.snapshot().unwrap();
     let mut a = Project::from_snapshot(&bytes).unwrap();
     let mut b = Project::from_snapshot(&bytes).unwrap();
-    a.apply(Command::DeleteNode { id: root.clone() }).unwrap();
-    b.apply(Command::DeleteNode { id: root.clone() }).unwrap();
+    a.apply(Command::DeleteNode {
+        id: root.clone(),
+        gap: None,
+    })
+    .unwrap();
+    b.apply(Command::DeleteNode {
+        id: root.clone(),
+        gap: None,
+    })
+    .unwrap();
     a.apply(Command::Undo).unwrap();
     b.apply(Command::Undo).unwrap();
     let a_bytes = a.snapshot().unwrap();
@@ -856,7 +874,10 @@ fn note_edits_undo_redo_and_delete_restore_content() {
         .unwrap();
     project.clear_history();
     project
-        .apply(Command::DeleteNode { id: id.clone() })
+        .apply(Command::DeleteNode {
+            id: id.clone(),
+            gap: None,
+        })
         .unwrap();
     project.apply(Command::Undo).unwrap();
     assert_eq!(note(&project, &id), "restored");
@@ -1025,7 +1046,12 @@ fn undoing_a_step_that_created_and_deleted_a_node_keeps_the_view_valid() {
     project.start_group().unwrap();
     let parent = create(&mut project, Some(&root), "temporary");
     create(&mut project, Some(&parent), "child");
-    project.apply(Command::DeleteNode { id: parent }).unwrap();
+    project
+        .apply(Command::DeleteNode {
+            id: parent,
+            gap: None,
+        })
+        .unwrap();
     project.stop_group();
     project.apply(Command::Undo).unwrap();
     assert_eq!(
@@ -1055,7 +1081,9 @@ fn deleted_nodes_do_not_count_toward_the_node_limit() {
             .map(|_| create(&mut project, Some(&root), "x"))
             .collect();
         for id in ids {
-            project.apply(Command::DeleteNode { id }).unwrap();
+            project
+                .apply(Command::DeleteNode { id, gap: None })
+                .unwrap();
         }
     }
     assert_eq!(project.view().unwrap().nodes.len(), 1);
@@ -1083,7 +1111,11 @@ fn undoing_a_move_of_a_remotely_deleted_node_leaves_no_blank_idea() {
         r0.start_group().unwrap();
         r1.merge(&r0.snapshot().unwrap()).unwrap();
         let deleted = if delete_moved { a.clone() } else { b.clone() };
-        r1.apply(Command::DeleteNode { id: deleted }).unwrap();
+        r1.apply(Command::DeleteNode {
+            id: deleted,
+            gap: None,
+        })
+        .unwrap();
         r0.merge(&r1.snapshot().unwrap()).unwrap();
         r0.apply(Command::Undo).unwrap();
         let view = r0.view().unwrap();
@@ -1111,6 +1143,7 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
                     id: n0.clone(),
                     text: "n1".into(),
                     color: Color::BLUE,
+                    fill: None,
                 })
                 .unwrap()
                 .created_node
@@ -1139,7 +1172,11 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
                 color: Color::GREEN,
             })
             .unwrap();
-            r0.apply(Command::DeleteNode { id: n0.clone() }).unwrap();
+            r0.apply(Command::DeleteNode {
+                id: n0.clone(),
+                gap: None,
+            })
+            .unwrap();
             r2.merge(&r0.snapshot().unwrap()).unwrap();
             r2.apply(Command::Undo).unwrap();
             let view = r2.view().unwrap();
@@ -1151,4 +1188,157 @@ fn undoing_edits_to_a_remotely_deleted_node_never_leaves_a_partial_idea() {
             );
         }
     }
+}
+
+fn gaps(project: &Project, id: &str) -> (Option<f64>, Option<f64>) {
+    let node = project
+        .view()
+        .unwrap()
+        .nodes
+        .into_iter()
+        .find(|node| node.id == id)
+        .unwrap();
+    (node.gap, node.end_gap)
+}
+
+fn delete(project: &mut Project, id: &str, gap: f64) {
+    project
+        .apply(Command::DeleteNode {
+            id: id.into(),
+            gap: Some(gap),
+        })
+        .unwrap();
+}
+
+#[test]
+fn deleting_leaves_its_space_to_the_next_sibling_or_the_parent_end() {
+    let mut project = Project::new("Gaps").unwrap();
+    let root = create(&mut project, None, "root");
+    let [a, b, c, d] = ["a", "b", "c", "d"].map(|t| create(&mut project, Some(&root), t));
+    delete(&mut project, &b, 64.0);
+    assert_eq!(gaps(&project, &c), (Some(64.0), None));
+    // A deleted idea's own gap stays too.
+    delete(&mut project, &c, 64.0);
+    assert_eq!(gaps(&project, &d), (Some(128.0), None));
+    delete(&mut project, &d, 64.0);
+    assert_eq!(gaps(&project, &root), (None, Some(192.0)));
+    // An only child leaves its space, with no separator, in place of children.
+    delete(&mut project, &a, 40.0);
+    assert_eq!(gaps(&project, &root), (None, Some(232.0)));
+    for _ in 0..4 {
+        project.apply(Command::Undo).unwrap();
+    }
+    for id in [&root, &a, &b, &c, &d] {
+        assert_eq!(gaps(&project, id), (None, None));
+    }
+    project.apply(Command::Redo).unwrap();
+    assert_eq!(gaps(&project, &c), (Some(64.0), None));
+
+    // Nothing is below the last top-level idea, so it keeps no space.
+    let other = create(&mut project, None, "other");
+    delete(&mut project, &other, 64.0);
+    assert_eq!(gaps(&project, &root), (None, None));
+    let restored = Project::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    assert_eq!(restored.view().unwrap(), project.view().unwrap());
+}
+
+#[test]
+fn moving_leaves_its_own_gap_and_new_ideas_fill_gaps_where_they_go() {
+    let mut project = Project::new("Gaps").unwrap();
+    let root = create(&mut project, None, "root");
+    let [a, b, c] = ["a", "b", "c"].map(|t| create(&mut project, Some(&root), t));
+    delete(&mut project, &a, 64.0);
+    assert_eq!(gaps(&project, &b), (Some(64.0), None));
+    project
+        .apply(Command::ReorderNode {
+            id: b.clone(),
+            direction: 1,
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &b), (None, None));
+    assert_eq!(gaps(&project, &c), (Some(64.0), None));
+
+    // A sibling inserted before C takes what it needs from C's gap.
+    let filled = project
+        .apply(Command::CreateNode {
+            parent: Some(root.clone()),
+            index: Some(0),
+            text: "new".into(),
+            color: Color::BLUE,
+            fill: Some(40.0),
+        })
+        .unwrap()
+        .created_node
+        .unwrap();
+    assert_eq!(gaps(&project, &filled), (None, None));
+    assert_eq!(gaps(&project, &c), (Some(24.0), None));
+    project
+        .apply(Command::CreateSibling {
+            id: filled.clone(),
+            text: "more".into(),
+            color: Color::BLUE,
+            fill: Some(64.0),
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &c), (None, None));
+    project.apply(Command::Undo).unwrap();
+    assert_eq!(gaps(&project, &c), (Some(24.0), None));
+
+    // A new last child fills the end gap; elsewhere a fill changes nothing.
+    delete(&mut project, &b, 64.0);
+    assert_eq!(gaps(&project, &root), (None, Some(64.0)));
+    create(&mut project, None, "other");
+    project
+        .apply(Command::CreateNode {
+            parent: Some(root.clone()),
+            index: None,
+            text: "last".into(),
+            color: Color::BLUE,
+            fill: Some(64.0),
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &root), (None, None));
+}
+
+#[test]
+fn gaps_are_set_cleared_and_validated() {
+    let mut project = Project::new("Gaps").unwrap();
+    let root = create(&mut project, None, "root");
+    project
+        .apply(Command::SetGaps {
+            id: root.clone(),
+            gap: Some(10.0),
+            end_gap: Some(20.0),
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &root), (Some(10.0), Some(20.0)));
+    let before = project.snapshot().unwrap();
+    for gap in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            project
+                .apply(Command::SetGaps {
+                    id: root.clone(),
+                    gap: Some(gap),
+                    end_gap: None,
+                })
+                .is_err()
+        );
+        assert!(
+            project
+                .apply(Command::DeleteNode {
+                    id: root.clone(),
+                    gap: Some(gap),
+                })
+                .is_err()
+        );
+    }
+    assert_eq!(project.snapshot().unwrap(), before);
+    project
+        .apply(Command::SetGaps {
+            id: root.clone(),
+            gap: None,
+            end_gap: None,
+        })
+        .unwrap();
+    assert_eq!(gaps(&project, &root), (None, None));
 }

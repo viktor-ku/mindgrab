@@ -6,6 +6,10 @@ export interface MindMapNode {
   note?: string;
   color?: NodeColor;
   position?: NodePosition;
+  // Empty space kept where ideas were deleted, so the others stay put: above
+  // this idea among its siblings, and after its last child.
+  gap?: number;
+  endGap?: number;
   next?: MindMapNode[];
 }
 
@@ -19,6 +23,14 @@ const DEFAULT_NODE_WIDTH = 128;
 export const NODE_MIN_HEIGHT = 40;
 const COLUMN_GAP = 64;
 const ROW_GAP = 24;
+
+// The space a slot `height` tall takes among `siblings` ideas, itself included:
+// what deleting it leaves empty, or what a new idea fills.
+export const slotSpace = (height: number, siblings: number) =>
+  height + (siblings > 1 ? ROW_GAP : 0);
+// A new idea's slot before it is measured.
+export const newIdeaSpace = (siblings: number) =>
+  slotSpace(NODE_MIN_HEIGHT, siblings);
 
 export interface NodeSize {
   width: number;
@@ -38,6 +50,10 @@ interface Connection {
   to: PositionedNode;
 }
 
+// Keeps one idea at a fixed height while the automatic layout changes around
+// it. The whole automatic layout shifts together, so an anchor never pulls a
+// node out of line with its siblings, however stale it gets. Only automatically
+// placed ideas outside dragged branches can anchor; any other anchor is ignored.
 export interface LayoutAnchor {
   id: string;
   centerY: number;
@@ -51,6 +67,11 @@ export function layoutMindMap(
   const nodes: PositionedNode[] = [];
   const connections: Connection[] = [];
   const subtreeHeights = new Map<string, number>();
+  // Automatically placed nodes outside any dragged branch: their places follow
+  // from the roots alone, so they can shift together.
+  const automatic = new Map<string, PositionedNode>();
+  // For each node, the nearest such node on its path from the root.
+  const anchorIds = new Map<string, string>();
 
   function sizeOf(node: MindMapNode): NodeSize {
     return (
@@ -61,46 +82,64 @@ export function layoutMindMap(
     );
   }
 
-  function measureSubtree(node: MindMapNode): number {
+  // A node's children, the gaps above them and its end gap, stacked.
+  function childrenHeight(node: MindMapNode) {
     const children = node.next ?? [];
-    const childrenHeight =
-      children.reduce((sum, child) => sum + measureSubtree(child), 0) +
-      Math.max(0, children.length - 1) * ROW_GAP;
-    const height = Math.max(sizeOf(node).height, childrenHeight);
+    return (
+      children.reduce(
+        (sum, child) => sum + (child.gap ?? 0) + subtreeHeights.get(child.id)!,
+        0,
+      ) +
+      Math.max(0, children.length - 1) * ROW_GAP +
+      (node.endGap ?? 0)
+    );
+  }
+
+  function measureSubtree(node: MindMapNode): number {
+    for (const child of node.next ?? []) measureSubtree(child);
+    const height = Math.max(sizeOf(node).height, childrenHeight(node));
     subtreeHeights.set(node.id, height);
     return height;
   }
 
-  function visit(node: MindMapNode, x: number, top: number): PositionedNode {
+  // A node is centered on its own subtree's slot, so growing or shrinking a
+  // branch moves its siblings apart or together but leaves it and its
+  // ancestors in place.
+  function visit(
+    node: MindMapNode,
+    x: number,
+    top: number,
+    anchorId: string | undefined,
+    placed: boolean,
+  ): PositionedNode {
     const size = sizeOf(node);
     const subtreeHeight = subtreeHeights.get(node.id)!;
-    // Anchor before placing children so they spread around the parent. A manual
-    // position takes precedence, allowing the anchored node to be dragged freely.
-    const y =
-      node.id === anchor?.id
-        ? anchor.centerY - size.height / 2
-        : top + (subtreeHeight - size.height) / 2;
     const positioned = {
       id: node.id,
       text: node.text,
       color: node.color,
       x,
-      y,
+      y: top + (subtreeHeight - size.height) / 2,
       ...node.position,
       ...size,
     };
     nodes.push(positioned);
+    const inPlace = placed || !!node.position;
+    if (!inPlace) {
+      automatic.set(node.id, positioned);
+      anchorId = node.id;
+    }
+    if (anchorId) anchorIds.set(node.id, anchorId);
 
-    const children = node.next ?? [];
-    const childrenHeight =
-      children.reduce((sum, child) => sum + subtreeHeights.get(child.id)!, 0) +
-      Math.max(0, children.length - 1) * ROW_GAP;
-    let childTop = positioned.y + (size.height - childrenHeight) / 2;
-    for (const child of children) {
+    let childTop = positioned.y + (size.height - childrenHeight(node)) / 2;
+    for (const child of node.next ?? []) {
+      childTop += child.gap ?? 0;
       const childPosition = visit(
         child,
         positioned.x + size.width + COLUMN_GAP,
         childTop,
+        anchorId,
+        inPlace,
       );
       connections.push({ from: positioned, to: childPosition });
       childTop += subtreeHeights.get(child.id)! + ROW_GAP;
@@ -114,11 +153,26 @@ export function layoutMindMap(
     ? (NODE_MIN_HEIGHT - subtreeHeights.get(roots[0].id)!) / 2
     : 0;
   for (const root of roots) {
-    visit(root, 0, rootTop);
+    rootTop += root.gap ?? 0;
+    visit(root, 0, rootTop, undefined, false);
     rootTop += subtreeHeights.get(root.id)! + ROW_GAP;
   }
 
-  return { nodes, connections };
+  const anchored = anchor && automatic.get(anchor.id);
+  const offset = anchored
+    ? anchor.centerY - (anchored.y + anchored.height / 2)
+    : 0;
+  if (offset) for (const node of automatic.values()) node.y += offset;
+
+  // For each node, the anchor that holds it where it is now: itself, or its
+  // nearest automatically placed ancestor when it is in a dragged branch.
+  const anchors = new Map<string, LayoutAnchor>();
+  for (const node of automatic.values())
+    anchors.set(node.id, { id: node.id, centerY: node.y + node.height / 2 });
+  for (const [id, anchorId] of anchorIds)
+    anchors.set(id, anchors.get(anchorId)!);
+
+  return { nodes, connections, anchors, heights: subtreeHeights };
 }
 
 // Use the positions at drag start so every descendant moves by the same delta,
@@ -233,9 +287,10 @@ export function visibleMindMap(
 ): MindMapNode[] {
   return nodes.map((node) => ({
     ...node,
-    next: collapsed.has(node.id)
-      ? []
-      : visibleMindMap(node.next ?? [], collapsed),
+    // A folded idea shows none of its children's space, gaps included.
+    ...(collapsed.has(node.id)
+      ? { next: [], endGap: undefined }
+      : { next: visibleMindMap(node.next ?? [], collapsed) }),
   }));
 }
 
