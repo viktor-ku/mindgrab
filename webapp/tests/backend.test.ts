@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { backendCookieDomain } from "../src/backend";
 
 const location = Object.getOwnPropertyDescriptor(globalThis, "location");
@@ -11,10 +11,6 @@ function visit(url: string) {
   });
 }
 
-beforeEach(() => {
-  delete process.env.VITE_BACKEND_URL;
-});
-
 afterAll(() => {
   if (location) Object.defineProperty(globalThis, "location", location);
   else Reflect.deleteProperty(globalThis, "location");
@@ -22,16 +18,15 @@ afterAll(() => {
   else process.env.VITE_BACKEND_URL = backend;
 });
 
-test("cookies reach a backend on a subdomain of the page", () => {
+// Login cookies are SameSite=Lax, so they must be shared with the API's
+// subdomain, and with nothing else.
+test("cookies reach a backend on a subdomain of the page and nowhere else", () => {
   visit("https://mindgrab.app/");
   process.env.VITE_BACKEND_URL = "https://api.mindgrab.app";
   expect(backendCookieDomain()).toBe("mindgrab.app");
-});
-
-test("cookies stay host-only on the page's own origin and on other sites", () => {
-  visit("http://localhost:5173/");
-  expect(backendCookieDomain()).toBeUndefined();
-  visit("https://mindgrab.app/");
   process.env.VITE_BACKEND_URL = "https://notmindgrab.app";
+  expect(backendCookieDomain()).toBeUndefined();
+  delete process.env.VITE_BACKEND_URL;
+  visit("http://localhost:5173/");
   expect(backendCookieDomain()).toBeUndefined();
 });

@@ -11,11 +11,11 @@ mise run state:setup
 
 | Command | Coverage |
 | --- | --- |
-| `mise run e2e:test` | Editor interactions, import/export, IndexedDB, account transitions and health queries |
+| `mise run e2e:test` | Editor interactions, notes, clipboard, backups, reload persistence and account sign-in/sign-out |
 | `mise run state:interop` | Main app with Rust, isolated Postgres, OAuth callback, native commands, live sockets, concurrent offline edits and retry recovery |
 | `mise run e2e:check` | Lint, formatting and browser harness type checks |
 
-The editor/storage/account suites isolate browser behavior. The interoperability
+The editor and account suites isolate browser behavior. The interoperability
 suite starts the real Rust server with a test identity provider; it requires
 local Postgres (`mise run db`) and drops its isolated database on shutdown.
 Backend integration tests are Rust tests in `backend/tests/` and run through

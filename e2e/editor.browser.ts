@@ -3,7 +3,6 @@ import {
   afterEach,
   beforeAll,
   beforeEach,
-  describe,
   expect,
   setDefaultTimeout,
   test,
@@ -13,19 +12,18 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
-import { DEFAULT_QUICK_COLORS } from "../webapp/src/generated/mindgrab-state/model";
-import { colorLabel } from "../webapp/src/node-colors";
 import { PROJECT_FILE_VERSION } from "../webapp/src/project-import-export";
 import type { Harness } from "./harness";
 
-// Interaction tests for the Rust/WASM-bound editor in headless Chromium. The harness
-// page mounts the app with a linked in-process replica acting as another device.
+// The editor in headless Chromium. The harness page mounts the app with a
+// linked in-process replica acting as another device.
 setDefaultTimeout(30_000);
 const webapp = fileURLToPath(new URL("../webapp", import.meta.url));
 let server: ViteDevServer;
 let browser: Browser;
 let context: BrowserContext;
 let page: Page;
+let errors: Error[];
 
 beforeAll(async () => {
   server = await createServer({
@@ -50,26 +48,29 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  // Reduced motion turns off color easing, so fills are final when read.
+  // Reduced motion turns off view easing, so geometry is final after a frame.
   context = await browser.newContext({
     viewport: { width: 1200, height: 800 },
     permissions: ["clipboard-read", "clipboard-write"],
     reducedMotion: "reduce",
   });
   page = await context.newPage();
-  const errors: Error[] = [];
+  errors = [];
   page.on("pageerror", (error) => errors.push(error));
   const url = server.resolvedUrls?.local[0] ?? "http://localhost:5199/";
   await page.goto(new URL(`/@fs/${import.meta.dir}/harness.html`, url).href);
-  await page.waitForSelector('[data-storage-ready="true"]');
-  await page.waitForSelector("[data-node-id]");
-  (page as unknown as { errors: Error[] }).errors = errors;
+  await ready();
 });
 
 afterEach(async () => {
-  expect((page as unknown as { errors: Error[] }).errors).toEqual([]);
+  expect(errors).toEqual([]);
   await context.close();
 });
+
+async function ready() {
+  await page.waitForSelector('[data-storage-ready="true"]');
+  await page.waitForSelector("[data-node-id]");
+}
 
 function call<K extends keyof Harness>(
   name: K,
@@ -87,565 +88,123 @@ const editor = () => page.getByLabel("Node text");
 const rootId = async () => (await call("ids"))[0];
 const frame = () =>
   page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
-const selection = () =>
-  editor().evaluate((input: HTMLTextAreaElement) => [
-    input.value,
-    input.selectionStart,
-    input.selectionEnd,
-  ]);
-const select = (start: number, end = start) =>
-  editor().evaluate(
-    (input: HTMLTextAreaElement, [start, end]) =>
-      input.setSelectionRange(start, end),
-    [start, end],
-  );
+const selected = () =>
+  page.locator("[data-selected=true]").getAttribute("data-node-id");
+const activeLabel = () =>
+  page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+const notice = (text: string | RegExp) =>
+  page.getByRole("status").filter({ hasText: text });
+const nodeData = async (id: string) =>
+  (await call("content")).nodes.find((node) => node.id === id);
+const textOf = async (id: string) => (await nodeData(id))?.text;
+const parentOf = async (id: string) => (await nodeData(id))?.parent;
+const childrenOf = async (id: string) => (await nodeData(id))?.children;
+const idWithText = async (text: string) =>
+  (await call("content")).nodes.find((node) => node.text === text)?.id;
+
+async function addChild(parent: string, text: string) {
+  const id = await call("addChild", parent, text);
+  if (!id) throw new Error("Child was not created.");
+  await node(id).waitFor();
+  return id;
+}
+async function edit(id: string) {
+  await node(id).dblclick();
+  await editor().waitFor();
+}
+async function box(id: string) {
+  await frame();
+  await frame();
+  const bounds = await node(id).boundingBox();
+  if (!bounds) throw new Error(`Node ${id} is not visible.`);
+  return bounds;
+}
 async function translation(id: string) {
   const transform = await node(id).evaluate((el) => el.style.transform);
   const [x, y] = (transform.match(/-?[\d.]+/g) ?? []).map(Number);
   return { x, y };
 }
-async function edit(id: string) {
-  await node(id).dblclick();
-  await editor().waitFor();
+// Presses the node's center and returns a function that moves the pointer by
+// an offset from there.
+async function startDrag(id: string) {
+  const start = await box(id);
+  const x = start.x + start.width / 2;
+  const y = start.y + start.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  return async (dx: number, dy: number) =>
+    page.mouse.move(x + dx, y + dy, { steps: 4 });
+}
+// Drags the node's center to a point, without dropping it.
+async function dragTo(id: string, to: { x: number; y: number }) {
+  const from = await box(id);
+  await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 8 });
 }
 async function projectMenu(item: string) {
   await page.getByRole("button", { name: "Project menu" }).click();
   // Menu item names include their shortcut hints, such as "Save now ⌘S".
   await page.getByRole("menuitem", { name: item }).first().click();
 }
-async function startDrag(id: string) {
-  await frame();
-  const box = await node(id).boundingBox();
-  if (!box) throw new Error("Node is not visible.");
-  const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-  await page.mouse.move(start.x, start.y);
-  await page.mouse.down();
-  return async (dx: number, dy: number) =>
-    page.mouse.move(start.x + dx, start.y + dy, { steps: 4 });
+function clipboard(type: "copy" | "cut" | "paste", text = "") {
+  return page.evaluate(
+    ([type, text]) => {
+      const data = new DataTransfer();
+      if (text) data.setData("text/plain", text);
+      document.querySelector("[aria-label='Mind map canvas']")?.dispatchEvent(
+        new ClipboardEvent(type, {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      return data.getData("text/plain");
+    },
+    [type, text] as const,
+  );
 }
-
-describe("remote documents", () => {
-  test("switching projects detaches the previous document", async () => {
-    const id = await rootId();
-    await projectMenu("New map");
-    await page.waitForFunction((id) => !window.harness.ids().includes(id), id);
-    expect((await call("retiredObservers")).every((count) => count === 0)).toBe(
-      true,
-    );
-    await call("editRetired", id, "Stale ");
-    await frame();
-    expect(await page.getByText("Stale", { exact: false }).count()).toBe(0);
-    const next = await rootId();
-    await call("edit", next, 0, 0, "Fresh ");
-    expect(await node(next).textContent()).toBe("Fresh New idea");
-  });
-});
-
-async function addChild(parent: string, text: string) {
-  const id = await call("addChild", parent, text);
-  if (!id) throw new Error("Child was not created.");
-  return id;
+// The notes editor reads a click's caret a moment later; waits until it has.
+const caretIn = (text: string) =>
+  page.waitForFunction((text) => {
+    const editor = document.querySelector<
+      HTMLElement & {
+        editor?: {
+          state: {
+            selection: {
+              $from: {
+                parent: {
+                  textBetween(
+                    from: number,
+                    to: number,
+                    block: string,
+                    leaf: string,
+                  ): string;
+                  content: { size: number };
+                };
+              };
+            };
+          };
+        };
+      }
+    >('[aria-label="Idea notes"]')?.editor;
+    const parent = editor?.state.selection.$from.parent;
+    return parent?.textBetween(0, parent.content.size, "", "\n") === text;
+  }, text);
+async function foldedTree() {
+  const root = await rootId();
+  const a = await addChild(root, "Alpha");
+  const needle = await addChild(a, "Needle one");
+  const b = await addChild(root, "Beta");
+  const second = await addChild(b, "Needle two");
+  for (const id of [a, b]) {
+    await node(id).click();
+    await page.keyboard.press("Alt+g");
+  }
+  await node(root).click();
+  await node(needle).waitFor({ state: "detached" });
+  return { root, a, b, needle, second };
 }
-
-describe("collapsing branches", () => {
-  test("G, the context menu, and the stack toggle descendants without editing the document", async () => {
-    const root = await rootId();
-    const child = await addChild(root, "Child");
-    const grandchild = await addChild(child, "Grandchild");
-    const sibling = await addChild(root, "Sibling");
-    await node(grandchild).waitFor();
-    await node(root).click();
-    const content = await call("content");
-    const updates = await call("localUpdates");
-    await page.keyboard.press("Alt+g");
-    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    expect(await node(root).getAttribute("data-selected")).toBe("true");
-    expect(await page.locator("[data-node-id]").count()).toBe(1);
-    expect(await page.locator("svg.pointer-events-none path").count()).toBe(0);
-    expect(
-      await node(root).getByRole("button", { name: "Expand 3 ideas" }).count(),
-    ).toBe(1);
-    expect(await call("content")).toEqual(content);
-    expect(await call("localUpdates")).toBe(updates);
-    await page.keyboard.press("ArrowRight");
-    expect(await node(root).getAttribute("data-selected")).toBe("true");
-    await page.keyboard.press("Alt+g");
-    for (const id of [child, grandchild, sibling]) await node(id).waitFor();
-    expect(await page.locator("svg.pointer-events-none path").count()).toBe(3);
-    await page.keyboard.press("Alt+g");
-    await node(root).getByRole("button", { name: "Expand 3 ideas" }).click();
-    await node(grandchild).waitFor();
-    await node(root).click({ button: "right" });
-    await page.getByRole("menuitem", { name: "Collapse children" }).click();
-    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    expect(await node(grandchild).count()).toBe(0);
-    expect(await page.getByRole("menu").count()).toBe(0);
-    await node(root).click({ button: "right" });
-    expect(
-      await page.getByRole("menuitem", { name: "Collapse children" }).count(),
-    ).toBe(0);
-    await page.getByRole("menuitem", { name: "Expand children" }).click();
-    for (const id of [child, grandchild, sibling]) await node(id).waitFor();
-    expect(await node(root).getAttribute("data-collapsed")).toBe("false");
-    expect(await node(root).getAttribute("data-selected")).toBe("true");
-    expect(await call("content")).toEqual(content);
-    expect(await call("localUpdates")).toBe(updates);
-  });
-
-  test("nested folds survive a parent fold and remote changes update the stack", async () => {
-    const root = await rootId();
-    const child = await addChild(root, "Child");
-    const grandchild = await addChild(child, "Grandchild");
-    const sibling = await addChild(root, "Sibling");
-    await node(child)
-      .getByRole("button", { name: "Child", exact: true })
-      .click();
-    await page.keyboard.press("Alt+g");
-    await node(root).click();
-    await page.keyboard.press("Alt+g");
-    await call("edit", grandchild, 0, 10, "Updated");
-    const added = await addChild(child, "Remote child");
-    expect(
-      await node(root).getByRole("button", { name: "Expand 4 ideas" }).count(),
-    ).toBe(1);
-    await page.keyboard.press("Alt+g");
-    await node(sibling).waitFor();
-    expect(await node(child).getAttribute("data-collapsed")).toBe("true");
-    expect(await node(grandchild).count()).toBe(0);
-    await node(child)
-      .getByRole("button", { name: "Child", exact: true })
-      .click();
-    await page.keyboard.press("Alt+g");
-    await node(added).waitFor();
-    expect(await node(grandchild).textContent()).toBe("Updated");
-    await page.keyboard.press("Alt+g");
-    await call("remove", grandchild);
-    await call("remove", added);
-    expect(await node(child).getAttribute("data-collapsed")).toBe("false");
-  });
-
-  test("Option+G ignores typing, other modifiers, repeated keydowns, leaves, and no selection", async () => {
-    const root = await rootId();
-    const child = await addChild(root, "Child");
-    // New maps open with the first idea selected; start from no selection.
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("Alt+g");
-    await node(child).waitFor();
-    await node(child)
-      .getByRole("button", { name: "Child", exact: true })
-      .click();
-    await page.keyboard.press("Alt+g");
-    expect(await node(child).getAttribute("data-collapsed")).toBe("false");
-    await node(child).click({ button: "right" });
-    expect(
-      await page.getByRole("menuitem", { name: /Collapse|Expand/ }).count(),
-    ).toBe(0);
-    await page.keyboard.press("Escape");
-    await edit(root);
-    await page.keyboard.type("g");
-    expect(await call("text", root)).toBe("g");
-    await node(child).waitFor();
-    await page.keyboard.press("Enter");
-    for (const key of ["Control+Alt+g", "Meta+Alt+g", "Alt+Shift+g"])
-      await page.keyboard.press(key);
-    expect(await node(root).getAttribute("data-collapsed")).toBe("false");
-    await page.keyboard.down("Alt");
-    await page.keyboard.down("g");
-    await page.keyboard.down("g");
-    await page.keyboard.up("g");
-    await page.keyboard.up("Alt");
-    expect(await node(root).getAttribute("data-collapsed")).toBe("true");
-    await page.keyboard.press("Alt+g");
-    await node(child).waitFor();
-  });
-
-  test("adding a child expands the folded parent and undo can reveal hidden selections", async () => {
-    const root = await rootId();
-    const child = await addChild(root, "Child");
-    await node(root).click();
-    await page.keyboard.press("Alt+g");
-    await page.keyboard.press("Tab");
-    await editor().waitFor();
-    await page.keyboard.type("Added");
-    await page.keyboard.press("Enter");
-    await node(child).waitFor();
-    const added = (await call("ids")).find(
-      (id) => id !== root && id !== child,
-    ) as string;
-    await page.keyboard.press("Delete");
-    await node(root).click();
-    await page.keyboard.press("Alt+g");
-    await page.keyboard.press("Control+z");
-    await node(added).waitFor();
-    expect(await node(added).getAttribute("data-selected")).toBe("true");
-  });
-
-  test("dragging a folded parent moves its hidden descendants", async () => {
-    const root = await rootId();
-    const child = await addChild(root, "Child");
-    const grandchild = await addChild(child, "Grandchild");
-    await node(grandchild).waitFor();
-    await call("place", child, 220, 65);
-    await call("place", grandchild, 370, 120);
-    await node(root).click();
-    await page.keyboard.press("Alt+g");
-    // The wider stack must finish its ResizeObserver layout before dragging.
-    await frame();
-    await frame();
-    const move = await startDrag(root);
-    await move(90, 70);
-    await page.mouse.up();
-    expect(await call("position", child)).toEqual({ x: 310, y: 135 });
-    expect(await call("position", grandchild)).toEqual({ x: 460, y: 190 });
-    await page.keyboard.press("Alt+g");
-    await node(grandchild).waitFor();
-    expect(await translation(grandchild)).toEqual({ x: 460, y: 190 });
-  });
-});
-
-describe("text editing", () => {
-  test("typing, newlines, emoji, and paste become incremental operations", async () => {
-    const id = await rootId();
-    await edit(id);
-    await page.keyboard.press("End");
-    await page.keyboard.type("!?");
-    await page.keyboard.press("Shift+Enter");
-    await page.keyboard.insertText("😀");
-    await page.keyboard.press("Backspace");
-    await page.evaluate(() => navigator.clipboard.writeText("pasted"));
-    await page.keyboard.press("ControlOrMeta+V");
-    expect(await call("text", id)).toBe("New idea!?\npasted");
-    await page.keyboard.press("Enter");
-    await editor().waitFor({ state: "detached" });
-    expect(await node(id).textContent()).toBe("New idea!?\npasted");
-  });
-
-  test("the selection stays on the same characters during remote edits", async () => {
-    const id = await rootId();
-    await edit(id);
-    await page.keyboard.type("hello world");
-    await select(5);
-    await call("edit", id, 0, 0, "Oh, ");
-    expect(await selection()).toEqual(["Oh, hello world", 9, 9]);
-    await call("edit", id, 9, 0, "X");
-    expect(await selection()).toEqual(["Oh, helloX world", 9, 9]);
-    await select(11, 16);
-    await call("edit", id, 11, 0, "big ");
-    await call("edit", id, 0, 4, "");
-    expect(await selection()).toEqual(["helloX big world", 11, 16]);
-    await page.keyboard.type("there");
-    expect(await call("text", id)).toBe("helloX big there");
-  });
-
-  test("composition stays local until committed and keeps remote edits", async () => {
-    const id = await rootId();
-    await edit(id);
-    await page.keyboard.press("End");
-    const cdp = await context.newCDPSession(page);
-    await cdp.send("Input.imeSetComposition", {
-      text: "に",
-      selectionStart: 1,
-      selectionEnd: 1,
-    });
-    await cdp.send("Input.imeSetComposition", {
-      text: "にほ",
-      selectionStart: 2,
-      selectionEnd: 2,
-    });
-    await call("edit", id, 0, 0, ">> ");
-    expect(await call("text", id)).toBe(">> New idea");
-    expect(await selection()).toEqual(["New ideaにほ", 10, 10]);
-    await cdp.send("Input.insertText", { text: "日本" });
-    expect(await selection()).toEqual([">> New idea日本", 13, 13]);
-    expect(await call("text", id)).toBe(">> New idea日本");
-    expect(await call("localText", id)).toBe(">> New idea日本");
-  });
-
-  test("remote deletion of the node being edited closes the editor", async () => {
-    const root = await rootId();
-    const child = (await call("addChild", root, "Child")) as string;
-    await edit(child);
-    await page.keyboard.type("abc");
-    expect(await call("text", child)).toBe("abc");
-    await call("remove", child);
-    await editor().waitFor({ state: "detached" });
-    await node(child).waitFor({ state: "detached" });
-    expect(await page.locator("[data-selected=true]").count()).toBe(0);
-    expect(
-      await page.evaluate(() =>
-        document.activeElement?.getAttribute("aria-label"),
-      ),
-    ).toBe("Mind map canvas");
-    await page.keyboard.type("zz");
-    expect(await call("ids")).toEqual([root]);
-    expect(await call("deleted", child)).toBe(true);
-  });
-});
-
-describe("node colors", () => {
-  // The visible fill is on the card. Top-level ideas use a strong fill and the
-  // others a light one, so fills differ from the swatches.
-  const background = (id: string) =>
-    node(id)
-      .locator(".map-node-card")
-      .evaluate((el) => getComputedStyle(el).backgroundColor);
-  // Wide screens show the style panel whenever an idea is selected.
-  const openColors = () =>
-    page.getByRole("region", { name: "Idea style" }).waitFor();
-
-  test("the default fill and every palette swatch render with a background", async () => {
-    const root = await rootId();
-    expect(
-      (await call("content")).nodes.find(
-        (node: { id: string }) => node.id === root,
-      )?.color,
-    ).toBe("slate");
-    expect(await background(root)).not.toBe("rgba(0, 0, 0, 0)");
-    await node(root).click();
-    await openColors();
-    const fills = new Set<string>();
-    const swatches = new Set<string>();
-    for (const color of DEFAULT_QUICK_COLORS) {
-      // On the central idea the white card goes by "Default".
-      const choice = page.getByRole("button", {
-        name: colorLabel(color, true),
-        exact: true,
-      });
-      const swatch = await choice
-        .locator(".style-chip")
-        .evaluate((el) => getComputedStyle(el).backgroundColor);
-      expect(swatch).not.toBe("rgba(0, 0, 0, 0)");
-      await choice.click();
-      const fill = await background(root);
-      expect(fill).not.toBe("rgba(0, 0, 0, 0)");
-      expect(
-        (await call("content")).nodes.find(
-          (node: { id: string }) => node.id === root,
-        )?.color,
-      ).toBe(color);
-      fills.add(fill);
-      swatches.add(swatch);
-    }
-    expect(fills.size).toBe(DEFAULT_QUICK_COLORS.length);
-    expect(swatches.size).toBe(DEFAULT_QUICK_COLORS.length);
-  });
-
-  test("node and branch scopes recolor the intended nodes and undo together", async () => {
-    const root = await rootId();
-    const child = await call("addChild", root, "Child");
-    if (!child) throw new Error("Child was not created.");
-    const grandchild = await call("addChild", child, "Grandchild");
-    const sibling = await call("addChild", root, "Sibling");
-    if (!grandchild || !sibling) throw new Error("Branch was not created.");
-    await node(child).click();
-    // Top-level and nested ideas have different fills, so each node is
-    // compared with its own original fill.
-    const original: Record<string, string> = {};
-    for (const id of [root, child, grandchild, sibling])
-      original[id] = await background(id);
-    const originalFill = original[child];
-    await openColors();
-    await page.getByRole("button", { name: "Red 200", exact: true }).click();
-    const roseFill = await background(child);
-    expect(roseFill).not.toBe(originalFill);
-    for (const id of [root, grandchild, sibling]) {
-      expect(
-        (await call("content")).nodes.find(
-          (node: { id: string }) => node.id === id,
-        )?.color,
-      ).toBe("slate");
-      expect(await background(id)).toBe(original[id]);
-    }
-
-    await page
-      .getByRole("button", { name: "This branch", exact: true })
-      .click();
-    expect(
-      await page
-        .getByRole("button", { name: "This branch", exact: true })
-        .getAttribute("aria-pressed"),
-    ).toBe("true");
-    const updates = await call("localUpdates");
-    await page.getByRole("button", { name: "Blue 200", exact: true }).click();
-    expect(await call("localUpdates")).toBe(updates + 1);
-    const violetFill = await background(child);
-    expect(violetFill).not.toBe(roseFill);
-    for (const id of [child, grandchild]) {
-      expect(
-        (await call("content")).nodes.find(
-          (node: { id: string }) => node.id === id,
-        )?.color,
-      ).toBe("blue-200");
-      expect(await background(id)).toBe(violetFill);
-    }
-    for (const id of [root, sibling]) {
-      expect(
-        (await call("content")).nodes.find(
-          (node: { id: string }) => node.id === id,
-        )?.color,
-      ).toBe("slate");
-      expect(await background(id)).toBe(original[id]);
-    }
-
-    await page.getByRole("button", { name: "Undo", exact: true }).click();
-    expect(
-      (await call("content")).nodes.find(
-        (node: { id: string }) => node.id === child,
-      )?.color,
-    ).toBe("red-200");
-    expect(await background(child)).toBe(roseFill);
-    expect(
-      (await call("content")).nodes.find(
-        (node: { id: string }) => node.id === grandchild,
-      )?.color,
-    ).toBe("slate");
-    expect(await background(grandchild)).toBe(original[grandchild]);
-  });
-});
-
-describe("dragging", () => {
-  test("a drag commits once, rebased on remote edits made during it", async () => {
-    const root = await rootId();
-    const child = (await call("addChild", root, "Child")) as string;
-    const grandchild = (await call("addChild", child, "Grandchild")) as string;
-    const gone = (await call("addChild", child, "Gone")) as string;
-    const start = await translation(child);
-    const updates = await call("localUpdates");
-
-    const move = await startDrag(child);
-    await move(40, 10);
-    await call("edit", child, 0, 0, "Remote ");
-    await call("place", grandchild, 500, 300);
-    await call("remove", gone);
-    await move(100, 40);
-    const moved = await translation(child);
-    expect(moved.x).toBeCloseTo(start.x + 100, 2);
-    expect(moved.y).toBeCloseTo(start.y + 40, 2);
-    expect(await call("localUpdates")).toBe(updates);
-    await page.mouse.up();
-
-    expect(await call("localUpdates")).toBe(updates + 1);
-    const placed = await call("position", child);
-    expect(placed?.x).toBeCloseTo(start.x + 100, 2);
-    expect(placed?.y).toBeCloseTo(start.y + 40, 2);
-    expect(await call("position", grandchild)).toEqual({
-      x: 600,
-      y: 340,
-    });
-    expect(await call("text", child)).toBe("Remote Child");
-    expect(await call("deleted", gone)).toBe(true);
-    expect(await call("position", gone)).toBeUndefined();
-  });
-
-  test("Escape and pointercancel discard only the preview", async () => {
-    const root = await rootId();
-    const start = await translation(root);
-    const updates = await call("localUpdates");
-
-    let move = await startDrag(root);
-    await move(80, 30);
-    await call("edit", root, 0, 0, "Remote ");
-    const child = (await call("addChild", root, "Remote child")) as string;
-    await page.keyboard.press("Escape");
-    expect(await translation(root)).toEqual(start);
-    await page.mouse.up();
-
-    move = await startDrag(root);
-    await move(-60, 20);
-    await page.evaluate(() =>
-      document
-        .querySelector("[aria-label='Mind map canvas']")
-        ?.dispatchEvent(
-          new PointerEvent("pointercancel", { pointerId: 1, bubbles: true }),
-        ),
-    );
-    expect(await translation(root)).toEqual(start);
-    await page.mouse.up();
-
-    expect(await call("localUpdates")).toBe(updates);
-    expect(await call("position", root)).toBeUndefined();
-    expect(await node(root).textContent()).toBe("Remote New idea");
-    expect(await node(child).textContent()).toBe("Remote child");
-  });
-});
-
-describe("existing interactions", () => {
-  test("add, edit, navigate, reorder, delete, undo, and zoom", async () => {
-    const root = await rootId();
-    await node(root).click();
-    await page.keyboard.press("Tab");
-    await page.keyboard.type("First");
-    await page.keyboard.press("Enter");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("Second");
-    await page.keyboard.press("Enter");
-    const [, first, second] = await call("ids");
-    expect(await call("text", first)).toBe("First");
-    expect(await call("text", second)).toBe("Second");
-
-    await page.keyboard.press("ArrowUp");
-    expect(await node(first).getAttribute("data-selected")).toBe("true");
-    await page.keyboard.press("Control+ArrowDown");
-    expect(await call("ids")).toEqual([root, second, first]);
-    await page.keyboard.press("Delete");
-    expect(await call("ids")).toEqual([root, second]);
-    await page.keyboard.press("Control+z");
-    expect(await call("ids")).toEqual([root, second, first]);
-    expect(await node(first).getAttribute("data-selected")).toBe("true");
-    await page.keyboard.press("Control+z");
-    expect(await call("ids")).toEqual([root, first, second]);
-    await page.keyboard.press("Control+z");
-    expect(await call("text", second)).toBe("New idea");
-
-    await page.getByRole("button", { name: "Zoom in" }).click();
-    expect(
-      await page.getByRole("button", { name: "Zoom to 100%" }).textContent(),
-    ).toBe("120%");
-  });
-
-  test("deleting an idea moves no other idea, and a new one fills its place", async () => {
-    const root = await rootId();
-    await node(root).click();
-    await page.keyboard.press("Tab");
-    await page.keyboard.type("First");
-    await page.keyboard.press("Enter");
-    for (const text of ["Second", "Third"]) {
-      await page.keyboard.press("Enter");
-      await page.keyboard.type(text);
-      await page.keyboard.press("Enter");
-    }
-    const [, first, second, third] = await call("ids");
-    const places = async (ids: string[]) => {
-      await frame();
-      await frame();
-      return Promise.all(ids.map(translation));
-    };
-    const before = await places([root, first, second, third]);
-
-    await node(second).click();
-    await page.keyboard.press("Delete");
-    expect(await call("ids")).toEqual([root, first, third]);
-    expect(await places([root, first, third])).toEqual([
-      before[0],
-      before[1],
-      before[3],
-    ]);
-
-    await node(first).click();
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("Again");
-    await page.keyboard.press("Enter");
-    const [, , added] = await call("ids");
-    expect(await places([root, first, added, third])).toEqual(before);
-
-    await page.keyboard.press("Control+z");
-    await page.keyboard.press("Control+z");
-    await page.keyboard.press("Control+z");
-    expect(await call("ids")).toEqual([root, first, second, third]);
-    expect(await places([root, first, second, third])).toEqual(before);
-  });
-});
-
 async function uploadProject(json: string) {
   await page.evaluate(() =>
     Object.defineProperty(window, "showOpenFilePicker", {
@@ -666,7 +225,6 @@ async function uploadProject(json: string) {
     previous,
   );
 }
-
 async function downloadProject() {
   await page.evaluate(() =>
     Object.defineProperty(window, "showSaveFilePicker", {
@@ -682,91 +240,357 @@ async function downloadProject() {
   return { name: saved.suggestedFilename(), json: await Bun.file(path).text() };
 }
 
-describe("portable file actions", () => {
-  test("downloads offline edits and uploads twice with fresh identities and empty undo stacks", async () => {
-    await page.getByRole("textbox", { name: "Project name" }).fill("Portable");
-    const originalId = await call("projectId");
-    const root = await rootId();
-    await edit(root);
-    await editor().fill("Offline\nHäid mõtteid 😀 日本語");
-    await page.keyboard.press("Escape");
-    await call("addChild", root, "Child");
-    await call("place", root, -30, 80);
-    await context.setOffline(true);
-    expect(await page.evaluate(() => navigator.onLine)).toBe(false);
-    const saved = await downloadProject();
-    expect(saved.name).toBe("Portable.mindgrab.json");
-    const file = JSON.parse(saved.json);
-    expect(file.format).toBe("mindgrab-project");
-    expect(file.version).toBe(PROJECT_FILE_VERSION);
-    expect(file.project.nodes[0].text).toBe("Offline\nHäid mõtteid 😀 日本語");
-    expect(file.project.nodes[0].position).toEqual({ x: -30, y: 80 });
-    const originalNodes = await call("ids");
+test("add, edit, navigate, reorder, delete, undo, and zoom", async () => {
+  const root = await rootId();
+  await node(root).click();
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("First");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Second");
+  await page.keyboard.press("Enter");
+  const [, first, second] = await call("ids");
+  expect(await call("text", first)).toBe("First");
+  expect(await call("text", second)).toBe("Second");
 
-    await uploadProject(saved.json);
-    const firstId = await call("projectId");
-    const firstNodes = await call("ids");
-    expect(firstId).not.toBe(originalId);
-    expect(firstNodes.every((id) => !originalNodes.includes(id))).toBe(true);
-    expect(
-      await page.getByRole("button", { name: "Undo", exact: true }).count(),
-    ).toBe(0);
-    expect(
-      await page.getByRole("button", { name: "Redo", exact: true }).count(),
-    ).toBe(0);
+  await page.keyboard.press("ArrowUp");
+  expect(await node(first).getAttribute("data-selected")).toBe("true");
+  await page.keyboard.press("Control+ArrowDown");
+  expect(await call("ids")).toEqual([root, second, first]);
+  await page.keyboard.press("Delete");
+  expect(await call("ids")).toEqual([root, second]);
+  await page.keyboard.press("Control+z");
+  expect(await call("ids")).toEqual([root, second, first]);
+  expect(await node(first).getAttribute("data-selected")).toBe("true");
+  await page.keyboard.press("Control+z");
+  expect(await call("ids")).toEqual([root, first, second]);
+  await page.keyboard.press("Control+z");
+  expect(await call("text", second)).toBe("New idea");
 
-    await uploadProject(saved.json);
-    const secondId = await call("projectId");
-    const secondNodes = await call("ids");
-    expect(new Set([originalId, firstId, secondId]).size).toBe(3);
-    expect(secondNodes.every((id) => !firstNodes.includes(id))).toBe(true);
-    await edit(secondNodes[0]);
-    await editor().fill("Only the second import");
-    await page.keyboard.press("Escape");
-    await projectMenu("Open map…");
-    await page.locator("#saved-projects").waitFor();
-    expect(
-      await page.getByRole("menuitem", { name: /^Portable · / }).count(),
-    ).toBe(3);
-    await page
-      .getByRole("menuitem", {
-        name: `Portable · ${firstId.slice(0, 8)}`,
-        exact: true,
-      })
-      .click();
-    await page.waitForFunction(
-      (id) => window.harness.projectId() === id,
-      firstId,
-    );
-    expect(await call("text", firstNodes[0])).toBe(
-      "Offline\nHäid mõtteid 😀 日本語",
-    );
-    expect(
-      await page.getByRole("button", { name: "Undo", exact: true }).count(),
-    ).toBe(0);
+  await page.getByRole("button", { name: "Zoom in" }).click();
+  expect(
+    await page.getByRole("button", { name: "Zoom to 100%" }).textContent(),
+  ).toBe("120%");
+});
+
+test("typing replaces the selected idea, Tab and Shift+Tab keep capturing, and Enter on a central idea adds a child", async () => {
+  const root = await rootId();
+  expect(await selected()).toBe(root);
+  await page.keyboard.type("Plan");
+  await editor().waitFor();
+  await page.keyboard.press("Tab");
+  await page.keyboard.type("Step");
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.type("Phase");
+  await page.keyboard.press("Escape");
+  expect(await textOf(root)).toBe("Plan");
+  const phase = (await idWithText("Phase")) as string;
+  const step = (await idWithText("Step")) as string;
+  expect(await parentOf(phase)).toBe(root);
+  expect(await parentOf(step)).toBe(phase);
+
+  await node(root).click();
+  await page.keyboard.press("Enter");
+  await editor().waitFor();
+  await page.keyboard.type("Second");
+  await page.keyboard.press("Escape");
+  expect(await parentOf((await idWithText("Second")) as string)).toBe(root);
+  expect((await call("content")).roots).toHaveLength(1);
+
+  // With an idea selected even shortcut characters type into it; with
+  // nothing selected "/" opens search.
+  await node(root).click();
+  await page.keyboard.type("/?!");
+  await page.keyboard.press("Escape");
+  expect(await textOf(root)).toBe("/?!");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("/");
+  await page.getByRole("searchbox", { name: "Search ideas" }).waitFor();
+});
+
+test("typing, newlines, emoji, and paste become incremental operations", async () => {
+  const id = await rootId();
+  await edit(id);
+  await page.keyboard.press("End");
+  await page.keyboard.type("!?");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.insertText("😀");
+  await page.keyboard.press("Backspace");
+  await page.evaluate(() => navigator.clipboard.writeText("pasted"));
+  await page.keyboard.press("ControlOrMeta+V");
+  expect(await call("text", id)).toBe("New idea!?\npasted");
+  await page.keyboard.press("Enter");
+  await editor().waitFor({ state: "detached" });
+  expect(await node(id).textContent()).toBe("New idea!?\npasted");
+});
+
+test("a drag commits once, rebased on remote edits made during it", async () => {
+  const root = await rootId();
+  const child = (await call("addChild", root, "Child")) as string;
+  const grandchild = (await call("addChild", child, "Grandchild")) as string;
+  const gone = (await call("addChild", child, "Gone")) as string;
+  const start = await translation(child);
+  const updates = await call("localUpdates");
+
+  const move = await startDrag(child);
+  await move(40, 10);
+  await call("edit", child, 0, 0, "Remote ");
+  await call("place", grandchild, 500, 300);
+  await call("remove", gone);
+  await move(100, 40);
+  const moved = await translation(child);
+  expect(moved.x).toBeCloseTo(start.x + 100, 2);
+  expect(moved.y).toBeCloseTo(start.y + 40, 2);
+  expect(await call("localUpdates")).toBe(updates);
+  await page.mouse.up();
+
+  expect(await call("localUpdates")).toBe(updates + 1);
+  const placed = await call("position", child);
+  expect(placed?.x).toBeCloseTo(start.x + 100, 2);
+  expect(placed?.y).toBeCloseTo(start.y + 40, 2);
+  expect(await call("position", grandchild)).toEqual({
+    x: 600,
+    y: 340,
   });
+  expect(await call("text", child)).toBe("Remote Child");
+  expect(await call("deleted", gone)).toBe(true);
+  expect(await call("position", gone)).toBeUndefined();
+});
 
-  test("Export stays usable when browser persistence cannot open", async () => {
-    await context.addInitScript(() => {
-      Object.defineProperty(window, "indexedDB", {
-        configurable: true,
-        get() {
-          throw new DOMException("Unavailable", "SecurityError");
-        },
-      });
-    });
-    await page.reload();
-    await page
-      .getByText("Browser storage is unavailable.", { exact: true })
-      .waitFor();
-    await page.getByRole("button", { name: "Project menu" }).click();
-    expect(
-      await page
-        .getByRole("menuitem", { name: "Export backup (.json)", exact: true })
-        .isEnabled(),
-    ).toBe(true);
-    await page.getByRole("button", { name: "Project menu" }).click();
-    const saved = await downloadProject();
-    expect(JSON.parse(saved.json).project.nodes[0].text).toBe("New idea");
+test("dropping onto an idea's middle reparents, its edges place before or after, and each move undoes", async () => {
+  const root = await rootId();
+  const a = await addChild(root, "A");
+  const b = await addChild(root, "B");
+  const c = await addChild(root, "C");
+
+  const target = await box(a);
+  await dragTo(c, {
+    x: target.x + target.width / 2,
+    y: target.y + target.height / 2,
   });
+  await page.getByText("Move under “A”", { exact: true }).waitFor();
+  await page.mouse.up();
+  expect(await parentOf(c)).toBe(a);
+  expect(await selected()).toBe(c);
+  expect(await call("position", c)).toBeUndefined();
+  await notice("Moved “C” under “A”")
+    .getByRole("button", { name: "Undo" })
+    .click();
+  expect(await parentOf(c)).toBe(root);
+  expect(await childrenOf(root)).toEqual([a, b, c]);
+
+  const first = await box(a);
+  await dragTo(c, { x: first.x + first.width / 2, y: first.y + 3 });
+  await page.getByText("Move before “A”", { exact: true }).waitFor();
+  await page.mouse.up();
+  expect(await childrenOf(root)).toEqual([c, a, b]);
+
+  const second = await box(a);
+  await dragTo(c, {
+    x: second.x + second.width / 2,
+    y: second.y + second.height - 3,
+  });
+  await page.getByText("Move after “A”", { exact: true }).waitFor();
+  await page.mouse.up();
+  expect(await childrenOf(root)).toEqual([a, c, b]);
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await childrenOf(root)).toEqual([c, a, b]);
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await childrenOf(root)).toEqual([a, b, c]);
+});
+
+test("search finds an idea inside a folded branch and Enter keeps it", async () => {
+  const { b, second } = await foldedTree();
+  await page.keyboard.press("ControlOrMeta+f");
+  const field = page.getByRole("searchbox", { name: "Search ideas" });
+  await field.waitFor();
+  await field.fill("two");
+  await field.press("Enter");
+  await field.waitFor({ state: "detached" });
+  expect(await selected()).toBe(second);
+  expect(await node(b).getAttribute("data-collapsed")).toBe("false");
+  expect(await activeLabel()).toBe("Mind map canvas");
+});
+
+test("folded branches survive reopening the project", async () => {
+  const root = await rootId();
+  const a = await addChild(root, "Alpha");
+  const a1 = await addChild(a, "Alpha one");
+  const b = await addChild(root, "Beta");
+  await addChild(b, "Beta one");
+  await node(a).click();
+  await page.keyboard.press("Alt+g");
+  await node(a1).waitFor({ state: "detached" });
+  const project = await call("projectId");
+  // The view preference is written shortly after the last change.
+  await page.waitForTimeout(600);
+
+  await page.reload();
+  await ready();
+  expect(await call("projectId")).toBe(project);
+  await node(a).waitFor();
+  expect(await node(a).getAttribute("data-collapsed")).toBe("true");
+  expect(await node(b).getAttribute("data-collapsed")).toBe("false");
+  expect(await node(a1).count()).toBe(0);
+});
+
+test("notes are rich text kept as Markdown, with a toolbar, shortcuts, undo and remote edits", async () => {
+  const root = await rootId();
+  await node(root).click();
+  await page.keyboard.press("Alt+n");
+  const notes = page.getByRole("textbox", { name: "Idea notes" });
+  await page.waitForFunction(
+    () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
+  );
+  const toolbar = page.getByRole("toolbar", { name: "Formatting" });
+  const bold = toolbar.getByRole("button", { name: "Bold" });
+
+  // The toolbar formats what comes next and gives the keyboard back.
+  await bold.click();
+  expect(await activeLabel()).toBe("Idea notes");
+  expect(await bold.getAttribute("aria-pressed")).toBe("true");
+  await page.keyboard.type("Plan");
+  await page.keyboard.press("ControlOrMeta+b");
+  await page.keyboard.type(" for the week");
+  expect(await bold.getAttribute("aria-pressed")).toBe("false");
+  expect(await call("note", root)).toBe("**Plan** for the week");
+
+  // Markdown shortcuts start lists; the toolbar switches their kind.
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("- Monday");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Tuesday");
+  expect(await call("note", root)).toBe(
+    "**Plan** for the week\n\n- Monday\n- Tuesday",
+  );
+  await toolbar.getByRole("button", { name: "Numbered list" }).click();
+  expect(
+    await toolbar
+      .getByRole("button", { name: "Numbered list" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(await call("note", root)).toBe(
+    "**Plan** for the week\n\n1. Monday\n2. Tuesday",
+  );
+
+  // Sizes are headings.
+  await notes
+    .locator("p")
+    .first()
+    .click({ position: { x: 4, y: 4 } });
+  await caretIn("Plan for the week");
+  await toolbar
+    .getByRole("combobox", { name: "Text size" })
+    .selectOption({ label: "Heading 1" });
+  expect(await activeLabel()).toBe("Idea notes");
+  expect(await call("note", root)).toBe(
+    "# **Plan** for the week\n\n1. Monday\n2. Tuesday",
+  );
+  expect(await notes.locator("h1").innerText()).toBe("Plan for the week");
+
+  // Undo is the map's: it steps the note back and keeps the writer there.
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await call("note", root)).toBe(
+    "**Plan** for the week\n\n1. Monday\n2. Tuesday",
+  );
+  expect(await notes.locator("h1").count()).toBe(0);
+  expect(await activeLabel()).toBe("Idea notes");
+
+  // Another device's edit shows without moving the caret.
+  await notes.locator("li").last().click();
+  await caretIn("Tuesday");
+  await page.keyboard.press("End");
+  await call("editNote", root, 0, 0, "Agenda\n\n");
+  await notes.locator("p", { hasText: "Agenda" }).waitFor();
+  await page.keyboard.type(" and Wednesday");
+  expect(await call("note", root)).toBe(
+    "Agenda\n\n**Plan** for the week\n\n1. Monday\n2. Tuesday and Wednesday",
+  );
+});
+
+test("branches copy as outlines and indented text pastes as a branch", async () => {
+  const root = await rootId();
+  const child = await addChild(root, "Trip");
+  await addChild(child, "Flights");
+  await node(child).click();
+  expect(await clipboard("copy")).toBe("- Trip\n  - Flights");
+
+  await node(root).click();
+  await clipboard("paste", "# Packing\n- Clothes\n  - Socks\n- Camera");
+  await notice(/Pasted 4 ideas under/).waitFor();
+  const packing = (await idWithText("Packing")) as string;
+  expect(await parentOf(packing)).toBe(root);
+  expect(await parentOf((await idWithText("Clothes")) as string)).toBe(packing);
+  expect(await parentOf((await idWithText("Socks")) as string)).toBe(
+    await idWithText("Clothes"),
+  );
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await idWithText("Packing")).toBeUndefined();
+
+  await node(child).click();
+  await clipboard("cut");
+  expect(await idWithText("Trip")).toBeUndefined();
+});
+
+test("a backup downloads offline and imports twice with fresh identities and empty undo stacks", async () => {
+  await page.getByRole("textbox", { name: "Project name" }).fill("Portable");
+  const originalId = await call("projectId");
+  const root = await rootId();
+  await edit(root);
+  await editor().fill("Offline\nHäid mõtteid 😀 日本語");
+  await page.keyboard.press("Escape");
+  await call("addChild", root, "Child");
+  await call("place", root, -30, 80);
+  await context.setOffline(true);
+  expect(await page.evaluate(() => navigator.onLine)).toBe(false);
+  const saved = await downloadProject();
+  expect(saved.name).toBe("Portable.mindgrab.json");
+  const file = JSON.parse(saved.json);
+  expect(file.format).toBe("mindgrab-project");
+  expect(file.version).toBe(PROJECT_FILE_VERSION);
+  expect(file.project.nodes[0].text).toBe("Offline\nHäid mõtteid 😀 日本語");
+  expect(file.project.nodes[0].position).toEqual({ x: -30, y: 80 });
+  const originalNodes = await call("ids");
+
+  await uploadProject(saved.json);
+  const firstId = await call("projectId");
+  const firstNodes = await call("ids");
+  expect(firstId).not.toBe(originalId);
+  expect(firstNodes.every((id) => !originalNodes.includes(id))).toBe(true);
+  expect(
+    await page.getByRole("button", { name: "Undo", exact: true }).count(),
+  ).toBe(0);
+  expect(
+    await page.getByRole("button", { name: "Redo", exact: true }).count(),
+  ).toBe(0);
+
+  await uploadProject(saved.json);
+  const secondId = await call("projectId");
+  const secondNodes = await call("ids");
+  expect(new Set([originalId, firstId, secondId]).size).toBe(3);
+  expect(secondNodes.every((id) => !firstNodes.includes(id))).toBe(true);
+  await edit(secondNodes[0]);
+  await editor().fill("Only the second import");
+  await page.keyboard.press("Escape");
+  await projectMenu("Open map…");
+  await page.locator("#saved-projects").waitFor();
+  expect(
+    await page.getByRole("menuitem", { name: /^Portable · / }).count(),
+  ).toBe(3);
+  await page
+    .getByRole("menuitem", {
+      name: `Portable · ${firstId.slice(0, 8)}`,
+      exact: true,
+    })
+    .click();
+  await page.waitForFunction(
+    (id) => window.harness.projectId() === id,
+    firstId,
+  );
+  expect(await call("text", firstNodes[0])).toBe(
+    "Offline\nHäid mõtteid 😀 日本語",
+  );
+  expect(
+    await page.getByRole("button", { name: "Undo", exact: true }).count(),
+  ).toBe(0);
 });

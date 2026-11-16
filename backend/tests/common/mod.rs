@@ -90,10 +90,7 @@ pub struct Fixture {
 }
 impl Fixture {
     pub async fn new(origin: &str) -> Self {
-        Self::with_auth_mode(origin, AuthMode::WorkOs).await
-    }
-    pub async fn with_auth_mode(origin: &str, auth_mode: AuthMode) -> Self {
-        Self::with_posthog(origin, auth_mode, None).await
+        Self::with_posthog(origin, AuthMode::WorkOs, None).await
     }
     pub async fn with_posthog(
         origin: &str,

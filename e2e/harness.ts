@@ -22,15 +22,9 @@ import type { MindMapNode } from "../webapp/src/mind-map";
 // stands in for another device. Updates flow both ways immediately.
 let local: ProjectDocument;
 let remote: ProjectDocument;
-const retired: ProjectDocument[] = [];
-const retiredRemotes: ProjectDocument[] = [];
 let localUpdates = 0;
 
 function link(doc: ProjectDocument) {
-  if (local) {
-    retired.push(local);
-    retiredRemotes.push(remote);
-  }
   local = doc;
   const replica = openProjectDocument(doc.id, [doc.snapshot()], ORIGIN.remote);
   remote = replica;
@@ -51,16 +45,10 @@ const nodes = (doc: ProjectDocument) => flatten(projectMindMap(doc.view()));
 const router = appRouter(() => createComponent(App, { onDocument: link }));
 
 const harness = {
-  // The app's address, such as "/?preferences=true&tab=colors".
-  address: () => router.state.location.href,
-  back: () => router.history.back(),
-  // Opens an address, as a link or a typed URL would.
-  go: (href: string) => router.navigate({ href }),
   projectId: () => local.id,
   content: () => local.view(),
   ids: () => nodes(remote).map((node) => node.id),
   text: (id: string) => nodes(remote).find((node) => node.id === id)?.text,
-  localText: (id: string) => nodes(local).find((node) => node.id === id)?.text,
   position: (id: string) =>
     nodes(remote).find((node) => node.id === id)?.position,
   deleted: (id: string) => !remote.view().nodes.some((node) => node.id === id),
@@ -76,22 +64,6 @@ const harness = {
   remove: (id: string) => deleteSubtree(remote, id),
   place: (id: string, x: number, y: number) =>
     translateSubtree(remote, id, new Map([[id, { x, y }]]), { x: 0, y: 0 }),
-  // Previous documents and their replicas stay linked after a project switch.
-  editRetired: (id: string, insert: string) =>
-    retiredRemotes
-      .filter((doc) => doc.view().nodes.some((node) => node.id === id))
-      .map((doc) => editNodeText(doc, id, 0, 0, insert)),
-  retiredObservers: () => retired.map((doc) => doc.observerCount),
-  // Read-only view of the local undo stack, for the UI fuzzer's history model.
-  history: () =>
-    local.ready
-      ? {
-          undo: local.native().undoCount(),
-          redo: local.native().redoCount(),
-          canUndo: local.native().canUndo(),
-          canRedo: local.native().canRedo(),
-        }
-      : { undo: 0, redo: 0, canUndo: false, canRedo: false },
 };
 export type Harness = typeof harness;
 

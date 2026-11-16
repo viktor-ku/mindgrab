@@ -1,7 +1,6 @@
 // Writes src/tailwind-palette.ts from the installed Tailwind's theme.css: each
 // shade's color, and whether white or black text reads best on it. Run with
-// `bun --bun run palette` after upgrading tailwindcss;
-// tests/node-colors.test.ts fails until the file matches again.
+// `bun --bun run palette` after upgrading tailwindcss.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
