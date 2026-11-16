@@ -863,13 +863,49 @@ describe("notes", () => {
     );
   });
 
+  test("another device's formatting keeps the caret where it was", async () => {
+    const root = await rootId();
+    await call("editNote", root, 0, 0, "Plan for the week");
+    await node(root).click();
+    await page.keyboard.press("Alt+n");
+    const notes = page.getByRole("textbox", { name: "Idea notes" });
+    await notes
+      .locator("p")
+      .first()
+      .click({ position: { x: 4, y: 4 } });
+    await caretIn("Plan for the week");
+    await page.keyboard.press("Home");
+    for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowRight");
+    // The editor reads the caret a moment after the keys.
+    await page.waitForFunction(
+      () =>
+        document.querySelector<
+          HTMLElement & { editor?: { state: { selection: { head: number } } } }
+        >('[aria-label="Idea notes"]')?.editor?.state.selection.head === 5,
+    );
+    // One change that bolds the whole line the writer is in.
+    await call("editNote", root, 0, 17, "**Plan for the week**");
+    await notes.locator("strong").waitFor();
+    await page.keyboard.type("!");
+    expect(await call("note", root)).toBe("**Plan! for the week**");
+  });
+
   test("notes written as plain text keep their lines", async () => {
     const root = await rootId();
+    const other = await addChild(root, "Other");
     await call("editNote", root, 0, 0, "first line\nsecond line\n\nnext 2*3");
     await node(root).click();
     await page.keyboard.press("Alt+n");
     const notes = page.getByRole("textbox", { name: "Idea notes" });
     expect(await notes.innerText()).toBe("first line\nsecond line\n\nnext 2*3");
+    // Read and left, the note keeps its text and adds no undo step.
+    const history = await call("history");
+    await node(other).click();
+    await node(root).click();
+    expect(await call("note", root)).toBe(
+      "first line\nsecond line\n\nnext 2*3",
+    );
+    expect((await call("history")).undo).toBe(history.undo);
     await notes
       .locator("p")
       .first()

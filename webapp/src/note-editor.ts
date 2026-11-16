@@ -100,10 +100,15 @@ export function bindNoteEditor(
   let applying = false;
   let patching = false;
   let composing = false;
+  // An edit made in the editor and not yet written to the note. Only edits
+  // are written: a note opened and left as it was keeps its stored text, even
+  // where the editor would write the same note differently.
+  let dirty = false;
   editor.commands.setContent(parseNote(editor, synced), { emitUpdate: false });
 
   // Replaces only the part of the editor's document that differs, so the
-  // selection maps through the change.
+  // selection maps through the change. When only formatting changed there,
+  // positions inside still point at the same text, so the selection stays.
   function show(markdown: string) {
     patching = true;
     try {
@@ -119,11 +124,19 @@ export function bindNoteEditor(
         a += overlap;
         b += overlap;
       }
-      editor.view.dispatch(
-        editor.state.tr
-          .replace(start, a, next.slice(start, b))
-          .setMeta("addToHistory", false),
-      );
+      const { selection } = editor.state;
+      const tr = editor.state.tr
+        .replace(start, a, next.slice(start, b))
+        .setMeta("addToHistory", false);
+      if (
+        a === b &&
+        selection.from >= start &&
+        selection.to <= a &&
+        current.textBetween(start, a, "\n", "\n") ===
+          next.textBetween(start, b, "\n", "\n")
+      )
+        tr.setSelection(selection.getBookmark().resolve(tr.doc));
+      editor.view.dispatch(tr);
     } catch {
       editor.commands.setContent(parseNote(editor, markdown), {
         emitUpdate: false,
@@ -143,7 +156,8 @@ export function bindNoteEditor(
   function commit() {
     // The doc under an open editor can be replaced (an adopted placeholder);
     // the owner rebinds, and a late event on the old doc has nowhere to go.
-    if (!doc.ready) return;
+    if (!doc.ready || !dirty) return;
+    dirty = false;
     const next = editor.getMarkdown();
     if (next === synced) return;
     const previous = synced ?? "";
@@ -164,7 +178,9 @@ export function bindNoteEditor(
     render();
   }
   const onUpdate = () => {
-    if (!patching && !composing && !editor.view.composing) commit();
+    if (patching) return;
+    dirty = true;
+    if (!composing && !editor.view.composing) commit();
   };
   const observe = () => {
     if (!applying && !composing) render();
@@ -192,7 +208,7 @@ export function bindNoteEditor(
   return () => {
     if (composing) compositionEnded();
     composing = false;
-    if (doc.ready && !editor.isDestroyed) commit();
+    if (!editor.isDestroyed) commit();
     doc.off("snapshot", observe);
     editor.off("update", onUpdate);
     dom.removeEventListener("compositionstart", onStart);
