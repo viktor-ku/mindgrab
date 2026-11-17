@@ -157,6 +157,20 @@ pub struct Position {
     pub y: f64,
 }
 
+/// How a map draws the lines from an idea to its children: `freeform` curves
+/// that each run straight to their child, or a tree whose lines share a spine
+/// beside the parent and turn into each child, with `rounded` or `square`
+/// corners. Maps that never chose one draw a rounded tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum LinkStyle {
+    Freeform,
+    #[default]
+    Rounded,
+    Square,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
@@ -201,6 +215,7 @@ pub struct ProjectView {
     pub name: String,
     pub saving: SavingPreferences,
     pub colors: ColorPreferences,
+    pub links: LinkStyle,
     pub roots: Vec<String>,
     pub nodes: Vec<Node>,
 }
@@ -309,6 +324,10 @@ pub enum Command {
     SetSaving {
         local: bool,
         cloud: bool,
+    },
+    /// Not an edit either: the map's connection style.
+    SetLinks {
+        style: LinkStyle,
     },
     Undo,
     Redo,

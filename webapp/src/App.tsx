@@ -24,11 +24,14 @@ import {
   Show,
   untrack,
 } from "solid-js";
-import type { ColorPreferences, ProjectDocument } from "./project-document";
+import type {
+  ColorPreferences,
+  LinkStyle,
+  ProjectDocument,
+} from "./project-document";
 import { EditHistory } from "./undo-history";
 import {
   branchIds,
-  connectionPath,
   dropTargetAt,
   findNode,
   layoutMindMap,
@@ -59,6 +62,7 @@ import {
   setSavingPreferences,
   reorderNode,
   setColorPreferences,
+  setLinkStyle,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
@@ -75,7 +79,8 @@ import type {
   RepositoryScope,
 } from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
-import { lineLook, nodeLook } from "./node-colors";
+import { MapLinks } from "./MapLinks";
+import { nodeLook } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
 import {
@@ -412,12 +417,12 @@ export function Node(props: {
       <Show when={props.collapsed}>
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          class={`absolute inset-0 translate-x-2 translate-y-2 map-node-stack border pointer-events-none ${look().class}`}
           style={look().style}
         />
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          class={`absolute inset-0 translate-x-1 translate-y-1 map-node-stack border pointer-events-none ${look().class}`}
           style={look().style}
         />
       </Show>
@@ -1506,6 +1511,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ],
       view().name(),
       view().colors(),
+      view().links(),
     );
   });
   // Set once the cloud lookup has said the account has no maps at all: the
@@ -3733,6 +3739,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     command((doc) => setColorPreferences(doc, value));
   }
 
+  // How the map draws lines to children: a preference, not undoable.
+  function setLinks(value: LinkStyle) {
+    command((doc) => setLinkStyle(doc, value));
+  }
+
   function colorSelectedNode(color: NodeColor) {
     const id = selectedId();
     if (!id || writing()) return;
@@ -4550,6 +4561,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         onSection={setPreferencesTab}
         colors={view().colors()}
         onColors={setColors}
+        links={view().links()}
+        onLinks={setLinks}
         saving={view().saving()}
         onChange={(value) => {
           if (!savingMutation.isPending) savingMutation.mutate(value);
@@ -5406,35 +5419,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
         }}
       >
-        <svg
-          class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
-          aria-hidden="true"
-        >
-          {/* Keyed by child id so a layout change updates path data in place
-              instead of recreating every connection. */}
-          <For each={nodeIds()}>
-            {(id) => (
-              <Show when={connections().get(id)}>
-                {(connection) => (
-                  <path
-                    d={connectionPath(connection())}
-                    fill="none"
-                    class={
-                      lineLook(
-                        shownColor(connection().to.id, connection().to.color),
-                      ).class
-                    }
-                    style={
-                      lineLook(
-                        shownColor(connection().to.id, connection().to.color),
-                      ).style
-                    }
-                  />
-                )}
-              </Show>
-            )}
-          </For>
-        </svg>
+        <MapLinks
+          ids={nodeIds()}
+          connection={(id) => connections().get(id)}
+          style={view().links()}
+          color={(connection) =>
+            shownColor(connection.to.id, connection.to.color)
+          }
+        />
         <For each={nodeIds()}>
           {(id) => {
             const node = () => positionedNodes().get(id)!;

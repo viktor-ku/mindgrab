@@ -1,3 +1,4 @@
+import type { LinkStyle } from "./generated/mindgrab-state/model";
 import type { NodeColor } from "./node-colors";
 
 export interface MindMapNode {
@@ -45,7 +46,7 @@ interface PositionedNode extends NodeSize {
   y: number;
 }
 
-interface Connection {
+export interface Connection {
   from: PositionedNode;
   to: PositionedNode;
 }
@@ -247,19 +248,143 @@ export function navigationTarget(
   return search(nodes).target;
 }
 
-export function connectionPath({ from, to }: Connection) {
-  // Children laid out to the right connect side to side with a smooth S-curve,
-  // so every branch leaves its parent at the same point.
+// How a map draws the lines to children; see `LinkStyle` in the document.
+export type { LinkStyle };
+export const DEFAULT_LINK_STYLE: LinkStyle = "rounded";
+
+// The tree's spine runs this far out from the parent, and its rounded turns
+// take this radius at most. Freeform curves run straight to each child.
+const SPINE_OFFSET = 24;
+const TURN_RADIUS = 8;
+
+type Point = [x: number, y: number];
+const at = ([x, y]: Point) => `${x} ${y}`;
+
+// A tree line's two parts: the trunk and spine it shares with its siblings,
+// and its own arm from the spine into the child.
+export interface ConnectionParts {
+  shared?: string;
+  arm: string;
+}
+
+// Straight legs through four points, both turns rounded by up to `radius`.
+// A turn takes at most its whole outer leg and half of the middle one, which
+// it shares with the other turn. The arm starts where the second turn does.
+function turningParts(points: Point[], radius: number): ConnectionParts {
+  const length = (a: Point, b: Point) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const toward = (a: Point, b: Point, distance: number): Point => {
+    const total = length(a, b) || 1;
+    return [
+      a[0] + ((b[0] - a[0]) * distance) / total,
+      a[1] + ((b[1] - a[1]) * distance) / total,
+    ];
+  };
+  const turns = [1, 2].map((index) => {
+    const [before, corner, after] = points.slice(index - 1, index + 2);
+    const turn = Math.min(
+      radius,
+      length(before, corner) / (index === 1 ? 1 : 2),
+      length(corner, after) / (index === 2 ? 1 : 2),
+    );
+    if (turn < 1) return { start: corner, curve: "" };
+    return {
+      start: toward(corner, before, turn),
+      curve: `Q ${at(corner)}, ${at(toward(corner, after, turn))}`,
+    };
+  });
+  const [first, second] = turns;
+  const path = (...parts: string[]) => parts.filter(Boolean).join(" ");
+  return {
+    shared: path(
+      `M ${at(points[0])}`,
+      `L ${at(first.start)}`,
+      first.curve,
+      `L ${at(second.start)}`,
+    ),
+    arm: path(`M ${at(second.start)}`, second.curve, `L ${at(points[3])}`),
+  };
+}
+
+// A tree's line: out of the parent along `axis` to a spine, along the spine
+// level with the child, and into it. Siblings on the same side share the
+// spine, so where their lines part is clear however many there are.
+function treeParts(
+  [startX, startY]: Point,
+  [endX, endY]: Point,
+  axis: "x" | "y",
+  style: LinkStyle,
+) {
+  const radius = style === "rounded" ? TURN_RADIUS : 0;
+  if (axis === "x") {
+    const spine =
+      startX +
+      Math.sign(endX - startX) *
+        Math.min(SPINE_OFFSET, Math.abs(endX - startX) / 2);
+    return turningParts(
+      [
+        [startX, startY],
+        [spine, startY],
+        [spine, endY],
+        [endX, endY],
+      ],
+      radius,
+    );
+  }
+  const spine =
+    startY +
+    Math.sign(endY - startY) *
+      Math.min(SPINE_OFFSET, Math.abs(endY - startY) / 2);
+  return turningParts(
+    [
+      [startX, startY],
+      [startX, spine],
+      [endX, spine],
+      [endX, endY],
+    ],
+    radius,
+  );
+}
+
+// The line from an idea to a child, in the map's style. A tree line comes in
+// two parts, so the map can draw the shared trunk and spine neutral and only
+// each child's arm in its color; a freeform curve is all arm.
+export function connectionParts(
+  { from, to }: Connection,
+  style: LinkStyle = DEFAULT_LINK_STYLE,
+): ConnectionParts {
+  const fromMiddle = from.y + from.height / 2;
+  const toMiddle = to.y + to.height / 2;
+  // Children laid out to the right connect side to side, so every branch
+  // leaves its parent at the same point.
   if (to.x >= from.x + from.width) {
     const startX = from.x + from.width;
-    const startY = from.y + from.height / 2;
-    const endX = to.x;
-    const endY = to.y + to.height / 2;
-    const middle = (startX + endX) / 2;
-    return `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`;
+    if (style !== "freeform")
+      return treeParts([startX, fromMiddle], [to.x, toMiddle], "x", style);
+    const middle = (startX + to.x) / 2;
+    return {
+      arm: `M ${startX} ${fromMiddle} C ${middle} ${fromMiddle}, ${middle} ${toMiddle}, ${to.x} ${toMiddle}`,
+    };
+  }
+  // A child placed by hand to the left runs side to side the other way; one
+  // above or below runs between their facing top and bottom edges.
+  if (style !== "freeform") {
+    if (to.x + to.width <= from.x)
+      return treeParts(
+        [from.x, fromMiddle],
+        [to.x + to.width, toMiddle],
+        "x",
+        style,
+      );
+    const below = toMiddle >= fromMiddle;
+    return treeParts(
+      [from.x + from.width / 2, below ? from.y + from.height : from.y],
+      [to.x + to.width / 2, below ? to.y : to.y + to.height],
+      "y",
+      style,
+    );
   }
   const dx = to.x + to.width / 2 - (from.x + from.width / 2);
-  const dy = to.y + to.height / 2 - (from.y + from.height / 2);
+  const dy = toMiddle - fromMiddle;
   // Attach to the facing borders, even when a child is above or left of its parent.
   const fromScale =
     Math.max(
@@ -270,14 +395,25 @@ export function connectionPath({ from, to }: Connection) {
     Math.max(Math.abs(dx) / (to.width / 2), Math.abs(dy) / (to.height / 2)) ||
     1;
   const startX = from.x + from.width / 2 + dx / fromScale;
-  const startY = from.y + from.height / 2 + dy / fromScale;
+  const startY = fromMiddle + dy / fromScale;
   const endX = to.x + to.width / 2 - dx / toScale;
-  const endY = to.y + to.height / 2 - dy / toScale;
+  const endY = toMiddle - dy / toScale;
   const length = Math.hypot(dx, dy) || 1;
   const bend = Math.min(32, Math.hypot(endX - startX, endY - startY) * 0.15);
   const controlX = (startX + endX) / 2 - (dy / length) * bend;
   const controlY = (startY + endY) / 2 + (dx / length) * bend;
-  return `M ${startX} ${startY} Q ${controlX} ${controlY}, ${endX} ${endY}`;
+  return {
+    arm: `M ${startX} ${startY} Q ${controlX} ${controlY}, ${endX} ${endY}`,
+  };
+}
+
+// The whole line as one path.
+export function connectionPath(
+  connection: Connection,
+  style: LinkStyle = DEFAULT_LINK_STYLE,
+) {
+  const { shared, arm } = connectionParts(connection, style);
+  return shared ? `${shared} ${arm.replace(/^M [^ ]+ [^ ]+ /, "")}` : arm;
 }
 
 // Folding is a local view of the tree; the document retains every descendant.

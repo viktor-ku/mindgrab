@@ -1,6 +1,6 @@
 use mindgrab_state::{
     COLOR_FAMILIES, COLOR_SHADES, ColorPreferences, Command, CommandResult, DEFAULT_QUICK_COLORS,
-    NAMED_COLORS, Node, Position, ProjectView, SavingPreferences,
+    LinkStyle, NAMED_COLORS, Node, Position, ProjectView, SavingPreferences,
 };
 use ts_rs::{Config, TS};
 
@@ -42,6 +42,7 @@ fn main() {
         Position::decl(&config),
         SavingPreferences::decl(&config),
         ColorPreferences::decl(&config),
+        LinkStyle::decl(&config),
         Node::decl(&config),
         ProjectView::decl(&config),
         Command::decl(&config),
