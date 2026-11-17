@@ -252,62 +252,124 @@ export function navigationTarget(
 export type { LinkStyle };
 export const DEFAULT_LINK_STYLE: LinkStyle = "rounded";
 
-// The tree's spine runs down the gap this far out from the parent, and its
-// rounded turns take this radius at most.
+// The tree's spine runs this far out from the parent, and its rounded turns
+// take this radius at most. Freeform curves run straight to each child.
 const SPINE_OFFSET = 24;
 const TURN_RADIUS = 8;
 
-// A line to a child on the right. A tree's lines leave the parent together,
-// run down a shared spine and turn into each child, so where they part is
-// clear however many children there are. Freeform curves run straight to
-// each child.
-function rightwardPath(
-  startX: number,
-  startY: number,
-  endX: number,
-  endY: number,
+type Point = [x: number, y: number];
+
+// Straight legs through `points`, each turn rounded by up to `radius`. A turn
+// takes at most a whole outer leg and half of the middle one, which it shares
+// with the other turn.
+function turningPath(points: Point[], radius: number) {
+  const length = (a: Point, b: Point) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const toward = (a: Point, b: Point, distance: number): Point => {
+    const total = length(a, b) || 1;
+    return [
+      a[0] + ((b[0] - a[0]) * distance) / total,
+      a[1] + ((b[1] - a[1]) * distance) / total,
+    ];
+  };
+  const last = points.length - 1;
+  const parts = [`M ${points[0][0]} ${points[0][1]}`];
+  for (let index = 1; index < last; index++) {
+    const [before, corner, after] = points.slice(index - 1, index + 2);
+    const turn = Math.min(
+      radius,
+      length(before, corner) / (index === 1 ? 1 : 2),
+      length(corner, after) / (index + 1 === last ? 1 : 2),
+    );
+    if (turn < 1) {
+      parts.push(`L ${corner[0]} ${corner[1]}`);
+      continue;
+    }
+    const [inX, inY] = toward(corner, before, turn);
+    const [outX, outY] = toward(corner, after, turn);
+    parts.push(
+      `L ${inX} ${inY}`,
+      `Q ${corner[0]} ${corner[1]}, ${outX} ${outY}`,
+    );
+  }
+  parts.push(`L ${points[last][0]} ${points[last][1]}`);
+  return parts.join(" ");
+}
+
+// A tree's line: out of the parent along `axis` to a spine, along the spine
+// level with the child, and into it. Siblings on the same side share the
+// spine, so where their lines part is clear however many there are.
+function treePath(
+  [startX, startY]: Point,
+  [endX, endY]: Point,
+  axis: "x" | "y",
   style: LinkStyle,
 ) {
-  if (style === "freeform") {
-    const middle = (startX + endX) / 2;
-    return `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`;
+  const radius = style === "rounded" ? TURN_RADIUS : 0;
+  if (axis === "x") {
+    const spine =
+      startX +
+      Math.sign(endX - startX) *
+        Math.min(SPINE_OFFSET, Math.abs(endX - startX) / 2);
+    return turningPath(
+      [
+        [startX, startY],
+        [spine, startY],
+        [spine, endY],
+        [endX, endY],
+      ],
+      radius,
+    );
   }
-  const spine = startX + Math.min(SPINE_OFFSET, (endX - startX) / 2);
-  const dy = endY - startY;
-  const radius =
-    style === "rounded"
-      ? Math.min(TURN_RADIUS, Math.abs(dy) / 2, spine - startX)
-      : 0;
-  if (radius < 1)
-    return `M ${startX} ${startY} H ${spine} V ${endY} L ${endX} ${endY}`;
-  const sign = Math.sign(dy);
-  return [
-    `M ${startX} ${startY}`,
-    `H ${spine - radius}`,
-    `Q ${spine} ${startY}, ${spine} ${startY + sign * radius}`,
-    `V ${endY - sign * radius}`,
-    `Q ${spine} ${endY}, ${spine + radius} ${endY}`,
-    `L ${endX} ${endY}`,
-  ].join(" ");
+  const spine =
+    startY +
+    Math.sign(endY - startY) *
+      Math.min(SPINE_OFFSET, Math.abs(endY - startY) / 2);
+  return turningPath(
+    [
+      [startX, startY],
+      [startX, spine],
+      [endX, spine],
+      [endX, endY],
+    ],
+    radius,
+  );
 }
 
 export function connectionPath(
   { from, to }: Connection,
   style: LinkStyle = DEFAULT_LINK_STYLE,
 ) {
+  const fromMiddle = from.y + from.height / 2;
+  const toMiddle = to.y + to.height / 2;
   // Children laid out to the right connect side to side, so every branch
   // leaves its parent at the same point.
   if (to.x >= from.x + from.width) {
-    return rightwardPath(
-      from.x + from.width,
-      from.y + from.height / 2,
-      to.x,
-      to.y + to.height / 2,
+    const startX = from.x + from.width;
+    if (style !== "freeform")
+      return treePath([startX, fromMiddle], [to.x, toMiddle], "x", style);
+    const middle = (startX + to.x) / 2;
+    return `M ${startX} ${fromMiddle} C ${middle} ${fromMiddle}, ${middle} ${toMiddle}, ${to.x} ${toMiddle}`;
+  }
+  // A child placed by hand to the left runs side to side the other way; one
+  // above or below runs between their facing top and bottom edges.
+  if (style !== "freeform") {
+    if (to.x + to.width <= from.x)
+      return treePath(
+        [from.x, fromMiddle],
+        [to.x + to.width, toMiddle],
+        "x",
+        style,
+      );
+    const below = toMiddle >= fromMiddle;
+    return treePath(
+      [from.x + from.width / 2, below ? from.y + from.height : from.y],
+      [to.x + to.width / 2, below ? to.y : to.y + to.height],
+      "y",
       style,
     );
   }
   const dx = to.x + to.width / 2 - (from.x + from.width / 2);
-  const dy = to.y + to.height / 2 - (from.y + from.height / 2);
+  const dy = toMiddle - fromMiddle;
   // Attach to the facing borders, even when a child is above or left of its parent.
   const fromScale =
     Math.max(
@@ -318,9 +380,9 @@ export function connectionPath(
     Math.max(Math.abs(dx) / (to.width / 2), Math.abs(dy) / (to.height / 2)) ||
     1;
   const startX = from.x + from.width / 2 + dx / fromScale;
-  const startY = from.y + from.height / 2 + dy / fromScale;
+  const startY = fromMiddle + dy / fromScale;
   const endX = to.x + to.width / 2 - dx / toScale;
-  const endY = to.y + to.height / 2 - dy / toScale;
+  const endY = toMiddle - dy / toScale;
   const length = Math.hypot(dx, dy) || 1;
   const bend = Math.min(32, Math.hypot(endX - startX, endY - startY) * 0.15);
   const controlX = (startX + endX) / 2 - (dy / length) * bend;

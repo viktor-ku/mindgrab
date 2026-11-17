@@ -83,3 +83,48 @@ test("root siblings, empty maps, and removed anchors have valid layouts", () => 
     layoutMindMap(original, new Map(), { id: "missing", centerY: 100 }),
   ).toEqual(before);
 });
+
+test("children placed by hand keep the map's connection style", () => {
+  const box = (id: string, x: number, y: number) => ({
+    id,
+    text: id,
+    x,
+    y,
+    width: 80,
+    height: 40,
+  });
+  const parent = box("parent", 0, 0);
+  const placed = [
+    box("left", -200, 90),
+    box("above", 20, -160),
+    box("below", -30, 140),
+  ];
+  const onBorder = (node: typeof parent, x: number, y: number) =>
+    Math.max(
+      Math.abs(x - node.x - node.width / 2) / (node.width / 2),
+      Math.abs(y - node.y - node.height / 2) / (node.height / 2),
+    );
+  for (const to of placed) {
+    const square = connectionPath({ from: parent, to }, "square");
+    // Square turns are corners: only straight legs, each along one axis.
+    expect(square).toMatch(/^M [-\d.]+ [-\d.]+( L [-\d.]+ [-\d.]+)+$/);
+    const points = [...square.matchAll(/(-?[\d.]+) (-?[\d.]+)/g)].map(
+      ([, x, y]) => [Number(x), Number(y)],
+    );
+    for (let index = 1; index < points.length; index++)
+      expect(
+        points[index][0] === points[index - 1][0] ||
+          points[index][1] === points[index - 1][1],
+      ).toBe(true);
+    expect(connectionPath({ from: parent, to }, "rounded")).toContain("Q");
+    for (const style of ["freeform", "rounded", "square"] as const) {
+      const values = connectionPath({ from: parent, to }, style)
+        .match(/-?\d+(?:\.\d+)?/g)!
+        .map(Number);
+      expect(onBorder(parent, values[0], values[1])).toBeCloseTo(1);
+      expect(
+        onBorder(to, values[values.length - 2], values.at(-1) ?? 0),
+      ).toBeCloseTo(1);
+    }
+  }
+});
