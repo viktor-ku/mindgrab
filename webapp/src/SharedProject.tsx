@@ -24,14 +24,13 @@ import {
 } from "./icons";
 import { decodeBase64 } from "./loro-api";
 import {
-  connectionPath,
   layoutMindMap,
   NODE_MIN_HEIGHT,
   nodeDetails,
   visibleMindMap,
 } from "./mind-map";
 import type { NodeSize } from "./mind-map";
-import { lineLook } from "./node-colors";
+import { MapLinks } from "./MapLinks";
 import { NoteHeading, NoteView } from "./NotesPanel";
 import { Outline } from "./Outline";
 import { createPresence } from "./presence";
@@ -565,25 +564,12 @@ export function SharedProject(props: { token: string }) {
             transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
           }}
         >
-          <svg
-            class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
-            aria-hidden="true"
-          >
-            <For each={nodeIds()}>
-              {(id) => (
-                <Show when={connections().get(id)}>
-                  {(connection) => (
-                    <path
-                      d={connectionPath(connection(), view()?.links())}
-                      fill="none"
-                      class={lineLook(connection().to.color).class}
-                      style={lineLook(connection().to.color).style}
-                    />
-                  )}
-                </Show>
-              )}
-            </For>
-          </svg>
+          <MapLinks
+            ids={nodeIds()}
+            connection={(id) => connections().get(id)}
+            style={view()?.links()}
+            color={(connection) => connection.to.color}
+          />
           <For each={nodeIds()}>
             {(id) => {
               const node = () => positioned().get(id)!;

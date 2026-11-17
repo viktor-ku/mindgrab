@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { MindMapNode } from "../src/mind-map";
-import { connectionPath, layoutMindMap } from "../src/mind-map";
+import {
+  connectionParts,
+  connectionPath,
+  layoutMindMap,
+} from "../src/mind-map";
 
 const tree = (): MindMapNode[] => [
   {
@@ -127,4 +131,34 @@ test("children placed by hand keep the map's connection style", () => {
       ).toBeCloseTo(1);
     }
   }
+});
+
+test("a tree's arm starts on the spine and alone carries the child's color", () => {
+  const box = (id: string, x: number, y: number) => ({
+    id,
+    text: id,
+    x,
+    y,
+    width: 80,
+    height: 40,
+  });
+  const parent = box("parent", 0, 0);
+  const child = box("child", 144, 120);
+  for (const style of ["rounded", "square"] as const) {
+    const { shared, arm } = connectionParts({ from: parent, to: child }, style);
+    // The shared part ends where the arm starts, on the spine beside the parent.
+    const end = shared!
+      .match(/(-?[\d.]+) (-?[\d.]+)$/)!
+      .slice(1)
+      .map(Number);
+    const start = arm
+      .match(/^M (-?[\d.]+) (-?[\d.]+)/)!
+      .slice(1)
+      .map(Number);
+    expect(start).toEqual(end);
+    expect(start[0]).toBe(80 + 24);
+  }
+  expect(
+    connectionParts({ from: parent, to: child }, "freeform").shared,
+  ).toBeUndefined();
 });

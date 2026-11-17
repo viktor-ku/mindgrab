@@ -1562,7 +1562,8 @@ kbd {
 }
 /* Selected: a thin ink frame hugging the sticker's edge, square-cornered
    like the sticker (a box-shadow ring would round its corners by its
-   spread). */
+   spread). A light line just inside it keeps the frame visible on dark
+   stickers; on light ones it disappears into the paper. */
 .map-node[data-selected="true"]::after,
 .map-node:has(> .map-node-hinted)::after {
   content: "";
@@ -1570,6 +1571,7 @@ kbd {
   inset: -1.5px;
   border: 1.5px solid var(--ink);
   border-radius: 2px;
+  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 0.85);
   pointer-events: none;
 }
 /* A framed sticker lies flat: no shadow beside the frame. */

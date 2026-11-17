@@ -32,7 +32,6 @@ import type {
 import { EditHistory } from "./undo-history";
 import {
   branchIds,
-  connectionPath,
   dropTargetAt,
   findNode,
   layoutMindMap,
@@ -80,7 +79,8 @@ import type {
   RepositoryScope,
 } from "./project-repository";
 import type { ViewportPreference } from "./project-import-export";
-import { lineLook, nodeLook } from "./node-colors";
+import { MapLinks } from "./MapLinks";
+import { nodeLook } from "./node-colors";
 import type { NodeColor } from "./node-colors";
 import { generateProjectName } from "./project-names";
 import {
@@ -5419,35 +5419,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           transform: `translate(${left()}px, ${top()}px) scale(${zoom()}) translate(${-(layout().nodes[0]?.width ?? 0) / 2}px, ${-NODE_MIN_HEIGHT / 2}px)`,
         }}
       >
-        <svg
-          class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
-          aria-hidden="true"
-        >
-          {/* Keyed by child id so a layout change updates path data in place
-              instead of recreating every connection. */}
-          <For each={nodeIds()}>
-            {(id) => (
-              <Show when={connections().get(id)}>
-                {(connection) => (
-                  <path
-                    d={connectionPath(connection(), view().links())}
-                    fill="none"
-                    class={
-                      lineLook(
-                        shownColor(connection().to.id, connection().to.color),
-                      ).class
-                    }
-                    style={
-                      lineLook(
-                        shownColor(connection().to.id, connection().to.color),
-                      ).style
-                    }
-                  />
-                )}
-              </Show>
-            )}
-          </For>
-        </svg>
+        <MapLinks
+          ids={nodeIds()}
+          connection={(id) => connections().get(id)}
+          style={view().links()}
+          color={(connection) =>
+            shownColor(connection.to.id, connection.to.color)
+          }
+        />
         <For each={nodeIds()}>
           {(id) => {
             const node = () => positionedNodes().get(id)!;
