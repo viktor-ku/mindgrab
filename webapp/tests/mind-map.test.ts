@@ -38,18 +38,20 @@ test("child insertion and measured sizes preserve the parent's center and connec
   for (const connection of after.connections) {
     expect(connection.from).toBe(nodeAt(after, connection.from.id));
     expect(connection.to).toBe(nodeAt(after, connection.to.id));
-    const values = connectionPath(connection)
-      .match(/-?\d+(?:\.\d+)?/g)!
-      .map(Number);
     const onBorder = (node: typeof connection.from, x: number, y: number) =>
       Math.max(
         Math.abs(x - node.x - node.width / 2) / (node.width / 2),
         Math.abs(y - node.y - node.height / 2) / (node.height / 2),
       );
-    expect(onBorder(connection.from, values[0], values[1])).toBeCloseTo(1);
-    expect(
-      onBorder(connection.to, values[values.length - 2], values.at(-1) ?? 0),
-    ).toBeCloseTo(1);
+    for (const style of ["freeform", "rounded", "square"] as const) {
+      const values = connectionPath(connection, style)
+        .match(/-?\d+(?:\.\d+)?/g)!
+        .map(Number);
+      expect(onBorder(connection.from, values[0], values[1])).toBeCloseTo(1);
+      expect(
+        onBorder(connection.to, values[values.length - 2], values.at(-1) ?? 0),
+      ).toBeCloseTo(1);
+    }
   }
 });
 

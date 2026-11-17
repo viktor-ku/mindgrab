@@ -481,6 +481,14 @@ impl Project {
                     meta.insert("saving", next)?;
                 }
             }
+            Command::SetLinks { style } => {
+                origin = "preferences";
+                let meta = self.doc.get_map("project");
+                let json = serde_json::to_value(style)?;
+                if meta.get_deep_value().to_json_value()["links"] != json {
+                    meta.insert("links", loro::LoroValue::from(json))?;
+                }
+            }
             Command::Undo => {
                 self.undo.undo()?;
                 self.remove_blank_nodes()?;
@@ -526,10 +534,11 @@ impl Project {
             .as_object()
             .ok_or_else(|| StateError::Invalid("Expected metadata".into()))?;
         let required = ["format", "schemaVersion", "name", "saving"];
+        const OPTIONAL: [&str; 2] = ["colors", "links"];
         if required.iter().any(|key| !fields.contains_key(*key))
             || fields
                 .keys()
-                .any(|key| !required.contains(&key.as_str()) && key != "colors")
+                .any(|key| !required.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()))
         {
             return invalid("Unexpected project metadata");
         }
@@ -548,6 +557,10 @@ impl Project {
                 colors
             }
             None => ColorPreferences::default(),
+        };
+        let links: LinkStyle = match fields.get("links") {
+            Some(value) => serde_json::from_value(value.clone())?,
+            None => LinkStyle::default(),
         };
         let tree = self.tree();
         if live_nodes(&tree).len() > MAX_NODES {
@@ -627,6 +640,7 @@ impl Project {
             name: name.into(),
             saving,
             colors,
+            links,
             roots,
             nodes,
         })

@@ -56,7 +56,14 @@ fn commands_own_order_colors_positions_and_preferences() {
             cloud: true,
         })
         .unwrap();
+    assert_eq!(project.view().unwrap().links, LinkStyle::Rounded);
+    project
+        .apply(Command::SetLinks {
+            style: LinkStyle::Square,
+        })
+        .unwrap();
     let view = project.view().unwrap();
+    assert_eq!(view.links, LinkStyle::Square);
     assert_eq!(view.nodes[0].children, [second, first.clone()]);
     assert_eq!(view.nodes[2].color, Color::TEAL);
     assert_eq!(view.nodes[2].depth, 1);

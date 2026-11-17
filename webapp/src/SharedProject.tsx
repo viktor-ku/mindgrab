@@ -574,7 +574,7 @@ export function SharedProject(props: { token: string }) {
                 <Show when={connections().get(id)}>
                   {(connection) => (
                     <path
-                      d={connectionPath(connection())}
+                      d={connectionPath(connection(), view()?.links())}
                       fill="none"
                       class={lineLook(connection().to.color).class}
                       style={lineLook(connection().to.color).style}

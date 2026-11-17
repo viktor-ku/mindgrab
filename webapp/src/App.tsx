@@ -24,7 +24,11 @@ import {
   Show,
   untrack,
 } from "solid-js";
-import type { ColorPreferences, ProjectDocument } from "./project-document";
+import type {
+  ColorPreferences,
+  LinkStyle,
+  ProjectDocument,
+} from "./project-document";
 import { EditHistory } from "./undo-history";
 import {
   branchIds,
@@ -59,6 +63,7 @@ import {
   setSavingPreferences,
   reorderNode,
   setColorPreferences,
+  setLinkStyle,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
@@ -412,12 +417,12 @@ export function Node(props: {
       <Show when={props.collapsed}>
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-2 translate-y-2 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          class={`absolute inset-0 translate-x-2 translate-y-2 map-node-stack border pointer-events-none ${look().class}`}
           style={look().style}
         />
         <span
           aria-hidden="true"
-          class={`absolute inset-0 translate-x-1 translate-y-1 rounded-[0.625rem] border pointer-events-none ${look().class}`}
+          class={`absolute inset-0 translate-x-1 translate-y-1 map-node-stack border pointer-events-none ${look().class}`}
           style={look().style}
         />
       </Show>
@@ -1506,6 +1511,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ],
       view().name(),
       view().colors(),
+      view().links(),
     );
   });
   // Set once the cloud lookup has said the account has no maps at all: the
@@ -3733,6 +3739,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     command((doc) => setColorPreferences(doc, value));
   }
 
+  // How the map draws lines to children: a preference, not undoable.
+  function setLinks(value: LinkStyle) {
+    command((doc) => setLinkStyle(doc, value));
+  }
+
   function colorSelectedNode(color: NodeColor) {
     const id = selectedId();
     if (!id || writing()) return;
@@ -4550,6 +4561,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         onSection={setPreferencesTab}
         colors={view().colors()}
         onColors={setColors}
+        links={view().links()}
+        onLinks={setLinks}
         saving={view().saving()}
         onChange={(value) => {
           if (!savingMutation.isPending) savingMutation.mutate(value);
@@ -5417,7 +5430,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <Show when={connections().get(id)}>
                 {(connection) => (
                   <path
-                    d={connectionPath(connection())}
+                    d={connectionPath(connection(), view().links())}
                     fill="none"
                     class={
                       lineLook(

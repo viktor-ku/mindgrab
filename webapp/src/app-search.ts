@@ -5,6 +5,7 @@ import { z } from "zod";
 export const PREFERENCE_TABS = [
   "saving",
   "colors",
+  "connections",
   "backup",
   "privacy",
 ] as const;

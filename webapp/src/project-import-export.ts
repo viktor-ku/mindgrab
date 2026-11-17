@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_LINK_STYLE } from "./mind-map";
 import {
   DEFAULT_COLOR_PREFERENCES,
   LIMITS,
@@ -14,9 +15,9 @@ import type { NodeColor } from "./node-colors";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
 // 5 added Tailwind shade colors and the map's color choices, 6 the space kept
-// where ideas were deleted; earlier apps cannot read them, so they report the
-// version instead of damage.
-export const PROJECT_FILE_VERSION = 6;
+// where ideas were deleted, 7 the map's connection style; earlier apps cannot
+// read them, so they report the version instead of damage.
+export const PROJECT_FILE_VERSION = 7;
 export const PROJECT_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROJECT_FILE_MAX_DEPTH = 100;
 
@@ -48,6 +49,7 @@ export interface ProjectFile {
   preferences?: {
     saving?: import("./project-document").SavingPreferences;
     colors?: import("./project-document").ColorPreferences;
+    links?: import("./project-document").LinkStyle;
     viewport?: { left: number; top: number; zoom: number };
     anchor?: { id: string; centerY: number };
   };
@@ -85,6 +87,7 @@ const ColorsSchema = z.strictObject({
     ),
   newIdeas: PickableColor,
 });
+const LinksSchema = z.enum(["freeform", "rounded", "square"]);
 const AnchorSchema = z.strictObject({
   id: z.string().min(1),
   centerY: z.number().finite(),
@@ -141,6 +144,7 @@ const PortableProjectSchema = z
       .strictObject({
         saving: SavingPreferencesSchema.optional(),
         colors: ColorsSchema.optional(),
+        links: LinksSchema.optional(),
         viewport: ViewportSchema.optional(),
         anchor: AnchorSchema.optional(),
       })
@@ -206,6 +210,7 @@ export function projectFileFromContent(
   const localPreferences = {
     saving: content.saving,
     colors: content.colors,
+    links: content.links,
     ...preferences,
     // A deleted layout anchor is only a stale local preference.
     anchor:
@@ -255,7 +260,7 @@ export function parseProjectFile(json: string): ProjectFile {
   const header = value as { format?: unknown; version?: unknown };
   if (header.format !== PROJECT_FILE_FORMAT)
     throw new ProjectFileError("File is not a Mindgrab project.");
-  if (![3, 4, 5, PROJECT_FILE_VERSION].includes(header.version as number))
+  if (![3, 4, 5, 6, PROJECT_FILE_VERSION].includes(header.version as number))
     throw new ProjectFileError(
       `Unsupported Mindgrab project version: ${String(header.version)}.`,
     );
@@ -303,6 +308,7 @@ export function prepareProjectImport(input: ProjectFile) {
     name: file.project.name,
     saving: file.preferences?.saving ?? { ...DEFAULT_SAVING_PREFERENCES },
     colors: file.preferences?.colors ?? DEFAULT_COLOR_PREFERENCES,
+    links: file.preferences?.links ?? DEFAULT_LINK_STYLE,
     roots: file.project.nodes.map((node) => ids.get(node.id)!),
     nodes,
   };

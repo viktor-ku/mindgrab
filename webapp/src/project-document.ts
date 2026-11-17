@@ -6,9 +6,11 @@ import type {
   ColorPreferences,
   Command,
   CommandResult,
+  LinkStyle,
   ProjectView as RustView,
   SavingPreferences,
 } from "./generated/mindgrab-state/model";
+import { DEFAULT_LINK_STYLE } from "./mind-map";
 import type { MindMapNode, NodePosition } from "./mind-map";
 import type { NodeColor } from "./node-colors";
 import { isGeneratedProjectName } from "./project-names";
@@ -234,7 +236,7 @@ export function projectName(doc: ProjectDocument) {
 export function savingPreferences(doc: ProjectDocument): SavingPreferences {
   return doc.ready ? doc.view().saving : { ...DEFAULT_SAVING_PREFERENCES };
 }
-export type { ColorPreferences };
+export type { ColorPreferences, LinkStyle };
 export const DEFAULT_COLOR_PREFERENCES: ColorPreferences = {
   quick: [...DEFAULT_QUICK_COLORS],
   newIdeas: "slate",
@@ -255,6 +257,13 @@ export function setColorPreferences(
   value: ColorPreferences,
 ) {
   return doc.dispatch({ type: "setColors", ...value }).changed;
+}
+// How the map draws lines to children: a preference, so not undoable.
+export function linkStyle(doc: ProjectDocument): LinkStyle {
+  return doc.ready ? doc.view().links : DEFAULT_LINK_STYLE;
+}
+export function setLinkStyle(doc: ProjectDocument, style: LinkStyle) {
+  return doc.dispatch({ type: "setLinks", style }).changed;
 }
 export function setSavingPreferences(
   doc: ProjectDocument,
@@ -290,14 +299,16 @@ export function projectForest(content: DocumentView): ForestNode[] {
 }
 // The untouched seed every new map starts from: one "New idea" root with no
 // content and a generated name. A rename is work, so it counts as an edit,
-// and so does choosing the map's colors.
+// and so does choosing the map's colors or connection style.
 export function isPristineSeed(
   forest: ForestNode[],
   name: string,
   colors: ColorPreferences = DEFAULT_COLOR_PREFERENCES,
+  links: LinkStyle = DEFAULT_LINK_STYLE,
 ) {
   if (forest.length !== 1 || !isGeneratedProjectName(name)) return false;
   if (!sameColorPreferences(colors, DEFAULT_COLOR_PREFERENCES)) return false;
+  if (links !== DEFAULT_LINK_STYLE) return false;
   const [root] = forest;
   return (
     root.text === "New idea" &&
@@ -469,6 +480,7 @@ export function importProjectDocument(id: string, view: DocumentView) {
     setSavingPreferences(doc, view.saving);
     if (!sameColorPreferences(view.colors, DEFAULT_COLOR_PREFERENCES))
       setColorPreferences(doc, view.colors);
+    if (view.links !== DEFAULT_LINK_STYLE) setLinkStyle(doc, view.links);
     doc.importedIds = ids;
     doc.clearHistory();
     return doc;

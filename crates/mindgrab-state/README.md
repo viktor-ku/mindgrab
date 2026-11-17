@@ -49,6 +49,11 @@ white (`slate`) or shades, each once; maps without them use
 `ColorPreferences::default()` (`DEFAULT_QUICK_COLORS`, white for new ideas). Like
 saving preferences, they are excluded from undo.
 
+`SetLinks { style }` stores how the map draws the lines to children:
+`freeform` curves, or a tree with `rounded` or `square` corners. Maps without
+it draw a rounded tree. It is a preference too, excluded from undo. Clients
+older than it reject maps that set it.
+
 Deleting an idea never moves another one. `DeleteNode { id, gap }` takes the
 layout space the branch took (the client measures it) and keeps it empty with
 the idea's own gap: as `gap` (space above) on the next sibling, else as

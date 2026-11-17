@@ -4,8 +4,13 @@ import type { PreferenceTab } from "./app-search";
 import { ColorSettings } from "./ColorSettings";
 import { Dialog } from "./Dialog";
 import { LockIcon } from "./icons";
+import { connectionPath } from "./mind-map";
 import { press } from "./press";
-import type { ColorPreferences, SavingPreferences } from "./project-document";
+import type {
+  ColorPreferences,
+  LinkStyle,
+  SavingPreferences,
+} from "./project-document";
 import type { CloudStatus } from "./project-sync";
 
 export function ProjectPreferences(props: {
@@ -18,6 +23,8 @@ export function ProjectPreferences(props: {
   onChange: (value: SavingPreferences) => void;
   colors: ColorPreferences;
   onColors: (value: ColorPreferences) => void;
+  links: LinkStyle;
+  onLinks: (value: LinkStyle) => void;
   busy: boolean;
   error: string;
   cloudStatus?: CloudStatus;
@@ -30,6 +37,7 @@ export function ProjectPreferences(props: {
   const sections = () => [
     { id: "saving" as const, label: "Saving" },
     { id: "colors" as const, label: "Colors" },
+    { id: "connections" as const, label: "Connections" },
     { id: "backup" as const, label: "Backup" },
     // Only in builds that collect analytics.
     ...(analyticsEnabled ? [{ id: "privacy" as const, label: "Privacy" }] : []),
@@ -240,6 +248,37 @@ export function ProjectPreferences(props: {
             <Show when={current() === "colors"}>
               <ColorSettings colors={props.colors} onChange={props.onColors} />
             </Show>
+            <Show when={current() === "connections"}>
+              <p class="mb-6 max-w-2xl text-sm leading-6 text-stone-600">
+                Choose how lines run from an idea to its children.
+              </p>
+              <fieldset class="grid max-w-2xl gap-2 sm:grid-cols-3">
+                <legend class="sr-only">Connection style</legend>
+                <For each={LINK_STYLES}>
+                  {(option) => (
+                    <label class="choice-card flex-col">
+                      <LinkPreview style={option.style} />
+                      <span class="flex items-start gap-2">
+                        <input
+                          type="radio"
+                          name="link-style"
+                          checked={props.links === option.style}
+                          onChange={() => props.onLinks(option.style)}
+                        />
+                        <span>
+                          <span class="block font-medium text-stone-800">
+                            {option.label}
+                          </span>
+                          <span class="block text-xs text-stone-500">
+                            {option.description}
+                          </span>
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                </For>
+              </fieldset>
+            </Show>
             <Show when={current() === "backup"}>
               <p class="mb-4 text-sm leading-6 text-stone-600">
                 Download this map as a file. Import it later, here or in another
@@ -296,5 +335,68 @@ export function ProjectPreferences(props: {
         </div>
       </div>
     </Dialog>
+  );
+}
+
+const LINK_STYLES: { style: LinkStyle; label: string; description: string }[] =
+  [
+    {
+      style: "rounded",
+      label: "Rounded",
+      description: "Lines share a spine and turn into each child.",
+    },
+    {
+      style: "square",
+      label: "Square",
+      description: "The same tree with sharp corners.",
+    },
+    {
+      style: "freeform",
+      label: "Freeform",
+      description: "A curve from the idea to each child.",
+    },
+  ];
+
+// A parent and three children drawn in a style, with the map's own lines.
+function LinkPreview(props: { style: LinkStyle }) {
+  const box = (x: number, y: number, width: number) => ({
+    id: "",
+    text: "",
+    x,
+    y,
+    width,
+    height: 14,
+  });
+  const parent = box(8, 33, 36);
+  const children = [box(76, 9, 52), box(76, 33, 40), box(76, 57, 46)];
+  return (
+    <svg
+      viewBox="0 0 136 80"
+      class="mb-1 h-20 w-full rounded-md bg-[var(--paper)]"
+      aria-hidden="true"
+    >
+      <For each={children}>
+        {(child) => (
+          <path
+            d={connectionPath({ from: parent, to: child }, props.style)}
+            fill="none"
+            class="stroke-stone-400"
+            stroke-width="1.5"
+          />
+        )}
+      </For>
+      <For each={[parent, ...children]}>
+        {(node, index) => (
+          <rect
+            x={node.x}
+            y={node.y}
+            width={node.width}
+            height={node.height}
+            rx="1"
+            class={index() === 0 ? "fill-stone-800" : "fill-white"}
+          />
+        )}
+      </For>
+    </svg>
   );
 }

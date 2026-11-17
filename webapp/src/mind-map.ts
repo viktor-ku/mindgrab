@@ -1,3 +1,4 @@
+import type { LinkStyle } from "./generated/mindgrab-state/model";
 import type { NodeColor } from "./node-colors";
 
 export interface MindMapNode {
@@ -247,16 +248,63 @@ export function navigationTarget(
   return search(nodes).target;
 }
 
-export function connectionPath({ from, to }: Connection) {
-  // Children laid out to the right connect side to side with a smooth S-curve,
-  // so every branch leaves its parent at the same point.
-  if (to.x >= from.x + from.width) {
-    const startX = from.x + from.width;
-    const startY = from.y + from.height / 2;
-    const endX = to.x;
-    const endY = to.y + to.height / 2;
+// How a map draws the lines to children; see `LinkStyle` in the document.
+export type { LinkStyle };
+export const DEFAULT_LINK_STYLE: LinkStyle = "rounded";
+
+// The tree's spine runs down the gap this far out from the parent, and its
+// rounded turns take this radius at most.
+const SPINE_OFFSET = 24;
+const TURN_RADIUS = 8;
+
+// A line to a child on the right. A tree's lines leave the parent together,
+// run down a shared spine and turn into each child, so where they part is
+// clear however many children there are. Freeform curves run straight to
+// each child.
+function rightwardPath(
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+  style: LinkStyle,
+) {
+  if (style === "freeform") {
     const middle = (startX + endX) / 2;
     return `M ${startX} ${startY} C ${middle} ${startY}, ${middle} ${endY}, ${endX} ${endY}`;
+  }
+  const spine = startX + Math.min(SPINE_OFFSET, (endX - startX) / 2);
+  const dy = endY - startY;
+  const radius =
+    style === "rounded"
+      ? Math.min(TURN_RADIUS, Math.abs(dy) / 2, spine - startX)
+      : 0;
+  if (radius < 1)
+    return `M ${startX} ${startY} H ${spine} V ${endY} L ${endX} ${endY}`;
+  const sign = Math.sign(dy);
+  return [
+    `M ${startX} ${startY}`,
+    `H ${spine - radius}`,
+    `Q ${spine} ${startY}, ${spine} ${startY + sign * radius}`,
+    `V ${endY - sign * radius}`,
+    `Q ${spine} ${endY}, ${spine + radius} ${endY}`,
+    `L ${endX} ${endY}`,
+  ].join(" ");
+}
+
+export function connectionPath(
+  { from, to }: Connection,
+  style: LinkStyle = DEFAULT_LINK_STYLE,
+) {
+  // Children laid out to the right connect side to side, so every branch
+  // leaves its parent at the same point.
+  if (to.x >= from.x + from.width) {
+    return rightwardPath(
+      from.x + from.width,
+      from.y + from.height / 2,
+      to.x,
+      to.y + to.height / 2,
+      style,
+    );
   }
   const dx = to.x + to.width / 2 - (from.x + from.width / 2);
   const dy = to.y + to.height / 2 - (from.y + from.height / 2);

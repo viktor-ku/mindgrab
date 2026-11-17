@@ -98,7 +98,7 @@ test("a backup round-trips notes and the map's colors", () => {
       },
       leaf("empty"),
     ]),
-    preferences: { colors },
+    preferences: { colors, links: "square" },
   } satisfies ProjectFile;
   const { content } = prepareProjectImport(
     parseProjectFile(JSON.stringify(input)),
@@ -106,10 +106,12 @@ test("a backup round-trips notes and the map's colors", () => {
   const doc = importProjectDocument(crypto.randomUUID(), content);
   try {
     expect(doc.view().colors).toEqual(colors);
+    expect(doc.view().links).toBe("square");
     expect(doc.view().nodes[0].color).toBe("sky-400");
     const exported = parseProjectFile(serializeProjectFile(doc.view()));
     expect(exported.version).toBe(PROJECT_FILE_VERSION);
     expect(exported.preferences?.colors).toEqual(colors);
+    expect(exported.preferences?.links).toBe("square");
     expect(exported.project.nodes[0].note).toBe(input.project.nodes[0].note);
     expect(exported.project.nodes[0].children[0].note).toBe("child details");
     expect(exported.project.nodes[1]).not.toHaveProperty("note");
@@ -127,6 +129,7 @@ test("version 3 and 4 files still import and export as the current version", () 
     const { content } = prepareProjectImport(parsed);
     expect(content.nodes[0].note).toBe("");
     expect(content.colors).toEqual(DEFAULT_COLOR_PREFERENCES);
+    expect(content.links).toBe("rounded");
     expect(projectFileFromContent(content).version).toBe(PROJECT_FILE_VERSION);
   }
 });

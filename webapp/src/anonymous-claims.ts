@@ -41,6 +41,7 @@ async function pristine(source: ProjectRepository, id: string) {
           projectForest(state.view),
           state.view.name,
           state.view.colors,
+          state.view.links,
         )
       );
     } finally {
