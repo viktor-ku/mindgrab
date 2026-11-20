@@ -10,7 +10,7 @@ mod projects;
 use crate::{analytics::Analytics, auth::Auth, compute::Compute, config::Config, error::Result};
 use axum::{
     Router,
-    body::Bytes,
+    body::Body,
     extract::{DefaultBodyLimit, RawQuery, Request, State},
     http::{HeaderMap, HeaderValue, header},
     middleware::{self, Next},
@@ -117,9 +117,9 @@ impl Backend {
             .route("/ws/project/{id}", get(projects::socket))
             .route("/ws/share/{token}", get(projects::shared_socket))
             .fallback(disguise::missing)
-            .layer(DefaultBodyLimit::max(
-                mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
-            ))
+            // For any extractor that buffers a body. The RPC methods read theirs by
+            // hand, each to its own limit (`projects::rpc`).
+            .layer(DefaultBodyLimit::max(16 * 1024))
             .layer(middleware::from_fn(disguise::apply))
             .with_state(self.clone())
     }
@@ -156,7 +156,7 @@ impl Backend {
 /// Handles one RPC method at its own path through the shared `projects::rpc` dispatch.
 fn rpc(method: &'static str) -> MethodRouter<Arc<Backend>> {
     post(
-        move |state: AppState, headers: HeaderMap, query: RawQuery, body: Bytes| {
+        move |state: AppState, headers: HeaderMap, query: RawQuery, body: Body| {
             projects::rpc(state, method, headers, query, body)
         },
     )

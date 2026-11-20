@@ -676,3 +676,30 @@ async fn concurrent_large_merges_leave_other_accounts_responsive() {
     }
     f.close().await;
 }
+
+/// Only a snapshot upload may be large, and only from a signed-in account: every
+/// other body the server agrees to hold is a few identifiers.
+#[tokio::test]
+async fn a_body_is_read_only_after_the_session_and_up_to_its_methods_limit() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let megabyte = vec![b' '; 1024 * 1024];
+    let stranger = f
+        .post("mergeProject", "no-such-session")
+        .query(&[("projectId", Uuid::new_v4())])
+        .header("content-type", "application/octet-stream")
+        .body(megabyte.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), 401);
+    let alice = f.credential("alice").await;
+    let oversized = f
+        .post("listProjects", &alice)
+        .header("content-type", "application/json")
+        .body(megabyte)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), 413);
+    f.close().await;
+}

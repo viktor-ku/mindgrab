@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         Path, Query, RawQuery, WebSocketUpgrade,
         ws::{Message, WebSocket},
@@ -108,12 +108,42 @@ pub async fn health(axum::extract::State(app): AppState) -> Response {
         .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
     response
 }
+/// The most a method reads of a request body. A snapshot upload is the only large
+/// one; everything else is a few identifiers.
+fn body_limit(method: &str) -> usize {
+    match method {
+        // The slack lets the shared core, not this limit, refuse a snapshot that
+        // is only just too large.
+        "mergeProject" => mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
+        // One command can carry a position for every idea on a full map.
+        "commandProject" => 2 * 1024 * 1024,
+        _ => 16 * 1024,
+    }
+}
+/// Reads a body up to the method's limit. A declared length over the limit is
+/// refused before a byte is read.
+async fn read(method: &str, headers: &HeaderMap, body: Body) -> Result<Bytes> {
+    let limit = body_limit(method);
+    let too_large = || ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_some_and(|length| length > limit) {
+        return Err(too_large());
+    }
+    axum::body::to_bytes(body, limit)
+        .await
+        .map_err(|_| too_large())
+}
+/// The body arrives unread. A method that needs a session checks it first, so a
+/// request without one is refused before any of its body is held in memory.
 pub async fn rpc(
     axum::extract::State(app): AppState,
     method: &'static str,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response> {
     match method {
         "getHealth" => return Ok(health(axum::extract::State(app)).await),
@@ -121,7 +151,10 @@ pub async fn rpc(
         "logout" => return app.auth.logout(&headers).await,
         "getMe" => return Ok(Json(app.auth.identify(&headers).await?).into_response()),
         // Anyone holding a share token may read; no session is involved.
-        "getSharedProject" => return shared(&app, &headers, &body).await,
+        "getSharedProject" => {
+            let body = read(method, &headers, body).await?;
+            return shared(&app, &headers, &body).await;
+        }
         "createProject" | "deleteProject" | "mergeProject" | "commandProject" | "setShareLink" => {
             app.config.same_origin(&headers)?
         }
@@ -129,6 +162,7 @@ pub async fn rpc(
         _ => unreachable!(),
     }
     let user = app.auth.identify(&headers).await?;
+    let body = read(method, &headers, body).await?;
     match method {
         "createProject" => {
             let args: Create = parse(&headers, &body)?;
