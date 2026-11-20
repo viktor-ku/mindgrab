@@ -154,6 +154,14 @@ committed before acknowledging
 uploads are idempotent. Invalid bytes do not mutate accepted storage. Errors
 use `{error: {code}}`; snapshots are capped at 10 MiB.
 
+A request body is read only after the session check, so a request without a
+session is refused before any of its body is held in memory. Each method then
+reads up to its own limit and answers 413 `payload_too_large` beyond it: 10 MiB
+for `mergeProject`, 2 MiB for `commandProject`, and 16 KiB for everything else,
+including `getSharedProject`, which has no session. `getHealth`, `getMe`,
+`startLogin` and `logout` read no body at all. The analytics proxy and the
+phpMyAdmin decoy keep their own limits.
+
 The webapp uploads a complete snapshot only while the cloud has none. After that
 it sends the changes the cloud copy lacks. It reads the cloud copy before every
 upload, so a save whose acknowledgement was lost is not sent again. Changes that build
