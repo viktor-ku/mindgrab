@@ -197,11 +197,13 @@ undisguised.
 - **A path with no route** gets Apache's 404 page after a random wait of 100ms to
   10s. Only scanners ask for such paths, and the wait is what slows them down. At
   most 1,024 wait at once; any others get the 404 immediately.
-- **`.ht*` at any depth** gets Apache's 403, as Debian's Apache gives whether or not
-  the file exists.
+- **`.ht*` in a directory that exists** gets Apache's 403, as Debian's Apache gives
+  whether or not the file exists. Paths are decoded first, so `/%2ehtaccess` counts.
+  Below a directory that does not exist it is the usual 404.
 - **`/api`, `/api/auth` and `/phpmyadmin`** redirect to the trailing slash with a 301,
   and `/api/` and `/api/auth/` answer 403, as directories without an index do. The
-  redirect says `http://`, because Apache behind a proxy sees plain HTTP.
+  redirect says `http://`, because Apache behind a proxy sees plain HTTP, and
+  keeps a port other than 80.
 
 Apache's pages name the host from the `Host` header, lowercased. A value that is not
 a hostname becomes `localhost`, and nothing else from the request reaches a page.
@@ -232,8 +234,8 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
 `mindgrab.app` plays along from `webapp/Caddyfile`. The app shell carries
 `x-powered-by: PHP/8.3.14` and no `etag` or `last-modified`, as if an `index.php`
 front controller rendered it, and it answers every unknown path, `.php` or not, as
-a front controller does. `.ht*` paths get Apache's 403 page, and `/phpmyadmin`
-redirects to the decoy on the API.
+a front controller does. `.ht*` paths at the root and in `/assets/` get Apache's
+403 page, and `/phpmyadmin` redirects to the decoy on the API.
 
 Railway's edge adds `x-railway-edge`, `x-railway-request-id` and `x-hikari-trace` to
 every response. A Cloudflare response header transform rule on the `mindgrab.app`

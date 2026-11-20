@@ -56,18 +56,22 @@ pub async fn apply(request: Request, next: Next) -> Response {
 
 /// Every path without a route: Apache looking in its document root.
 pub async fn missing(uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path();
-    // Debian's Apache denies `.ht*` at any depth, whether or not the file exists.
-    if path.split('/').any(|segment| segment.starts_with(".ht")) {
+    let path = decoded(uri.path());
+    if is_hidden(&path) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if DIRECTORIES.contains(&path) {
+    if let Some(directory) = DIRECTORIES.iter().find(|directory| **directory == path) {
         // Apache sees plain HTTP behind the proxy, so its redirect says `http`.
         // The path is one of ours and the query is dropped, so nothing is echoed.
-        let (host, _) = server_name(&headers);
+        let (host, port) = server_name(&headers);
+        let port = if port == 80 {
+            String::new()
+        } else {
+            format!(":{port}")
+        };
         return (
             StatusCode::MOVED_PERMANENTLY,
-            [(header::LOCATION, format!("http://{host}{path}/"))],
+            [(header::LOCATION, format!("http://{host}{port}{directory}/"))],
         )
             .into_response();
     }
@@ -83,6 +87,44 @@ pub async fn missing(uri: Uri, headers: HeaderMap) -> Response {
         tokio::time::sleep(delay).await;
     }
     StatusCode::NOT_FOUND.into_response()
+}
+
+/// Apache looks a path up after decoding it, so `/%2ehtaccess` is `/.htaccess`.
+fn decoded(path: &str) -> String {
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut rest = path.as_bytes();
+    while let Some((&first, tail)) = rest.split_first() {
+        let digits = tail
+            .get(..2)
+            .and_then(|pair| std::str::from_utf8(pair).ok());
+        match digits.and_then(|pair| u8::from_str_radix(pair, 16).ok()) {
+            Some(byte) if first == b'%' => {
+                bytes.push(byte);
+                rest = &tail[2..];
+            }
+            _ => {
+                bytes.push(first);
+                rest = tail;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Debian's Apache denies `.ht*` in every directory that exists, whether or not the
+/// file does. Below a directory that does not exist, the answer is the usual 404.
+fn is_hidden(path: &str) -> bool {
+    let mut directory = String::new();
+    for segment in path.split('/').skip(1) {
+        if segment.starts_with(".ht") {
+            return true;
+        }
+        directory = format!("{directory}/{segment}");
+        if !DIRECTORIES.contains(&directory.as_str()) {
+            return false;
+        }
+    }
+    false
 }
 
 /// The script a route pretends to be: `/ingest.php/{*path}` is `/ingest.php`, and a
@@ -257,7 +299,7 @@ mod tests {
         assert_eq!(response.headers()[header::ALLOW], "POST");
         assert_eq!(page, "");
 
-        let (response, _) = ask(Method::GET, "/api/.htaccess").await;
+        let (response, _) = ask(Method::GET, "/api/%2ehtaccess").await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let (response, page) = ask(Method::GET, "/api?next=%3Cscript%3E").await;
         assert_eq!(
