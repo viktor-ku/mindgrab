@@ -86,7 +86,7 @@ class Backend {
         ? route.fulfill({ json: owner })
         : error(401, "unauthenticated");
     }
-    const expected = request.headers()["x-mindgrab-account.php"];
+    const expected = request.headers()["x-mindgrab-account"];
     if (!owner) return error(401, "unauthenticated");
     if (expected !== String(owner.id)) return error(409, "account_changed");
     if (url.pathname === "/api/createProject.php") {

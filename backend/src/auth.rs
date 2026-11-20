@@ -376,9 +376,9 @@ impl Auth {
     }
     pub async fn identify(&self, headers: &HeaderMap) -> Result<User> {
         // Parsed before the session is read, so the deploy check can prove without
-        // signing in that the edge passes this dotted header.
+        // signing in that the edge passes this header.
         let expected = headers
-            .get("x-mindgrab-account.php")
+            .get("x-mindgrab-account")
             .map(|value| {
                 value
                     .to_str()

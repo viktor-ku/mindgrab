@@ -127,18 +127,11 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     f.provider.delay.store(0, Ordering::SeqCst);
     let expected = f
         .post("getMe", browser)
-        .header("x-mindgrab-account.php", "999")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(expected.status(), 409);
-    let retired = f
-        .post("getMe", browser)
         .header("x-mindgrab-account", "999")
         .send()
         .await
         .unwrap();
-    assert_eq!(retired.status(), 200);
+    assert_eq!(expected.status(), 409);
     let logout = f.post("logout", browser).send().await.unwrap();
     assert_eq!(logout.status(), 303);
     assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=")));

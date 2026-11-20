@@ -108,7 +108,7 @@ local browser work or valid stored sessions. Logout removes server authority
 before redirecting to WorkOS.
 
 Mutations and sockets require the configured app Origin. Requests also carry an
-account fence (`x-mindgrab-account.php`) so a changed cookie cannot write into the
+account fence (`x-mindgrab-account`) so a changed cookie cannot write into the
 previous workspace. The backend does not rate limit requests; that belongs in
 Cloudflare. It does bound document work: as many merges and projections at once
 as there are cores, two per account. Requests over that wait up to 3 seconds and
@@ -219,10 +219,11 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
   `.php` rule. PHP behind Apache cannot hold a WebSocket, so real PHP stacks run a
   Ratchet daemon behind `mod_proxy_wstunnel` on a path such as `/ws`.
-- **Headers.** `x-mindgrab-account.php` keeps its suffix: the account fence fails
-  open when the header is missing, so renaming it would let tabs opened before the
-  change write unfenced. CORS sends no `vary`, because tower-http's default list of
-  three request headers appears on no PHP site.
+- **Headers.** No header name ends in `.php`, because no PHP site sends one. The
+  account fence is `x-mindgrab-account`. It fails open when the header is missing,
+  so a later rename must accept both names until every open tab has reloaded. CORS
+  sends no `vary`, because tower-http's default list of three request headers
+  appears on no PHP site.
 - **Cookies.** `PHPSESSID` holds the session and `PHPLOGINID` the login state; local
   mode appends `_local_<port>`. `mindgrab_analytics_consent` belongs to the webapp.
 

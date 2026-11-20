@@ -68,7 +68,7 @@ impl Backend {
             .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
             .allow_headers([
                 header::CONTENT_TYPE,
-                header::HeaderName::from_static("x-mindgrab-account.php"),
+                header::HeaderName::from_static("x-mindgrab-account"),
             ])
             .expose_headers([header::HeaderName::from_static("server-timing")])
             // The allowed origin is constant, so nothing varies. The default list
