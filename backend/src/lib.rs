@@ -15,7 +15,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, header},
     middleware::{self, Next},
     response::Response,
-    routing::{MethodRouter, get, post},
+    routing::{MethodRouter, any, get, post},
 };
 use sqlx::{
     PgPool,
@@ -70,11 +70,16 @@ impl Backend {
                 header::CONTENT_TYPE,
                 header::HeaderName::from_static("x-mindgrab-account.php"),
             ])
-            .expose_headers([header::HeaderName::from_static("server-timing.php")])
+            .expose_headers([header::HeaderName::from_static("server-timing")])
+            // The allowed origin is constant, so nothing varies. The default list
+            // of three request headers is tower-http's alone and would name it.
+            .vary([])
             // Every API POST is preflighted because the webapp is on another origin.
             .max_age(Duration::from_secs(3600));
         Router::new()
-            .route("/", get(projects::index))
+            // PHP runs a script for any method, and `/` is the directory's index.
+            .route("/", any(projects::index))
+            .route("/index.php", any(projects::index))
             .route("/api/auth/callback.php", get(projects::callback))
             .route("/api/getHealth.php", rpc("getHealth"))
             .route("/api/startLogin.php", rpc("startLogin"))
@@ -97,6 +102,7 @@ impl Backend {
                 get(analytics::ingest).post(analytics::ingest),
             )
             .merge(phpmyadmin::routes())
+            .fallback(disguise::missing)
             .layer(DefaultBodyLimit::max(
                 mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
             ))

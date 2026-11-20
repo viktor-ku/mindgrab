@@ -4,7 +4,7 @@ use axum::{
     Form, Router,
     body::Body,
     extract::{DefaultBodyLimit, FromRequest, Request},
-    http::{HeaderName, StatusCode, header},
+    http::{HeaderName, header},
     response::{Html, IntoResponse, Response},
     routing::get,
 };
@@ -38,22 +38,15 @@ where
     S: Clone + Send + Sync + 'static,
 {
     let permits = Arc::new(Semaphore::new(MAX_ACTIVE_LOGINS));
+    // Apache's `DirectoryIndex` serves the directory as its `index.php`, and
+    // phpMyAdmin shows the login page whatever the method.
+    let login = get(login_form)
+        .post(move |request| log_in(permits.clone(), request))
+        .fallback(login_form)
+        .layer(DefaultBodyLimit::max(MAX_FORM_BYTES));
     Router::new()
-        .route("/phpmyadmin", get(directory_index))
-        .route("/phpmyadmin/", get(directory_index))
-        .route(
-            "/phpmyadmin/index.php",
-            get(login_form)
-                .post(move |request| log_in(permits.clone(), request))
-                .layer(DefaultBodyLimit::max(MAX_FORM_BYTES)),
-        )
-}
-
-async fn directory_index() -> impl IntoResponse {
-    (
-        StatusCode::FOUND,
-        [(header::LOCATION, "/phpmyadmin/index.php")],
-    )
+        .route("/phpmyadmin/", login.clone())
+        .route("/phpmyadmin/index.php", login)
 }
 
 async fn login_form() -> Response {
@@ -109,7 +102,7 @@ async fn read_form(body: Body) -> Vec<u8> {
     form
 }
 
-fn thinking_time(rng: &mut impl Rng) -> Duration {
+pub(crate) fn thinking_time(rng: &mut impl Rng) -> Duration {
     Duration::from_millis(rng.gen_range(MIN_THINKING_MS..=MAX_THINKING_MS))
 }
 

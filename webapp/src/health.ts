@@ -79,7 +79,7 @@ export async function checkHealth(
       return unreachable();
     }
     const databaseCheck = serverTimingMs(
-      response.headers.get("server-timing.php"),
+      response.headers.get("server-timing"),
       "db",
     );
     const latencyMs = Math.max(0, roundTrip - databaseCheck);

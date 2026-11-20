@@ -167,50 +167,83 @@ WorkOS while it holds one.
 ## Apache and PHP disguise
 
 The backend presents itself as Apache and PHP. It is a joke built to production
-quality, so no page or error may give it away. The CORS layer's constant
-`access-control-allow-origin` stays, since a PHP API could send one too. `src/disguise.rs` is the
-outermost layer, outside CORS, so every response from the router carries these
-headers, including 404s, 405s, preflights and WebSocket 101s:
+quality, and it is meant to cost an attacker time, so no page, header or error may
+give it away. The model is the `php:8.3.14-apache` image: before changing a page or
+a header here, run that image and copy what it sends.
 
-```text
-server: Apache/2.4.62 (Debian)
-x-powered-by: PHP/8.3.14
-x-powered-by.php: PHP/8.3.14
-```
+`src/disguise.rs` is the outermost layer, outside CORS, so it sees every response
+from the router. It answers in one of two voices:
 
-Cloudflare replaces `server` with its own value, so clients of the public domains
-never see the Apache one; check `x-powered-by.php` there instead.
+- **PHP**, on a route that passes as a script: any path containing `.php`, and a
+  directory's index (`/` is `/index.php`, `/phpmyadmin/` is `/phpmyadmin/index.php`).
+  These carry `x-powered-by: PHP/8.3.14` and the three headers `session_start()`
+  sends, including `expires: Thu, 19 Nov 1981 08:52:00 GMT`.
+- **Apache**, everywhere else: paths with no route, and the WebSocket routes. PHP
+  never ran for these, so they carry no PHP header.
 
-The same layer turns every error with an empty or plain-text body into PHP's
-uncaught-exception output with the same status: axum's 404s, 405s, 413s and extractor
-rejections, and the same kinds of error from the analytics proxy. It is built from the status alone, so it reflects nothing
-from the request. JSON errors pass through, because the webapp reads their codes.
-hyper answers requests it cannot parse (400, 414, 431) before any layer runs, so
-those stay undisguised.
+Both carry `server: Apache/2.4.62 (Debian)`. Cloudflare replaces `server` with its
+own value and no rule can change that, so on the public domains the Apache version
+shows only in Apache's error pages.
+
+The layer rewrites every error with an empty or plain-text body: axum's 404s, 405s,
+413s and extractor rejections, and the same kinds of error from the analytics proxy.
+JSON errors pass through, because the webapp reads their codes. hyper answers
+requests it cannot parse (400, 414, 431) before any layer runs, so those stay
+undisguised.
+
+- **A script that fails** shows PHP's uncaught-exception output with the same
+  status, naming its own file under `/var/www/html`. A script sent the wrong method
+  answers 405 with `allow` and an empty body, as `http_response_code(405); exit;` does.
+- **A path with no route** gets Apache's 404 page after a random wait of 100ms to
+  10s. Only scanners ask for such paths, and the wait is what slows them down. At
+  most 1,024 wait at once; any others get the 404 immediately.
+- **`.ht*` at any depth** gets Apache's 403, as Debian's Apache gives whether or not
+  the file exists.
+- **`/api`, `/api/auth` and `/phpmyadmin`** redirect to the trailing slash with a 301,
+  and `/api/` and `/api/auth/` answer 403, as directories without an index do. The
+  redirect says `http://`, because Apache behind a proxy sees plain HTTP.
+
+Apache's pages name the host from the `Host` header, lowercased. A value that is not
+a hostname becomes `localhost`, and nothing else from the request reaches a page.
 
 - **Routes.** Each `.php` route is written out literally, so every name stays
   greppable: `src/lib.rs` has one line per RPC method and reads like a list of PHP
   scripts, and `src/phpmyadmin.rs` has the decoy's. There is no suffix-stripping
-  helper. Any other path, including an unknown `/api/<name>.php`, gets the PHP error
-  page as a 404.
+  helper.
 - **`/`** is Apache's "It works!" page and the Railway healthcheck, because Railway
   refuses a healthcheck path containing a dot. It still queries the database, so a
-  deployment that cannot reach Postgres never goes live.
+  deployment that cannot reach Postgres never goes live. Like any PHP script, it and
+  `/index.php` answer every method.
 - **`/ingest.php/<path>`** is PATH_INFO style, as in a PHP front controller. The
   PostHog SDK appends its own paths, so the URL cannot end in `.php`.
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
   `.php` rule. PHP behind Apache cannot hold a WebSocket, so real PHP stacks run a
   Ratchet daemon behind `mod_proxy_wstunnel` on a path such as `/ws`.
-- **Headers.** Non-standard headers this app owns end in `.php`:
-  `x-mindgrab-account.php` and `server-timing.php`. Standard headers keep their
-  names because browsers and proxies need them.
+- **Headers.** `x-mindgrab-account.php` keeps its suffix: the account fence fails
+  open when the header is missing, so renaming it would let tabs opened before the
+  change write unfenced. CORS sends no `vary`, because tower-http's default list of
+  three request headers appears on no PHP site.
 - **Cookies.** `PHPSESSID` holds the session and `PHPLOGINID` the login state; local
   mode appends `_local_<port>`. `mindgrab_analytics_consent` belongs to the webapp.
 
+### The webapp and Cloudflare
+
+`mindgrab.app` plays along from `webapp/Caddyfile`. The app shell carries
+`x-powered-by: PHP/8.3.14` and no `etag` or `last-modified`, as if an `index.php`
+front controller rendered it, and it answers every unknown path, `.php` or not, as
+a front controller does. `.ht*` paths get Apache's 403 page, and `/phpmyadmin`
+redirects to the decoy on the API.
+
+Railway's edge adds `x-railway-edge`, `x-railway-request-id` and `x-hikari-trace` to
+every response. A Cloudflare response header transform rule on the `mindgrab.app`
+zone, described as "Hide the host", removes them on every hostname, along with
+`x-railway-cdn-edge` and `x-railway-fallback`. It lives only in Cloudflare, so
+recreate it if the zone is rebuilt. No rule can change `server`.
+
 ### phpMyAdmin decoy
 
-`/phpmyadmin/index.php` imitates the phpMyAdmin 5.2 login, and `/phpmyadmin` and
-`/phpmyadmin/` redirect to it with a 302, as Apache's `DirectoryIndex` would. It
+`/phpmyadmin/` and `/phpmyadmin/index.php` imitate the phpMyAdmin 5.2 login, for
+any method, and `/phpmyadmin` redirects to the directory as above. It
 lives in `src/phpmyadmin.rs` and `src/phpmyadmin.html`, needs no database, and is
 served from the API domain, not `mindgrab.app`. Vite does not proxy it, so
 locally use the backend's `PORT`.

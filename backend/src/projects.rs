@@ -12,7 +12,7 @@ use axum::{
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
@@ -88,7 +88,12 @@ async fn database_ready(app: &Backend) -> bool {
 /// Apache's default page, and Railway's healthcheck: a deployment goes live on this 200.
 pub async fn index(axum::extract::State(app): AppState) -> Response {
     if database_ready(&app).await {
-        Html("<html><body><h1>It works!</h1></body></html>\n").into_response()
+        (
+            // PHP writes the charset in capitals.
+            [(header::CONTENT_TYPE, "text/html; charset=UTF-8")],
+            "<html><body><h1>It works!</h1></body></html>\n",
+        )
+            .into_response()
     } else {
         StatusCode::SERVICE_UNAVAILABLE.into_response()
     }
@@ -98,10 +103,9 @@ pub async fn health(axum::extract::State(app): AppState) -> Response {
     let healthy = database_ready(&app).await;
     let ms = started.elapsed().as_secs_f64() * 1000.;
     let mut response = (if healthy {StatusCode::OK} else {StatusCode::SERVICE_UNAVAILABLE},Json(json!({"status":if healthy {"ok"} else {"degraded"},"database":{"status":if healthy {"up"} else {"down"},"latency_ms":if healthy {Some(ms)} else {None}}}))).into_response();
-    response.headers_mut().insert(
-        "server-timing.php",
-        format!("db;dur={ms:.3}").parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
     response
 }
 pub async fn rpc(
