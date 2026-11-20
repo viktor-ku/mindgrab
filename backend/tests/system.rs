@@ -561,3 +561,106 @@ async fn share_links_grant_anonymous_read_only_access_until_revoked() {
     assert!(link["token"].is_null());
     f.close().await;
 }
+
+/// Merges compute without a pool connection or a row lock, so one account's
+/// burst of merges on a large map cannot keep other accounts from the database.
+#[tokio::test]
+async fn concurrent_large_merges_leave_other_accounts_responsive() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let bob = f.credential("bob").await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let node = |text: String| Command::CreateNode {
+        parent: None,
+        index: None,
+        text,
+        color: Color::BLUE,
+        fill: None,
+    };
+    let mut project = Project::new("Large").unwrap();
+    for n in 0..48 {
+        let text = (0..6_000).map(|i| format!("{n}-{i} ")).collect();
+        project.apply(node(text)).unwrap();
+    }
+    let snapshot = project.snapshot().unwrap();
+    assert!(snapshot.len() > 2 * 1024 * 1024, "{}", snapshot.len());
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    // Each device sends only its own edit, as the webapp does after a first save.
+    let version = project.version();
+    let edits: Vec<Vec<u8>> = (0..32)
+        .map(|n| {
+            let mut device = Project::from_snapshot(&snapshot).unwrap();
+            device.apply(node(format!("Edit {n}"))).unwrap();
+            device.updates_since(&version).unwrap()
+        })
+        .collect();
+    let merging = std::sync::atomic::AtomicBool::new(true);
+    let merges = async {
+        let statuses = futures_util::future::join_all(edits.into_iter().map(|edit| async {
+            f.post("mergeProject", &alice)
+                .query(&[("projectId", id)])
+                .header("content-type", "application/octet-stream")
+                .body(edit)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }))
+        .await;
+        merging.store(false, Ordering::SeqCst);
+        statuses
+    };
+    let others = async {
+        let mut calls = 0;
+        while merging.load(Ordering::SeqCst) {
+            let started = std::time::Instant::now();
+            let response = f.rpc("listProjects", &bob, json!({"limit":100})).await;
+            assert_eq!(response.status(), 200);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "listProjects took {:?} during merges",
+                started.elapsed()
+            );
+            calls += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        calls
+    };
+    let (statuses, calls) = tokio::join!(merges, others);
+    assert!(calls > 1, "{calls}");
+    // Merges over the account's limit are refused, never left holding a connection.
+    assert!(
+        statuses.iter().all(|status| [200, 429].contains(status)),
+        "{statuses:?}"
+    );
+    let merged: Vec<usize> = (0..32).filter(|n| statuses[*n] == 200).collect();
+    assert!(!merged.is_empty());
+    let (committed, revision) = baseline(&f, &alice, id).await;
+    assert_eq!(revision, (1 + merged.len()).to_string());
+    let texts: Vec<String> = committed
+        .view()
+        .unwrap()
+        .nodes
+        .into_iter()
+        .map(|node| node.text)
+        .collect();
+    for n in 0..32 {
+        assert_eq!(
+            texts.contains(&format!("Edit {n}")),
+            merged.contains(&n),
+            "Edit {n}"
+        );
+    }
+    f.close().await;
+}

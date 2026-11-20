@@ -1,6 +1,7 @@
 use crate::{
     AppState, Backend,
     auth::User,
+    compute,
     error::{ApiError, Result},
 };
 use axum::{
@@ -219,11 +220,11 @@ pub async fn rpc(
                 .await?
                 .snapshot
                 .ok_or_else(ApiError::missing)?;
-            let view = tokio::task::spawn_blocking(move || {
-                mindgrab_state::Project::from_snapshot(&bytes)?.view()
+            let permit = app.compute.acquire(user.id).await?;
+            let view = compute::run(&permit, move || {
+                Ok(mindgrab_state::Project::from_snapshot(&bytes)?.view()?)
             })
-            .await
-            .map_err(|_| ApiError::unavailable())??;
+            .await?;
             Ok(Json(view).into_response())
         }
         "mergeProject" => {
@@ -244,7 +245,7 @@ pub async fn rpc(
                 return Err(ApiError::invalid());
             }
             let id = Uuid::parse_str(&pairs[0].1).map_err(|_| ApiError::invalid())?;
-            let project = merge(&app, &user, id, body.to_vec(), None).await?;
+            let project = merge(&app, &user, id, body, None).await?;
             Ok(Json(baseline(id, project)).into_response())
         }
         "commandProject" => {
@@ -264,7 +265,14 @@ pub async fn rpc(
             }
             Ok(Json(baseline(
                 args.project_id,
-                merge(&app, &user, args.project_id, vec![], Some(args.command)).await?,
+                merge(
+                    &app,
+                    &user,
+                    args.project_id,
+                    Bytes::new(),
+                    Some(args.command),
+                )
+                .await?,
             ))
             .into_response())
         }
@@ -285,54 +293,70 @@ async fn publish(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, payload: String
         .await?;
     Ok(())
 }
+/// Writers that find the project changed under them start over this many times.
+const MERGE_ATTEMPTS: usize = 3;
+/// Merges `bytes` and applies `command` to the stored project. Nothing is
+/// locked and no connection is held while that computes: the result is stored
+/// only if the project is still at the revision it was computed from. Merging
+/// is idempotent, so starting over from a newer revision is safe.
 async fn merge(
     app: &Backend,
     user: &User,
     id: Uuid,
-    bytes: Vec<u8>,
+    bytes: Bytes,
     command: Option<mindgrab_state::Command>,
 ) -> Result<Stored> {
-    let mut tx = app.pool.begin().await?;
-    let current: Stored = sqlx::query_as("SELECT snapshot,revision FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted FOR UPDATE").bind(id).bind(user.id).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
-    let prior = current.snapshot;
-    let (snapshot, name, changed) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let mut project = if let Some(ref prior) = prior {
-            mindgrab_state::Project::from_snapshot(prior)?
-        } else {
-            mindgrab_state::Project::from_snapshot(&bytes)?
-        };
-        let before = project.version();
-        if !bytes.is_empty() {
-            project.merge(&bytes)?;
+    let permit = app.compute.acquire(user.id).await?;
+    for _ in 0..MERGE_ATTEMPTS {
+        let current = stored(app, user, id).await?;
+        let (prior, bytes, command) = (current.snapshot, bytes.clone(), command.clone());
+        let (snapshot, name, changed) = compute::run(&permit, move || {
+            let mut project = if let Some(ref prior) = prior {
+                mindgrab_state::Project::from_snapshot(prior)?
+            } else {
+                mindgrab_state::Project::from_snapshot(&bytes)?
+            };
+            let before = project.version();
+            if !bytes.is_empty() {
+                project.merge(&bytes)?;
+            }
+            if let Some(command) = command {
+                project.apply(command)?;
+            }
+            let view = project.view()?;
+            if !view.saving.cloud {
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "cloud_disabled",
+                ));
+            }
+            let changed = prior.is_none() || before != project.version();
+            let snapshot = match prior {
+                Some(prior) if !changed => prior,
+                _ => project.snapshot()?,
+            };
+            Ok((snapshot, view.name, changed))
+        })
+        .await?;
+        if !changed {
+            return Ok(Stored {
+                snapshot: Some(snapshot),
+                revision: current.revision,
+            });
         }
-        if let Some(command) = command {
-            project.apply(command)?;
+        let revision = current.revision + 1;
+        let mut tx = app.pool.begin().await?;
+        let saved = sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=$3,name=$4,revision=$5,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted AND revision=$6").bind(id).bind(user.id).bind(&snapshot).bind(name).bind(revision).bind(current.revision).execute(&mut *tx).await?.rows_affected();
+        if saved == 1 {
+            notify(&mut tx, user.id, id).await?;
+            tx.commit().await?;
+            return Ok(Stored {
+                snapshot: Some(snapshot),
+                revision,
+            });
         }
-        let view = project.view()?;
-        if !view.saving.cloud {
-            return Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "cloud_disabled",
-            ));
-        }
-        Ok((
-            project.snapshot()?,
-            view.name,
-            prior.is_none() || before != project.version(),
-        ))
-    })
-    .await
-    .map_err(|_| ApiError::unavailable())??;
-    let revision = current.revision + i64::from(changed);
-    if changed {
-        sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=$3,name=$4,revision=$5,updated_at=now() WHERE id=$1 AND owner_id=$2").bind(id).bind(user.id).bind(&snapshot).bind(name).bind(revision).execute(&mut *tx).await?;
-        notify(&mut tx, user.id, id).await?;
     }
-    tx.commit().await?;
-    Ok(Stored {
-        snapshot: Some(snapshot),
-        revision,
-    })
+    Err(ApiError::busy())
 }
 
 #[derive(Deserialize)]

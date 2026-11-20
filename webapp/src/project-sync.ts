@@ -2,6 +2,7 @@ import { QueryObserver } from "@tanstack/solid-query";
 import type { QueryClient } from "@tanstack/solid-query";
 import { backendEndpoint } from "./backend";
 import { LoroApi, decodeBase64, SyncError } from "./loro-api";
+import type { CloudSnapshot } from "./loro-api";
 import {
   ORIGIN,
   openProjectDocument,
@@ -68,12 +69,17 @@ export function websocketProvider(
     },
   };
 }
-export function pendingSnapshot(doc: ProjectDocument, committed: Uint8Array) {
+// What the cloud copy lacks: the whole document while the cloud has none, and
+// afterwards only the changes made since `committed`, never the complete
+// history again.
+export function pendingUpload(doc: ProjectDocument, committed: Uint8Array) {
   if (!doc.ready) return undefined;
   if (!committed.length) return doc.snapshot();
   const remote = openProjectDocument(doc.id, [committed]);
   try {
-    return remote.version() === doc.version() ? undefined : doc.snapshot();
+    return remote.version() === doc.version()
+      ? undefined
+      : doc.updatesSince(remote);
   } finally {
     remote.destroy();
   }
@@ -105,7 +111,7 @@ export class ProjectSync {
   #deleted = false;
   #registrationStarted = false;
   #snapshot = new Uint8Array();
-  // A sent snapshot whose acknowledgement may be lost is resent unchanged.
+  // A sent upload whose acknowledgement may be lost is resent unchanged.
   #pending?: Uint8Array;
   #paused = false;
   #authPaused = false;
@@ -297,7 +303,7 @@ export class ProjectSync {
     if (
       !this.#registered ||
       this.#pending ||
-      pendingSnapshot(this.handle.doc, this.#snapshot)
+      pendingUpload(this.handle.doc, this.#snapshot)
     )
       this.#setStatus({ status: "saving" });
     if (!this.#registered) {
@@ -314,15 +320,27 @@ export class ProjectSync {
     this.#alive(signal);
     await this.#apply(decodeBase64(snapshot.data), signal);
     // Edits made during an upload are uploaded by the same run.
+    let resent = false;
     for (;;) {
-      this.#pending ??= pendingSnapshot(this.handle.doc, this.#snapshot);
+      this.#pending ??= pendingUpload(this.handle.doc, this.#snapshot);
       if (!this.#pending) break;
       this.#setStatus({ status: "saving" });
-      const receipt = await this.api.merge(
-        this.handle.id,
-        this.#pending,
-        signal,
-      );
+      let receipt: CloudSnapshot;
+      try {
+        receipt = await this.api.merge(this.handle.id, this.#pending, signal);
+      } catch (error) {
+        // The cloud copy no longer holds what these changes build on: it was
+        // deleted and created again elsewhere. Send the whole document once.
+        if (
+          resent ||
+          !(error instanceof SyncError) ||
+          error.code !== "missing_dependencies"
+        )
+          throw error;
+        resent = true;
+        this.#pending = this.handle.doc.snapshot();
+        continue;
+      }
       this.#alive(signal);
       this.#pending = undefined;
       await this.#apply(decodeBase64(receipt.data), signal);

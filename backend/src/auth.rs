@@ -23,6 +23,8 @@ pub const SESSION_COOKIE: &str = "PHPSESSID";
 const STATE_COOKIE: &str = "PHPLOGINID";
 const LOCAL_USER_ID: &str = "local_boba_tee";
 const LOCAL_TOKEN: &str = "local-development";
+/// How long a request waits for another one to finish refreshing its session.
+const REFRESH_WAIT: Duration = Duration::from_secs(10);
 pub fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value))
 }
@@ -104,7 +106,8 @@ struct Claims {
 }
 #[derive(FromRow)]
 struct Session {
-    user_id: i64,
+    #[sqlx(flatten)]
+    user: User,
     provider_session: String,
     access_token: String,
     refresh_token: String,
@@ -384,46 +387,101 @@ impl Auth {
         let browser = self
             .browser_cookie(headers, SESSION_COOKIE)
             .ok_or_else(ApiError::unauthorized)?;
-        let browser_hash = hash(&browser);
-        let mut tx = self.pool.begin().await?;
-        let session: Option<Session> = sqlx::query_as("SELECT user_id,provider_session,access_token,refresh_token FROM mindgrab_loro.sessions WHERE browser_hash=$1 AND expires_at>now() FOR UPDATE").bind(&browser_hash).fetch_optional(&mut *tx).await?;
-        let session = session.ok_or_else(ApiError::unauthorized)?;
-        let result: Result<User> = async {
-            let user: User = sqlx::query_as("SELECT id,name,email,external_id FROM mindgrab_loro.users WHERE id=$1").bind(session.user_id).fetch_one(&mut *tx).await?;
-            if self.config.auth_mode == AuthMode::Local {
-                if user.external_id != LOCAL_USER_ID
-                    || !session.provider_session.starts_with("local_")
-                    || session.access_token != LOCAL_TOKEN
-                    || session.refresh_token != LOCAL_TOKEN
-                {
-                    return Err(ApiError::unauthorized());
-                }
-                return Ok(user);
-            }
-            let claims = self.verify(&session.access_token).await?;
-            if claims.sub!=user.external_id || claims.sid!=session.provider_session { return Err(ApiError::unauthorized()); }
-            if claims.exp>now()+30 { return Ok(user); }
-            let auth = self.authenticate(serde_json::json!({"grant_type":"refresh_token","refresh_token":session.refresh_token})).await?;
-            let claims = self.verify(&auth.access_token).await?;
-            if claims.exp<=now() || claims.sub!=user.external_id || claims.sid!=session.provider_session || auth.user.id!=user.external_id { return Err(ApiError::unauthorized()); }
-            sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$2,refresh_token=$3 WHERE browser_hash=$1").bind(&browser_hash).bind(auth.access_token).bind(auth.refresh_token).execute(&mut *tx).await?;
-            upsert(&mut tx,&auth.user).await.map(|upserted| upserted.user)
-        }.await;
-        if result
-            .as_ref()
-            .is_err_and(|e| e.status == StatusCode::UNAUTHORIZED)
-        {
-            sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1")
-                .bind(browser_hash)
-                .execute(&mut *tx)
-                .await?;
-        }
-        tx.commit().await?;
-        let user = result?;
+        let user = self.session_user(&hash(&browser)).await?;
         if expected.is_some_and(|id| id != user.id) {
             return Err(ApiError::new(StatusCode::CONFLICT, "account_changed"));
         }
         Ok(user)
+    }
+    /// The session's user, once its access token is valid. Provider calls can
+    /// take seconds, so no connection or row lock is kept across one: each
+    /// query here takes a pool connection for its own duration only.
+    async fn session_user(&self, browser_hash: &str) -> Result<User> {
+        let started = std::time::Instant::now();
+        loop {
+            let session: Session = sqlx::query_as("SELECT u.id,u.name,u.email,u.external_id,s.provider_session,s.access_token,s.refresh_token FROM mindgrab_loro.sessions s JOIN mindgrab_loro.users u ON u.id=s.user_id WHERE s.browser_hash=$1 AND s.expires_at>now()").bind(browser_hash).fetch_optional(&self.pool).await?.ok_or_else(ApiError::unauthorized)?;
+            let (access_token, refresh_token) =
+                (session.access_token.clone(), session.refresh_token.clone());
+            match self.validate(browser_hash, session).await {
+                Ok(Some(user)) => return Ok(user),
+                // Another request is refreshing this session; its tokens follow shortly.
+                Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(error) if error.status == StatusCode::UNAUTHORIZED => {
+                    // Only the tokens that were judged end the session: a
+                    // refresh may have replaced them since they were read.
+                    let ended = sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1 AND access_token=$2 AND refresh_token=$3").bind(browser_hash).bind(access_token).bind(refresh_token).execute(&self.pool).await?.rows_affected();
+                    if ended == 1 {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            if started.elapsed() > REFRESH_WAIT {
+                return Err(ApiError::unavailable());
+            }
+        }
+    }
+    /// `None` while another request refreshes the session.
+    async fn validate(&self, browser_hash: &str, session: Session) -> Result<Option<User>> {
+        if self.config.auth_mode == AuthMode::Local {
+            if session.user.external_id != LOCAL_USER_ID
+                || !session.provider_session.starts_with("local_")
+                || session.access_token != LOCAL_TOKEN
+                || session.refresh_token != LOCAL_TOKEN
+            {
+                return Err(ApiError::unauthorized());
+            }
+            return Ok(Some(session.user));
+        }
+        let claims = self.verify(&session.access_token).await?;
+        if claims.sub != session.user.external_id || claims.sid != session.provider_session {
+            return Err(ApiError::unauthorized());
+        }
+        if claims.exp > now() + 30 {
+            return Ok(Some(session.user));
+        }
+        // A refresh finishes even if its request goes away: the provider has
+        // then already replaced the refresh token, which must be stored.
+        let (auth, browser_hash) = (self.clone(), browser_hash.to_string());
+        tokio::spawn(async move { auth.refresh(&browser_hash, session).await })
+            .await
+            .map_err(|_| ApiError::unavailable())?
+    }
+    /// Refresh tokens are single use, so a lease on the session row lets one
+    /// request at a time spend this one, in any process. `None` when another
+    /// request holds the lease.
+    async fn refresh(&self, browser_hash: &str, session: Session) -> Result<Option<User>> {
+        // The lease outlasts the provider calls and ends early when they do.
+        let leased = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=now()+interval '30 seconds' WHERE browser_hash=$1 AND refresh_token=$2 AND (refreshing_until IS NULL OR refreshing_until<=now())").bind(browser_hash).bind(&session.refresh_token).execute(&self.pool).await?.rows_affected();
+        if leased == 0 {
+            return Ok(None);
+        }
+        let refreshed: Result<User> = async {
+            let auth = self.authenticate(serde_json::json!({"grant_type":"refresh_token","refresh_token":session.refresh_token})).await?;
+            let claims = self.verify(&auth.access_token).await?;
+            if claims.exp <= now()
+                || claims.sub != session.user.external_id
+                || claims.sid != session.provider_session
+                || auth.user.id != session.user.external_id
+            {
+                return Err(ApiError::unauthorized());
+            }
+            let mut tx = self.pool.begin().await?;
+            let stored = sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$2,refresh_token=$3,refreshing_until=NULL WHERE browser_hash=$1 AND refresh_token=$4").bind(browser_hash).bind(auth.access_token).bind(auth.refresh_token).bind(&session.refresh_token).execute(&mut *tx).await?.rows_affected();
+            // Signed out while refreshing.
+            if stored == 0 {
+                return Err(ApiError::unauthorized());
+            }
+            let user = upsert(&mut tx, &auth.user).await?.user;
+            tx.commit().await?;
+            Ok(user)
+        }
+        .await;
+        if refreshed.is_err() {
+            // The next request may try at once rather than wait out the lease.
+            let _ = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=NULL WHERE browser_hash=$1 AND refresh_token=$2").bind(browser_hash).bind(&session.refresh_token).execute(&self.pool).await;
+        }
+        refreshed.map(Some)
     }
     pub async fn logout(&self, headers: &HeaderMap) -> Result<Response> {
         self.config.same_origin(headers)?;

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { LoroApi } from "../src/loro-api";
+import { LoroApi, SyncError } from "../src/loro-api";
 import {
   createProjectDocument,
   editNodeText,
@@ -11,7 +11,7 @@ import type {
   ProjectHandle,
   ProjectRepository,
 } from "../src/project-repository";
-import { pendingSnapshot, ProjectSync } from "../src/project-sync";
+import { pendingUpload, ProjectSync } from "../src/project-sync";
 const controllers: ProjectSync[] = [];
 const docs: ProjectDocument[] = [];
 afterEach(() => {
@@ -63,7 +63,12 @@ class Server extends LoroApi {
   }
   override async merge(_id: string, bytes: Uint8Array) {
     this.merges.push(bytes.slice());
-    this.doc.merge(bytes);
+    try {
+      this.doc.merge(bytes);
+    } catch {
+      // The backend's 422 for changes that build on history it does not hold.
+      throw new SyncError("Rejected", "blocked", "missing_dependencies");
+    }
     await this.mergeGate;
     if (this.lost) {
       this.lost = false;
@@ -125,7 +130,7 @@ function fixture() {
   return { doc, root, server, ...attach(doc, server) };
 }
 
-test("lost acknowledgements resend the same snapshot before later edits", async () => {
+test("lost acknowledgements resend the same upload before later edits", async () => {
   const { doc, root, server, sync } = fixture();
   server.lost = true;
   await sync.syncNow();
@@ -160,10 +165,36 @@ test("reload recovery includes pure deletions and duplicate histories produce no
   const next = attach(reopened, server).sync;
   await next.syncNow();
   expect(server.doc.view().nodes[0].text).toBe(" 🌲");
-  expect(pendingSnapshot(reopened, server.doc.snapshot())).toBeUndefined();
+  expect(pendingUpload(reopened, server.doc.snapshot())).toBeUndefined();
   const count = server.merges.length;
   await next.syncNow();
   expect(server.merges).toHaveLength(count);
+});
+test("saves after the first send only new changes, and the whole map again if the cloud copy was replaced", async () => {
+  const { doc, root, server, sync } = fixture();
+  const long = Array.from({ length: 1500 }, () => crypto.randomUUID()).join(
+    " ",
+  );
+  editNodeText(doc, root, 0, 0, long);
+  await sync.syncNow();
+  editNodeText(doc, root, 0, 0, "Next ");
+  await sync.syncNow();
+  expect(server.merges).toHaveLength(2);
+  expect(server.merges[0].length).toBeGreaterThan(40_000);
+  expect(server.merges[1].length).toBeLessThan(1000);
+  expect(server.doc.view()).toEqual(doc.view());
+  // Another device deletes the cloud copy and creates it again mid-save.
+  editNodeText(doc, root, 0, 0, "Again ");
+  const snapshot = server.snapshot.bind(server);
+  server.snapshot = async () => {
+    const result = await snapshot();
+    server.doc = keep(openProjectDocument(doc.id));
+    return result;
+  };
+  await sync.syncNow();
+  expect(server.merges).toHaveLength(4);
+  expect(sync.status.status).toBe("saved");
+  expect(server.doc.view()).toEqual(doc.view());
 });
 test("private projects never register or upload, including manual retry", async () => {
   const { doc, root, server, sync } = fixture();

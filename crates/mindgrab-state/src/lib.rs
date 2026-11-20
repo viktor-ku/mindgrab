@@ -104,6 +104,18 @@ impl Project {
             .collect();
         serde_json::to_vec(&ordered).expect("integer version vector")
     }
+
+    /// The changes this document has beyond `version`, another replica's
+    /// [`Project::version`]. A peer that holds that version merges these
+    /// instead of receiving the complete history again.
+    pub fn updates_since(&self, version: &[u8]) -> Result<Vec<u8>> {
+        let known: std::collections::BTreeMap<u64, i32> = serde_json::from_slice(version)?;
+        let bytes = self
+            .doc
+            .export(ExportMode::updates_owned(known.into_iter().collect()))?;
+        check_size(&bytes)?;
+        Ok(bytes)
+    }
     pub fn start_group(&mut self) -> Result<()> {
         self.undo.group_start()?;
         Ok(())

@@ -123,6 +123,11 @@ export class ProjectDocument {
   snapshot() {
     return this.#state?.snapshot() ?? new Uint8Array();
   }
+  // The changes this document has that `other` lacks. A peer that holds
+  // `other` merges these instead of receiving the complete history again.
+  updatesSince(other: ProjectDocument) {
+    return this.native().updatesSince(other.native().version());
+  }
   view(): RustView {
     return JSON.parse(this.native().view());
   }
