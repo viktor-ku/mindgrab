@@ -1,6 +1,7 @@
 import type { PostHog } from "posthog-js";
 import { createSignal } from "solid-js";
 import { backendCookieDomain, backendEndpoint } from "./backend";
+import { redactEvent } from "./redact-share-tokens";
 
 // Product analytics. Disabled unless VITE_POSTHOG_KEY is set at build time, so
 // local worktrees and browser tests never send events.
@@ -8,7 +9,8 @@ import { backendCookieDomain, backendEndpoint } from "./backend";
 // Maps are private writing: events carry counts and choices only, never idea
 // text, notes, or project names. Autocapture is off because it records the
 // text of clicked elements, and replay (enabled from the PostHog dashboard)
-// masks all text and inputs.
+// masks all text and inputs. Share-link tokens are stripped from every event
+// and recording (see redact-share-tokens.ts).
 //
 // GDPR: nothing loads or leaves the browser until the visitor chooses.
 // Accepting enables cookies and links activity to the account. Declining keeps
@@ -140,6 +142,8 @@ async function load() {
           maskAllInputs: true,
           maskTextSelector: "*",
         },
+        // Share links carry their only credential in the path.
+        before_send: redactEvent,
       });
       applyConsent(posthog);
       client = posthog;
