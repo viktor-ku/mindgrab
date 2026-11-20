@@ -156,6 +156,15 @@ fn thinking_time(rng: &mut impl Rng) -> Duration {
     Duration::from_millis(rng.gen_range(MIN_THINKING_MS..=MAX_THINKING_MS))
 }
 
+/// phpMyAdmin's token is 16 printable characters written out as hex, so every
+/// other digit falls between 2 and 7.
+fn token() -> String {
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| format!("{:02x}", rng.gen_range(0x21_u8..=0x7e)))
+        .collect()
+}
+
 fn random_hex() -> String {
     format!("{:032x}", rand::random::<u128>())
 }
@@ -274,7 +283,7 @@ fn page(request: &HeaderMap, failed_login: Option<(&str, bool)>) -> Response {
             (X_ROBOTS_TAG, "noindex, nofollow"),
             (header::PRAGMA, "no-cache"),
         ],
-        Html(render(&username, &alert, &random_hex(), &session)),
+        Html(render(&username, &alert, &token(), &session)),
     )
         .into_response();
     for cookie in cookies {

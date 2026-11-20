@@ -9,14 +9,35 @@
 	root * /srv
 
 	# The API passes as PHP behind Apache (backend/README.md), and this site plays
-	# along. Apache's pages are the only place its version shows, because Cloudflare
-	# replaces `Server`. Their wording is copied from the php:8.3.14-apache image,
-	# and they echo nothing from the request.
+	# along as Apache serving static files, with `FallbackResource /index.php` for
+	# everything else. Apache's pages are the only place its version shows, because
+	# Cloudflare replaces `Server`. Their wording, and every behaviour below, is
+	# copied from the php:8.3.14-apache image. Nothing from a request is echoed.
 	#
-	# Debian's Apache refuses `.ht*` in every directory that exists, and refuses to
-	# list a directory without an index. Handlers with named matchers run in the
-	# order written, so this one comes before the assets.
-	@forbidden path_regexp ^/(assets/(\.ht.*)?|\.ht.*)$
+	# Handlers with named matchers run in the order written.
+
+	# Debian's Apache has `TraceEnable Off`: a 405 that allows nothing.
+	@trace method TRACE
+	handle @trace {
+		header Allow ""
+		header Content-Type "text/html; charset=iso-8859-1"
+		respond <<PAGE
+			<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+			<html><head>
+			<title>405 Method Not Allowed</title>
+			</head><body>
+			<h1>Method Not Allowed</h1>
+			<p>The requested method TRACE is not allowed for this URL.</p>
+			<hr>
+			<address>Apache/2.4.62 (Debian) Server at mindgrab.app Port 80</address>
+			</body></html>
+
+			PAGE 405
+	}
+
+	# Debian's Apache refuses `.ht*` in every directory that exists, a directory
+	# without an index, and its stock `/icons/` and `/server-status`.
+	@forbidden path_regexp ^/(assets/(\.ht.*)?|\.ht.*|icons/|server-status(/.*)?)$
 	handle @forbidden {
 		header Content-Type "text/html; charset=iso-8859-1"
 		respond <<PAGE
@@ -33,6 +54,26 @@
 			PAGE 403
 	}
 
+	# A directory asked for without its slash. Apache behind a proxy sees plain
+	# HTTP, so its redirect says `http`.
+	@assetsdir path /assets
+	handle @assetsdir {
+		header Location http://mindgrab.app/assets/
+		header Content-Type "text/html; charset=iso-8859-1"
+		respond <<PAGE
+			<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+			<html><head>
+			<title>301 Moved Permanently</title>
+			</head><body>
+			<h1>Moved Permanently</h1>
+			<p>The document has moved <a href="http://mindgrab.app/assets/">here</a>.</p>
+			<hr>
+			<address>Apache/2.4.62 (Debian) Server at mindgrab.app Port 80</address>
+			</body></html>
+
+			PAGE 301
+	}
+
 	# Hashed build output. Without the SPA fallback, a missing chunk is a real 404
 	# and never index.html served under an immutable cache header.
 	@assets path /assets/*
@@ -46,6 +87,13 @@
 			# Caddy's ETag is not in Apache's form. These files never change, so
 			# nothing revalidates them anyway.
 			header -ETag
+			# Apache names no charset for these, and serves a file for a POST too.
+			@javascript path *.js
+			header @javascript Content-Type text/javascript
+			@stylesheet path *.css
+			header @stylesheet Content-Type text/css
+			@write not method GET HEAD
+			method @write GET
 			file_server
 		}
 		handle {
@@ -84,6 +132,28 @@
 			PAGE 301
 	}
 
+	# The fallback does not cover a script that is not there: PHP's handler
+	# answers for every `.php` path, and it answers 404.
+	@noscript {
+		path *.php
+		not path /index.php
+	}
+	handle @noscript {
+		header Content-Type "text/html; charset=iso-8859-1"
+		respond <<PAGE
+			<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+			<html><head>
+			<title>404 Not Found</title>
+			</head><body>
+			<h1>Not Found</h1>
+			<p>The requested URL was not found on this server.</p>
+			<hr>
+			<address>Apache/2.4.62 (Debian) Server at mindgrab.app Port 80</address>
+			</body></html>
+
+			PAGE 404
+	}
+
 	# index.html (and the sw.js tombstone) must revalidate so a new build reaches browsers.
 	handle {
 		header Cache-Control "no-cache"
@@ -98,14 +168,15 @@
 			file_server
 		}
 
-		# Every other path is the app shell, as if an index.php front controller
-		# rendered it: PHP's header, none of a static file's, and an answer for any
-		# method, where a file server would refuse a POST.
+		# Every other path is the app shell, as if index.php rendered it: PHP's
+		# header and charset, none of a static file's headers, and an answer for
+		# any method, where a file server would refuse a POST.
 		handle {
 			rewrite * /index.html
 			@write not method GET HEAD
 			method @write GET
 			header X-Powered-By "PHP/8.3.14"
+			header Content-Type "text/html; charset=UTF-8"
 			header -Last-Modified
 			header -ETag
 			header -Accept-Ranges

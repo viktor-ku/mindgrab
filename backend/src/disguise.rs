@@ -13,13 +13,32 @@ const APACHE: &str = "Apache/2.4.62 (Debian)";
 const PHP: &str = "PHP/8.3.14";
 /// Directories of the pretend document root. None has an index, so Apache redirects
 /// to the trailing slash and then refuses to list. `/phpmyadmin/` has a route.
-const DIRECTORIES: [&str; 6] = [
+const DIRECTORIES: [&str; 7] = [
     "/api",
     "/api/auth",
+    "/icons/small",
     "/phpmyadmin",
     "/phpmyadmin/themes",
     "/phpmyadmin/themes/pmahomme",
     "/phpmyadmin/themes/pmahomme/css",
+];
+
+/// What Apache's own handler allows on a file or directory.
+const ALLOW: &str = "GET,POST,OPTIONS,HEAD";
+/// Methods Apache knows but its file handler refuses with a 405. Any other name
+/// is a 501.
+const REFUSED_METHODS: [&str; 11] = [
+    "PUT",
+    "DELETE",
+    "PATCH",
+    "PROPFIND",
+    "PROPPATCH",
+    "MKCOL",
+    "COPY",
+    "MOVE",
+    "LOCK",
+    "UNLOCK",
+    "REPORT",
 ];
 
 /// Runs outermost, so WebSocket upgrades and errors from the layers inside it are
@@ -32,19 +51,40 @@ pub async fn apply(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let (host, port) = server_name(request.headers());
     let mut in_session = has_session(request.headers(), header::COOKIE);
-    let mut response = if method == Method::TRACE {
+    // Apache refuses an encoded slash before it looks for a script. Only the decoys
+    // take a path after the script, so only they could let one through.
+    let has_encoded_slash = request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|matched| matched.as_str().ends_with("{*path_info}"))
+        && request.uri().path().to_ascii_lowercase().contains("%2f");
+    let apache_refusal = if method == Method::TRACE {
         // Debian's Apache has `TraceEnable Off`: a 405 that allows nothing, on any path.
-        (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "")]).into_response()
+        Some((StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "")]).into_response())
+    } else if has_encoded_slash {
+        Some(StatusCode::NOT_FOUND.into_response())
     } else {
-        next.run(request).await
+        None
     };
-    if let Some(script) = script.filter(|_| method != Method::TRACE) {
+    let script = script.filter(|_| apache_refusal.is_none());
+    let mut response = match apache_refusal {
+        Some(response) => response,
+        None => next.run(request).await,
+    };
+    if let Some(script) = script {
         if is_error(&response) && is_bare(&response) {
             response = php_error(response, &script);
         }
         in_session |= has_session(response.headers(), header::SET_COOKIE);
         let headers = response.headers_mut();
         headers.insert("x-powered-by", HeaderValue::from_static(PHP));
+        // PHP names a type even when it sends no body, as on a redirect.
+        if !headers.contains_key(header::CONTENT_TYPE) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=UTF-8"),
+            );
+        }
         // What `session_start()` sends, and the reason PHP sites are recognised by
         // a date in 1981. PHP sends them only along with a session cookie, and
         // phpMyAdmin sends its own, so a response that has `expires` keeps it.
@@ -84,12 +124,10 @@ pub async fn missing(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     // `mod_status` and the icon directory ship enabled on Debian and refuse outsiders.
     let is_stock =
         path == "/icons/" || path == "/server-status" || path.starts_with("/server-status/");
-    if is_hidden(&path) || is_stock {
+    // A name too long for the filesystem is refused, not missing.
+    let is_too_long = path.split('/').any(|segment| segment.len() > 255);
+    if is_hidden(&path) || is_stock || is_too_long {
         return StatusCode::FORBIDDEN.into_response();
-    }
-    if method == Method::OPTIONS {
-        // Apache answers this itself, for a file that exists or not.
-        return [(header::ALLOW, "OPTIONS,HEAD,GET,POST")].into_response();
     }
     if let Some(directory) = DIRECTORIES.iter().find(|directory| **directory == path) {
         // Apache sees plain HTTP behind the proxy, so its redirect says `http`.
@@ -106,13 +144,30 @@ pub async fn missing(method: Method, uri: Uri, headers: HeaderMap) -> Response {
         )
             .into_response();
     }
-    if path
-        .strip_suffix('/')
-        .is_some_and(|directory| DIRECTORIES.contains(&directory))
-    {
-        return StatusCode::FORBIDDEN.into_response();
+    // PHP's handler looks for the script before the method matters.
+    if path.ends_with(".php") {
+        return StatusCode::NOT_FOUND.into_response();
     }
-    StatusCode::NOT_FOUND.into_response()
+    let is_directory = path
+        .strip_suffix('/')
+        .is_some_and(|directory| DIRECTORIES.contains(&directory));
+    // The rest is what Apache's file handler does with each method, for a file
+    // that exists or not.
+    match method {
+        Method::GET | Method::HEAD if is_directory => StatusCode::FORBIDDEN.into_response(),
+        Method::GET | Method::HEAD | Method::POST => StatusCode::NOT_FOUND.into_response(),
+        // Apache names this type for a directory, and none for a file.
+        Method::OPTIONS if is_directory => [
+            (header::ALLOW, ALLOW),
+            (header::CONTENT_TYPE, "httpd/unix-directory"),
+        ]
+        .into_response(),
+        Method::OPTIONS => [(header::ALLOW, ALLOW)].into_response(),
+        _ if REFUSED_METHODS.contains(&method.as_str()) => {
+            (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, ALLOW)]).into_response()
+        }
+        _ => (StatusCode::NOT_IMPLEMENTED, [(header::ALLOW, ALLOW)]).into_response(),
+    }
 }
 
 /// Apache looks a path up after decoding it, so `/%2ehtaccess` is `/.htaccess`.
@@ -235,6 +290,12 @@ fn php_error(response: Response, script: &str) -> Response {
 fn apache_page(response: Response, method: &Method, host: &str, port: u16) -> Response {
     let status = response.status();
     let reason = status.canonical_reason().unwrap_or("Error");
+    // hyper allows punctuation in a method name. Apache escapes it; this drops it.
+    let method: String = method
+        .as_str()
+        .chars()
+        .filter(|character| character.is_ascii_alphabetic() || *character == '-')
+        .collect();
     let detail = match status {
         StatusCode::MOVED_PERMANENTLY => {
             let location = response
@@ -255,13 +316,10 @@ fn apache_page(response: Response, method: &Method, host: &str, port: u16) -> Re
             "<p>The requested URL was not found on this server.</p>".to_owned()
         }
         StatusCode::METHOD_NOT_ALLOWED => {
-            // hyper allows punctuation in a method name. Apache escapes it; this drops it.
-            let method: String = method
-                .as_str()
-                .chars()
-                .filter(char::is_ascii_alphabetic)
-                .collect();
             format!("<p>The requested method {method} is not allowed for this URL.</p>")
+        }
+        StatusCode::NOT_IMPLEMENTED => {
+            format!("<p>{method} not supported for current URL.<br />\n</p>")
         }
         StatusCode::BAD_GATEWAY => {
             "<p>The proxy server received an invalid\r\nresponse from an upstream server.<br />\r\n</p>"

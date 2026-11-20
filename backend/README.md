@@ -203,16 +203,24 @@ undisguised; Cloudflare answers them first in production.
 - **A script that fails** shows PHP's uncaught-exception output with the same
   status, naming its own file under `/var/www/html`. A script sent the wrong method
   answers 405 with `allow` and an empty body, as `http_response_code(405); exit;` does.
-- **A path with no route** gets Apache's 404 page at once. Slowing scanners down is
-  Cloudflare's job: a wait here made every miss stand out from the real routes.
-- **`OPTIONS` on a path with no route** gets Apache's own answer, a 200 with
-  `allow: OPTIONS,HEAD,GET,POST`. Only `/api/*.php` and `/ingest.php` answer CORS
+- **A path with no route** gets what Apache's file handler gives, at once. Slowing
+  scanners down is Cloudflare's job: a wait here made every miss stand out from the
+  real routes. `GET`, `HEAD` and `POST` get the 404 page. `OPTIONS` gets a 200 with
+  `allow: GET,POST,OPTIONS,HEAD`. `PUT`, `DELETE`, `PATCH` and the WebDAV methods
+  get a 405 with the same `allow`, and a method Apache has never heard of gets a
+  501. A path ending in `.php` is a 404 for every method, because PHP's handler
+  looks for the script first. Only `/api/*.php` and `/ingest.php` answer CORS
   preflights.
 - **`TRACE`** gets a 405 that allows nothing, on any path.
+- **An encoded slash** (`%2F`) after a decoy script, or a path segment over 255
+  bytes, is refused as Apache refuses it: 404 and 403.
+- **A script's response without a body** still names `text/html; charset=UTF-8`,
+  as PHP does on a redirect.
 - **`.ht*` in a directory that exists** gets Apache's 403, as Debian's Apache gives
   whether or not the file exists. Paths are decoded first, so `/%2ehtaccess` counts.
   Below a directory that does not exist it is the usual 404.
-- **`/server-status` and `/icons/`** get the 403 Debian's stock configuration gives.
+- **`/server-status`, `/icons/` and `/icons/small/`** get the 403 Debian's stock
+  configuration gives. The icon files themselves are not served.
 - **`/api`, `/api/auth`, `/phpmyadmin` and its theme directories** redirect to the
   trailing slash with a 301, and all but `/phpmyadmin/` then answer 403, as
   directories without an index do. The redirect says `http://`, because Apache
@@ -251,13 +259,18 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
 
 ### The webapp and Cloudflare
 
-`mindgrab.app` plays along from `webapp/Caddyfile`. The app shell carries
-`x-powered-by: PHP/8.3.14` and no `etag` or `last-modified`, as if an `index.php`
-front controller rendered it. It answers every unknown path, `.php` or not, and
-every method, as a front controller does. Static files carry no `etag`, because
-Caddy's is not in Apache's form. A missing `/assets/` file gets Apache's 404 page,
-`/assets/` itself and `.ht*` paths get its 403 page, and `/phpmyadmin` redirects to
-the decoy on the API with Apache's 301 page.
+`mindgrab.app` plays along from `webapp/Caddyfile`, as Apache serving static files
+with `FallbackResource /index.php` for everything else. The app shell carries
+`x-powered-by: PHP/8.3.14`, PHP's `charset=UTF-8` and no `etag` or `last-modified`,
+as if `index.php` rendered it, and it answers every unknown path and every method.
+The fallback does not cover a script that is not there, so any other `.php` path
+gets Apache's 404 page.
+
+Static files carry no `etag`, because Caddy's is not in Apache's form, and no
+charset on JavaScript and CSS. A POST for one gets the file. A missing `/assets/`
+file gets Apache's 404 page, `/assets` redirects to its slash, and `/assets/`,
+`.ht*`, `/icons/` and `/server-status` get the 403 page. `TRACE` gets the 405.
+`/phpmyadmin` redirects to the decoy on the API with Apache's 301 page.
 
 Two things live only in Cloudflare, on the `mindgrab.app` zone. Recreate them if the
 zone is rebuilt.
@@ -285,7 +298,8 @@ locally use the backend's `PORT`.
 Its response headers and cookies are copied from the `phpmyadmin:5.2` image. The
 login page sets a new `phpMyAdmin` session cookie on every load, after repeating
 the one it was sent; real phpMyAdmin does the same. A cookie is repeated only if it
-is 32 lowercase hex characters. The page links to a stylesheet and a favicon at
+is 32 lowercase hex characters. The form token is 16 printable characters written
+as hex, as phpMyAdmin's is. The page links to a stylesheet and a favicon at
 phpMyAdmin's own URLs (`themes/pmahomme/css/theme.css?v=5.2.3`, `favicon.ico`).
 Both files are ours, `src/phpmyadmin.css` and `src/phpmyadmin.ico`: phpMyAdmin's
 are GPL-licensed, so do not copy them in.
