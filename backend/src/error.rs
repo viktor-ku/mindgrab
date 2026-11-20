@@ -21,6 +21,10 @@ impl ApiError {
     pub fn unavailable() -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable")
     }
+    /// Over a concurrency limit for now. The webapp retries any 429.
+    pub fn busy() -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, "busy")
+    }
     pub fn invalid() -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request")
     }

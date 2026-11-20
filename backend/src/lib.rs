@@ -1,12 +1,13 @@
 pub mod analytics;
 pub mod auth;
+mod compute;
 pub mod config;
 mod disguise;
 pub mod error;
 mod phpmyadmin;
 mod projects;
 
-use crate::{analytics::Analytics, auth::Auth, config::Config, error::Result};
+use crate::{analytics::Analytics, auth::Auth, compute::Compute, config::Config, error::Result};
 use axum::{
     Router,
     body::Bytes,
@@ -18,7 +19,7 @@ use axum::{
 };
 use sqlx::{
     PgPool,
-    postgres::{PgListener, PgPoolOptions},
+    postgres::{PgConnectOptions, PgListener, PgPoolOptions},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::broadcast;
@@ -30,13 +31,21 @@ pub struct Backend {
     pub analytics: Analytics,
     pub config: Config,
     pub changes: broadcast::Sender<String>,
+    compute: Compute,
 }
 impl Backend {
     pub async fn connect(config: Config) -> Result<Arc<Self>> {
+        // No statement, lock wait or idle transaction may keep a connection for
+        // long: there are only a few, and every request needs one.
+        let options = config.database_url.parse::<PgConnectOptions>()?.options([
+            ("lock_timeout", "5s"),
+            ("statement_timeout", "15s"),
+            ("idle_in_transaction_session_timeout", "15s"),
+        ]);
         let pool = PgPoolOptions::new()
             .max_connections(16)
             .acquire_timeout(Duration::from_secs(8))
-            .connect(&config.database_url)
+            .connect_with(options)
             .await?;
         sqlx::raw_sql(include_str!("../schema.sql"))
             .execute(&pool)
@@ -48,6 +57,7 @@ impl Backend {
             pool,
             config,
             changes,
+            compute: Compute::new(),
         });
         Ok(app)
     }

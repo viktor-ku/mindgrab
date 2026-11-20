@@ -123,6 +123,12 @@ export class ProjectDocument {
   snapshot() {
     return this.#state?.snapshot() ?? new Uint8Array();
   }
+  // The changes this document has beyond `version`, another replica's native
+  // version. A peer that holds that version merges these instead of receiving
+  // the complete history again.
+  updatesSince(version: Uint8Array) {
+    return this.native().updatesSince(version);
+  }
   view(): RustView {
     return JSON.parse(this.native().view());
   }

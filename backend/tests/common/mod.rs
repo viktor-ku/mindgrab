@@ -15,11 +15,12 @@ use mindgrab_backend::{
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
+    collections::HashSet,
     sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 
@@ -39,6 +40,12 @@ pub fn now() -> u64 {
 pub struct Provider {
     pub refreshes: AtomicUsize,
     pub rejected: AtomicUsize,
+    /// Milliseconds a refresh takes to answer once it has retired its token.
+    pub delay: AtomicU64,
+    spent: Mutex<HashSet<String>>,
+}
+fn refresh_token(sub: &str) -> String {
+    format!("refresh_{sub}.{}", Uuid::new_v4().simple())
 }
 async fn keys() -> Json<Value> {
     Json(serde_json::from_str(include_str!("../fixtures/jwks.json")).unwrap())
@@ -56,14 +63,23 @@ async fn authenticate(State(provider): State<Arc<Provider>>, Json(body): Json<Va
             .into_response();
     }
     let sub = if refresh {
-        body["refresh_token"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("refresh_")
+        let token = body["refresh_token"].as_str().unwrap();
+        // Like WorkOS, a refresh token works once, and is retired even if the
+        // answer never arrives.
+        if !provider.spent.lock().unwrap().insert(token.into()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":"invalid_grant"})),
+            )
+                .into_response();
+        }
+        tokio::time::sleep(Duration::from_millis(provider.delay.load(Ordering::SeqCst))).await;
+        let sub = token.trim_start_matches("refresh_");
+        sub.split('.').next().unwrap()
     } else {
         body["code"].as_str().unwrap_or("alice")
     };
-    Json(json!({"user":{"id":sub,"email":format!("{sub}@test.example"),"first_name":sub,"last_name":"Test"},"access_token":signed(sub,now()+3600),"refresh_token":format!("refresh_{sub}")})).into_response()
+    Json(json!({"user":{"id":sub,"email":format!("{sub}@test.example"),"first_name":sub,"last_name":"Test"},"access_token":signed(sub,now()+3600),"refresh_token":refresh_token(sub)})).into_response()
 }
 async fn authorize(Query(args): Query<std::collections::HashMap<String, String>>) -> Response {
     let mut callback = reqwest::Url::parse(&args["redirect_uri"]).unwrap();
@@ -176,7 +192,7 @@ impl Fixture {
     pub async fn credential(&self, sub: &str) -> String {
         let user_id:i64=sqlx::query_scalar("INSERT INTO mindgrab_loro.users(external_id,name,email) VALUES($1,$1,$2) ON CONFLICT(external_id) DO UPDATE SET name=EXCLUDED.name RETURNING id").bind(sub).bind(format!("{sub}@test.example")).fetch_one(&self.backend.pool).await.unwrap();
         let browser = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&browser)).bind(user_id).bind(format!("session_{sub}")).bind(signed(sub,now()+3600)).bind(format!("refresh_{sub}")).execute(&self.backend.pool).await.unwrap();
+        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&browser)).bind(user_id).bind(format!("session_{sub}")).bind(signed(sub,now()+3600)).bind(refresh_token(sub)).execute(&self.backend.pool).await.unwrap();
         browser
     }
     pub fn post(&self, method: &str, browser: &str) -> reqwest::RequestBuilder {

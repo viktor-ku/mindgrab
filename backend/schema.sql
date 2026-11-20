@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.sessions (
     expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days'
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON mindgrab_loro.sessions(expires_at);
+-- While set and in the future, one request is refreshing this session's tokens.
+ALTER TABLE mindgrab_loro.sessions ADD COLUMN IF NOT EXISTS refreshing_until TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS mindgrab_loro.projects (
     id UUID PRIMARY KEY,
     owner_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),

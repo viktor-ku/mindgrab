@@ -242,18 +242,19 @@ fn malformed_bytes_and_causal_gaps_are_rejected_atomically() {
     let mut seed = Project::new("Gaps").unwrap();
     let baseline = seed.snapshot().unwrap();
     let id = create(&mut seed, None, "dependency");
-    let version = seed.doc.oplog_vv();
+    let dependency = seed.snapshot().unwrap();
+    let version = seed.version();
     seed.apply(Command::SetText {
         id,
         text: "dependent edit".into(),
     })
     .unwrap();
-    let update = seed
-        .doc
-        .export(ExportMode::Updates {
-            from: std::borrow::Cow::Borrowed(&version),
-        })
-        .unwrap();
+    let update = seed.updates_since(&version).unwrap();
+    // A replica that holds the version takes only the new changes.
+    assert!(update.len() < seed.snapshot().unwrap().len());
+    let mut current = Project::from_snapshot(&dependency).unwrap();
+    current.merge(&update).unwrap();
+    assert_eq!(current.view().unwrap(), seed.view().unwrap());
     let mut replica = Project::from_snapshot(&baseline).unwrap();
     assert!(matches!(
         replica.merge(&update),

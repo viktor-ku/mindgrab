@@ -102,14 +102,18 @@ WorkOS authorization uses one-use state and PKCE. The server stores an opaque,
 hashed browser credential and keeps access/refresh tokens in Postgres. Each
 protected request validates a signed RS256 JWT against WorkOS JWKS, checking
 issuer, client ID, audience when present, session identity and token timing.
-Refresh rotation is serialized with a row lock. Provider outages do not erase
+Refresh rotation is serialized with a short lease on the session row, so no
+database connection is held during a WorkOS call. Provider outages do not erase
 local browser work or valid stored sessions. Logout removes server authority
 before redirecting to WorkOS.
 
 Mutations and sockets require the configured app Origin. Requests also carry an
 account fence (`x-mindgrab-account.php`) so a changed cookie cannot write into the
-previous workspace. The backend does not rate limit; that belongs in Cloudflare.
-The webapp treats a 429 as a temporary cloud failure and keeps retrying.
+previous workspace. The backend does not rate limit requests; that belongs in
+Cloudflare. It does bound document work: as many merges and projections at once
+as there are cores, two per account. Requests over that wait up to 3 seconds and
+are then answered 429 `busy`. The webapp treats a 429 as a temporary cloud
+failure and keeps retrying.
 
 ## API
 
@@ -124,7 +128,7 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/listProjects.php` | Cursor pagination of the current owner's initialized projects |
 | `/api/getProjectSnapshot.php` | Complete Loro history snapshot, base64 encoded |
 | `/api/getProjectState.php` | Read-only Rust projection for inspection |
-| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot |
+| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot, or only the changes the stored one lacks |
 | `/api/commandProject.php` | Apply `{projectId, command}` with the native shared core |
 | `/api/deleteProject.php` | Delete the cloud snapshot |
 | `/api/getShareLink.php` | The owner's `{projectId, token}`; `token` is null while private |
@@ -141,11 +145,24 @@ without a session; it closes with code 1008 once the link is revoked. Deleting a
 cloud copy also revokes its link. The webapp's read-only viewer lives at
 `/s/<token>`.
 
-Uploads lock the project row, validate and merge with the shared Rust core off
-the async executor, and commit the complete result before acknowledging
+Uploads validate and merge with the shared Rust core off the async executor,
+holding no database connection or row lock meanwhile. The result is stored only
+if the project is still at the revision it was computed from; otherwise the merge
+starts over, up to three times, and then answers 429. The complete result is
+committed before acknowledging
 `{projectId, encoding: "loro-snapshot", data, revision, durable: true}`. Repeated
-snapshots are idempotent. Invalid bytes do not mutate accepted storage. Errors
+uploads are idempotent. Invalid bytes do not mutate accepted storage. Errors
 use `{error: {code}}`; snapshots are capped at 10 MiB.
+
+The webapp uploads a complete snapshot only while the cloud has none. After that
+it sends the changes the cloud copy lacks. It reads the cloud copy before every
+upload, so a save whose acknowledgement was lost is not sent again. Changes that build
+on history the cloud copy does not hold are refused with 422
+`missing_dependencies`, and the webapp then sends the complete snapshot once.
+
+Pool connections set `lock_timeout` (5 s), `statement_timeout` and
+`idle_in_transaction_session_timeout` (15 s each). No request computes or calls
+WorkOS while it holds one.
 
 ## Apache and PHP disguise
 
