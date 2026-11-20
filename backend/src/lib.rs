@@ -76,10 +76,9 @@ impl Backend {
             .vary([])
             // Every API POST is preflighted because the webapp is on another origin.
             .max_age(Duration::from_secs(3600));
-        Router::new()
-            // PHP runs a script for any method, and `/` is the directory's index.
-            .route("/", any(projects::index))
-            .route("/index.php", any(projects::index))
+        // Only what the webapp fetches gets CORS. A preflight for any other path
+        // gets the answer Apache gives.
+        let api = Router::new()
             .route("/api/auth/callback.php", get(projects::callback))
             .route("/api/getHealth.php", rpc("getHealth"))
             .route("/api/startLogin.php", rpc("startLogin"))
@@ -95,19 +94,32 @@ impl Backend {
             .route("/api/getProjectSnapshot.php", rpc("getProjectSnapshot"))
             .route("/api/getProjectState.php", rpc("getProjectState"))
             .route("/api/getShareLink.php", rpc("getShareLink"))
-            .route("/ws/project/{id}", get(projects::socket))
-            .route("/ws/share/{token}", get(projects::shared_socket))
             .route(
                 "/ingest.php/{*path}",
                 get(analytics::ingest).post(analytics::ingest),
             )
+            .layer(cors);
+        // Everything PHP would generate is uncached. Apache's own pages and files
+        // carry none of these headers.
+        let scripts = Router::new()
+            // PHP runs a script for any method, and for a path that continues past
+            // it. `/` is the directory's index. None of these reaches anything real.
+            .route("/", any(projects::index))
+            .route("/index.php", any(projects::index))
+            .route("/index.php/", any(projects::index))
+            .route("/index.php/{*path_info}", any(projects::index))
+            .merge(api)
             .merge(phpmyadmin::routes())
+            .layer(middleware::from_fn(no_store));
+        Router::new()
+            .merge(scripts)
+            .merge(phpmyadmin::files())
+            .route("/ws/project/{id}", get(projects::socket))
+            .route("/ws/share/{token}", get(projects::shared_socket))
             .fallback(disguise::missing)
             .layer(DefaultBodyLimit::max(
                 mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
             ))
-            .layer(middleware::from_fn(no_store))
-            .layer(cors)
             .layer(middleware::from_fn(disguise::apply))
             .with_state(self.clone())
     }
@@ -149,15 +161,19 @@ fn rpc(method: &'static str) -> MethodRouter<Arc<Backend>> {
         },
     )
 }
+/// A response that set its own value keeps it: the phpMyAdmin decoy sends that
+/// program's headers.
 async fn no_store(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
-    );
+    let headers = response.headers_mut();
+    for (name, value) in [
+        (header::CACHE_CONTROL, "no-store"),
+        (header::REFERRER_POLICY, "no-referrer"),
+    ] {
+        if !headers.contains_key(&name) {
+            headers.insert(name, HeaderValue::from_static(value));
+        }
+    }
     response
 }
 pub(crate) type AppState = State<Arc<Backend>>;

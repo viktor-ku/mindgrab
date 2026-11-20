@@ -8,19 +8,22 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use tokio::sync::Semaphore;
 
 const APACHE: &str = "Apache/2.4.62 (Debian)";
 const PHP: &str = "PHP/8.3.14";
 /// Directories of the pretend document root. None has an index, so Apache redirects
 /// to the trailing slash and then refuses to list. `/phpmyadmin/` has a route.
-const DIRECTORIES: [&str; 3] = ["/api", "/api/auth", "/phpmyadmin"];
-/// A flood of slow 404s must not pile up in the process that also serves the API.
-/// Past this many, a 404 is immediate.
-static SLOW_ANSWERS: Semaphore = Semaphore::const_new(1024);
+const DIRECTORIES: [&str; 6] = [
+    "/api",
+    "/api/auth",
+    "/phpmyadmin",
+    "/phpmyadmin/themes",
+    "/phpmyadmin/themes/pmahomme",
+    "/phpmyadmin/themes/pmahomme/css",
+];
 
-/// Runs outermost, so CORS preflights, WebSocket upgrades and errors from the
-/// layers inside it are all covered.
+/// Runs outermost, so WebSocket upgrades and errors from the layers inside it are
+/// all covered.
 pub async fn apply(request: Request, next: Next) -> Response {
     let script = request
         .extensions()
@@ -28,22 +31,31 @@ pub async fn apply(request: Request, next: Next) -> Response {
         .and_then(|matched| script(matched.as_str()));
     let method = request.method().clone();
     let (host, port) = server_name(request.headers());
-    let mut response = next.run(request).await;
-    if let Some(script) = script {
+    let mut in_session = has_session(request.headers(), header::COOKIE);
+    let mut response = if method == Method::TRACE {
+        // Debian's Apache has `TraceEnable Off`: a 405 that allows nothing, on any path.
+        (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, "")]).into_response()
+    } else {
+        next.run(request).await
+    };
+    if let Some(script) = script.filter(|_| method != Method::TRACE) {
         if is_error(&response) && is_bare(&response) {
             response = php_error(response, &script);
         }
-        // What `session_start()` sends, and the reason PHP sites are recognised
-        // by a date in 1981.
-        for (name, value) in [
-            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
-            (header::EXPIRES, "Thu, 19 Nov 1981 08:52:00 GMT"),
-            (header::PRAGMA, "no-cache"),
-            (header::HeaderName::from_static("x-powered-by"), PHP),
-        ] {
-            response
-                .headers_mut()
-                .insert(name, HeaderValue::from_static(value));
+        in_session |= has_session(response.headers(), header::SET_COOKIE);
+        let headers = response.headers_mut();
+        headers.insert("x-powered-by", HeaderValue::from_static(PHP));
+        // What `session_start()` sends, and the reason PHP sites are recognised by
+        // a date in 1981. PHP sends them only along with a session cookie, and
+        // phpMyAdmin sends its own, so a response that has `expires` keeps it.
+        if in_session && !headers.contains_key(header::EXPIRES) {
+            for (name, value) in [
+                (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+                (header::EXPIRES, "Thu, 19 Nov 1981 08:52:00 GMT"),
+                (header::PRAGMA, "no-cache"),
+            ] {
+                headers.insert(name, HeaderValue::from_static(value));
+            }
         }
     } else if (is_error(&response) || response.status().is_redirection()) && is_bare(&response) {
         response = apache_page(response, &method, &host, port);
@@ -54,11 +66,30 @@ pub async fn apply(request: Request, next: Next) -> Response {
     response
 }
 
-/// Every path without a route: Apache looking in its document root.
-pub async fn missing(uri: Uri, headers: HeaderMap) -> Response {
+/// Whether a `Cookie` or `Set-Cookie` header carries the session cookie. Its name
+/// gains a suffix in local mode.
+fn has_session(headers: &HeaderMap, name: header::HeaderName) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .any(|field| field.trim_start().starts_with(crate::auth::SESSION_COOKIE))
+}
+
+/// Every path without a route: Apache looking in its document root, as fast as
+/// Apache answers. Throttling scanners is Cloudflare's job.
+pub async fn missing(method: Method, uri: Uri, headers: HeaderMap) -> Response {
     let path = decoded(uri.path());
-    if is_hidden(&path) {
+    // `mod_status` and the icon directory ship enabled on Debian and refuse outsiders.
+    let is_stock =
+        path == "/icons/" || path == "/server-status" || path.starts_with("/server-status/");
+    if is_hidden(&path) || is_stock {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if method == Method::OPTIONS {
+        // Apache answers this itself, for a file that exists or not.
+        return [(header::ALLOW, "OPTIONS,HEAD,GET,POST")].into_response();
     }
     if let Some(directory) = DIRECTORIES.iter().find(|directory| **directory == path) {
         // Apache sees plain HTTP behind the proxy, so its redirect says `http`.
@@ -80,11 +111,6 @@ pub async fn missing(uri: Uri, headers: HeaderMap) -> Response {
         .is_some_and(|directory| DIRECTORIES.contains(&directory))
     {
         return StatusCode::FORBIDDEN.into_response();
-    }
-    // Only scanners ask for paths that do not exist, so each one waits.
-    if let Ok(_permit) = SLOW_ANSWERS.try_acquire() {
-        let delay = crate::phpmyadmin::thinking_time(&mut rand::thread_rng());
-        tokio::time::sleep(delay).await;
     }
     StatusCode::NOT_FOUND.into_response()
 }
@@ -131,11 +157,10 @@ fn is_hidden(path: &str) -> bool {
 /// directory is its `index.php`. `None` for the WebSocket routes, which Apache
 /// would proxy to a daemon.
 fn script(route: &str) -> Option<String> {
-    if route.ends_with('/') {
-        return Some(format!("{route}index.php"));
+    if let Some(start) = route.find(".php") {
+        return Some(route[..start + ".php".len()].to_owned());
     }
-    let end = route.find(".php")? + ".php".len();
-    Some(route[..end].to_owned())
+    route.ends_with('/').then(|| format!("{route}index.php"))
 }
 
 /// Apache signs its pages with the Host header's name and port. It answers 400 to
@@ -283,7 +308,7 @@ mod tests {
     }
 
     // PHP's headers on a page Apache wrote, or the reverse, give the disguise away.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn apache_answers_for_missing_files_and_php_for_its_scripts() {
         let (response, page) = ask(Method::GET, "/wp-login.php").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

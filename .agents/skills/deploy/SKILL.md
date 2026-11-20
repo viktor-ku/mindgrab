@@ -116,8 +116,7 @@ railway logs "${R[@]}" --http --since 10m --filter '@httpStatus:>=500'
 ```
 
 Check `x-powered-by`, not `server`: Cloudflare replaces `server` with
-`cloudflare`, so `Apache/2.4.62` never reaches a client on this domain. Do not probe
-a path that has no route: the API holds every 404 for up to 10 seconds.
+`cloudflare`, so `Apache/2.4.62` never reaches a client on this domain.
 
 The account fence fails open: if an edge drops `x-mindgrab-account`, a stale tab
 can write into another account with no error. `fence ok` above proves the header

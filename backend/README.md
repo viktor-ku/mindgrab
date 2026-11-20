@@ -167,19 +167,28 @@ WorkOS while it holds one.
 ## Apache and PHP disguise
 
 The backend presents itself as Apache and PHP. It is a joke built to production
-quality, and it is meant to cost an attacker time, so no page, header or error may
-give it away. The model is the `php:8.3.14-apache` image: before changing a page or
-a header here, run that image and copy what it sends.
+quality, and it is meant to cost an attacker time, so no page, header or error
+should give it away at a glance. The models are the `php:8.3.14-apache` and
+`phpmyadmin:5.2` images: before changing a page, header or cookie here, run the
+image and copy what it sends.
 
-`src/disguise.rs` is the outermost layer, outside CORS, so it sees every response
-from the router. It answers in one of two voices:
+The disguise must never make the app easier to attack. It copies how PHP and Apache
+look, not what they accept: every real endpoint keeps exactly one URL, the router
+matches paths exactly, and nothing from a request reaches a page except a validated
+host name. When looking like PHP would mean accepting more, the answer is no.
+
+`src/disguise.rs` is the outermost layer, so it sees every response from the
+router. It answers in one of two voices:
 
 - **PHP**, on a route that passes as a script: any path containing `.php`, and a
   directory's index (`/` is `/index.php`, `/phpmyadmin/` is `/phpmyadmin/index.php`).
-  These carry `x-powered-by: PHP/8.3.14` and the three headers `session_start()`
-  sends, including `expires: Thu, 19 Nov 1981 08:52:00 GMT`.
-- **Apache**, everywhere else: paths with no route, and the WebSocket routes. PHP
-  never ran for these, so they carry no PHP header.
+  These carry `x-powered-by: PHP/8.3.14`. A request or response that carries the
+  session cookie also gets the three headers `session_start()` sends, including
+  `expires: Thu, 19 Nov 1981 08:52:00 GMT`. Without a session they are left out,
+  because PHP never sends them without also setting the cookie.
+- **Apache**, everywhere else: paths with no route, the decoy's static files and
+  the WebSocket routes. PHP never ran for these, so they carry no PHP header, no
+  CORS header and no `cache-control`.
 
 Both carry `server: Apache/2.4.62 (Debian)`. Cloudflare replaces `server` with its
 own value and no rule can change that, so on the public domains the Apache version
@@ -189,21 +198,25 @@ The layer rewrites every error with an empty or plain-text body: axum's 404s, 40
 413s and extractor rejections, and the same kinds of error from the analytics proxy.
 JSON errors pass through, because the webapp reads their codes. hyper answers
 requests it cannot parse (400, 414, 431) before any layer runs, so those stay
-undisguised.
+undisguised; Cloudflare answers them first in production.
 
 - **A script that fails** shows PHP's uncaught-exception output with the same
   status, naming its own file under `/var/www/html`. A script sent the wrong method
   answers 405 with `allow` and an empty body, as `http_response_code(405); exit;` does.
-- **A path with no route** gets Apache's 404 page after a random wait of 100ms to
-  10s. Only scanners ask for such paths, and the wait is what slows them down. At
-  most 1,024 wait at once; any others get the 404 immediately.
+- **A path with no route** gets Apache's 404 page at once. Slowing scanners down is
+  Cloudflare's job: a wait here made every miss stand out from the real routes.
+- **`OPTIONS` on a path with no route** gets Apache's own answer, a 200 with
+  `allow: OPTIONS,HEAD,GET,POST`. Only `/api/*.php` and `/ingest.php` answer CORS
+  preflights.
+- **`TRACE`** gets a 405 that allows nothing, on any path.
 - **`.ht*` in a directory that exists** gets Apache's 403, as Debian's Apache gives
   whether or not the file exists. Paths are decoded first, so `/%2ehtaccess` counts.
   Below a directory that does not exist it is the usual 404.
-- **`/api`, `/api/auth` and `/phpmyadmin`** redirect to the trailing slash with a 301,
-  and `/api/` and `/api/auth/` answer 403, as directories without an index do. The
-  redirect says `http://`, because Apache behind a proxy sees plain HTTP, and
-  keeps a port other than 80.
+- **`/server-status` and `/icons/`** get the 403 Debian's stock configuration gives.
+- **`/api`, `/api/auth`, `/phpmyadmin` and its theme directories** redirect to the
+  trailing slash with a 301, and all but `/phpmyadmin/` then answer 403, as
+  directories without an index do. The redirect says `http://`, because Apache
+  behind a proxy sees plain HTTP, and keeps a port other than 80.
 
 Apache's pages name the host from the `Host` header, lowercased. A value that is not
 a hostname becomes `localhost`, and nothing else from the request reaches a page.
@@ -216,6 +229,10 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
   refuses a healthcheck path containing a dot. It still queries the database, so a
   deployment that cannot reach Postgres never goes live. Like any PHP script, it and
   `/index.php` answer every method.
+- **A path that continues past a script** (PATH_INFO, `/index.php/x`) runs the script
+  in PHP. Here only the decoys accept it: `/index.php` and `/phpmyadmin/index.php`.
+  The `/api/*.php` endpoints answer 404, as Apache does with `AcceptPathInfo Off`,
+  so a rule written for an endpoint's exact path always covers it.
 - **`/ingest.php/<path>`** is PATH_INFO style, as in a PHP front controller. The
   PostHog SDK appends its own paths, so the URL cannot end in `.php`.
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
@@ -227,21 +244,35 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
   sends no `vary`, because tower-http's default list of three request headers
   appears on no PHP site.
 - **Cookies.** `PHPSESSID` holds the session and `PHPLOGINID` the login state; local
-  mode appends `_local_<port>`. `mindgrab_analytics_consent` belongs to the webapp.
+  mode appends `_local_<port>`. Both values are 32 hex characters, the shape of
+  PHP's session ID, and `Set-Cookie` is spelled as PHP's `setcookie()` spells it,
+  down to deleting with the value `deleted`. `mindgrab_analytics_consent` belongs
+  to the webapp.
 
 ### The webapp and Cloudflare
 
 `mindgrab.app` plays along from `webapp/Caddyfile`. The app shell carries
 `x-powered-by: PHP/8.3.14` and no `etag` or `last-modified`, as if an `index.php`
-front controller rendered it, and it answers every unknown path, `.php` or not, as
-a front controller does. `.ht*` paths at the root and in `/assets/` get Apache's
-403 page, and `/phpmyadmin` redirects to the decoy on the API.
+front controller rendered it. It answers every unknown path, `.php` or not, and
+every method, as a front controller does. Static files carry no `etag`, because
+Caddy's is not in Apache's form. A missing `/assets/` file gets Apache's 404 page,
+`/assets/` itself and `.ht*` paths get its 403 page, and `/phpmyadmin` redirects to
+the decoy on the API with Apache's 301 page.
 
-Railway's edge adds `x-railway-edge`, `x-railway-request-id` and `x-hikari-trace` to
-every response. A Cloudflare response header transform rule on the `mindgrab.app`
-zone, described as "Hide the host", removes them on every hostname, along with
-`x-railway-cdn-edge` and `x-railway-fallback`. It lives only in Cloudflare, so
-recreate it if the zone is rebuilt. No rule can change `server`.
+Two things live only in Cloudflare, on the `mindgrab.app` zone. Recreate them if the
+zone is rebuilt.
+
+- **A response header transform rule**, described as "Hide the host", removes the
+  headers Railway's edge adds: `x-railway-edge`, `x-railway-request-id`,
+  `x-hikari-trace`, `x-railway-cdn-edge` and `x-railway-fallback`. No rule can
+  change `server`.
+- **URL normalization** (Rules, Settings) is set to the *Cloudflare* type with both
+  *Normalize incoming URLs* and *Normalize URLs to origin* on. Apache finds a
+  script after decoding the path, merging slashes and resolving dot segments, so
+  `/api/%67etMe.php` and `/api//getMe.php` run `getMe.php`. Cloudflare does that
+  tidying before it forwards a request, which lets the backend keep matching paths
+  exactly. Do not add normalization to the router instead: Cloudflare's rules and
+  the backend must always see the same path.
 
 ### phpMyAdmin decoy
 
@@ -251,10 +282,18 @@ lives in `src/phpmyadmin.rs` and `src/phpmyadmin.html`, needs no database, and i
 served from the API domain, not `mindgrab.app`. Vite does not proxy it, so
 locally use the backend's `PORT`.
 
+Its response headers and cookies are copied from the `phpmyadmin:5.2` image. The
+login page sets a new `phpMyAdmin` session cookie on every load, after repeating
+the one it was sent; real phpMyAdmin does the same. A cookie is repeated only if it
+is 32 lowercase hex characters. The page links to a stylesheet and a favicon at
+phpMyAdmin's own URLs (`themes/pmahomme/css/theme.css?v=5.2.3`, `favicon.ico`).
+Both files are ours, `src/phpmyadmin.css` and `src/phpmyadmin.ico`: phpMyAdmin's
+are GPL-licensed, so do not copy them in.
+
 A POST waits a random 100ms to 10s, then always fails: HTTP 200, as real phpMyAdmin
 returns, with MySQL's access-denied error on the login page. A malformed or
 oversized body (the route's limit is 8 KiB) counts as empty fields, never a 4xx.
-Up to 64 MiB of an oversized body is read and discarded first: closing a connection
+Up to 1 MiB of an oversized body is read and discarded first: closing a connection
 with bytes unread resets it, and a browser still sending would never see the page.
 Reading stops after 15 seconds. Because the backend has no rate limit, at most 1,024
 attempts read or wait at once, and any others are denied immediately without reading
@@ -266,7 +305,8 @@ the body.
 - **Reflected XSS.** The page shares the API origin, where a same-origin script
   could use the session cookie. The reflected username is escaped and truncated to
   32 characters, and placeholders in it render literally. Keep the page free of
-  JavaScript and external assets; its CSP enforces this.
+  JavaScript: its CSP allows no script at all, which is stricter than phpMyAdmin's
+  own, and allows styles and images from this origin only.
 
 ## Verification
 

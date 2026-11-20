@@ -134,7 +134,7 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     assert_eq!(expected.status(), 409);
     let logout = f.post("logout", browser).send().await.unwrap();
     assert_eq!(logout.status(), 303);
-    assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=")));
+    assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=deleted")));
     assert_eq!(f.rpc("getMe", browser, json!({})).await.status(), 401);
     let browser = f.credential("alice").await;
     sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$1 WHERE browser_hash=$2")

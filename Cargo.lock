@@ -1619,6 +1619,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "futures-util",
+ "httpdate",
  "jsonwebtoken",
  "mindgrab-state",
  "rand 0.8.8",

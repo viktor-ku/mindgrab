@@ -9,13 +9,15 @@
 	root * /srv
 
 	# The API passes as PHP behind Apache (backend/README.md), and this site plays
-	# along. Debian's Apache refuses `.ht*` in every directory that exists, and this
-	# page is the only place its version shows, because Cloudflare replaces `Server`.
-	# The wording is copied from the php:8.3.14-apache image. It echoes nothing from
-	# the request. Handlers with named matchers run in the order written, so this
-	# one comes before the assets.
-	@htfiles path_regexp ^/(assets/)?\.ht
-	handle @htfiles {
+	# along. Apache's pages are the only place its version shows, because Cloudflare
+	# replaces `Server`. Their wording is copied from the php:8.3.14-apache image,
+	# and they echo nothing from the request.
+	#
+	# Debian's Apache refuses `.ht*` in every directory that exists, and refuses to
+	# list a directory without an index. Handlers with named matchers run in the
+	# order written, so this one comes before the assets.
+	@forbidden path_regexp ^/(assets/(\.ht.*)?|\.ht.*)$
+	handle @forbidden {
 		header Content-Type "text/html; charset=iso-8859-1"
 		respond <<PAGE
 			<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
@@ -39,14 +41,47 @@
 			not path */
 			file
 		}
-		header @present Cache-Control "public, max-age=31536000, immutable"
-		file_server
+		handle @present {
+			header Cache-Control "public, max-age=31536000, immutable"
+			# Caddy's ETag is not in Apache's form. These files never change, so
+			# nothing revalidates them anyway.
+			header -ETag
+			file_server
+		}
+		handle {
+			header Content-Type "text/html; charset=iso-8859-1"
+			respond <<PAGE
+				<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+				<html><head>
+				<title>404 Not Found</title>
+				</head><body>
+				<h1>Not Found</h1>
+				<p>The requested URL was not found on this server.</p>
+				<hr>
+				<address>Apache/2.4.62 (Debian) Server at mindgrab.app Port 80</address>
+				</body></html>
+
+				PAGE 404
+		}
 	}
 
 	# The phpMyAdmin decoy is on the API's origin, away from this one's storage.
 	@phpmyadmin path /phpmyadmin /phpmyadmin/*
 	handle @phpmyadmin {
-		redir https://api.mindgrab.app/phpmyadmin/ 301
+		header Location https://api.mindgrab.app/phpmyadmin/
+		header Content-Type "text/html; charset=iso-8859-1"
+		respond <<PAGE
+			<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN">
+			<html><head>
+			<title>301 Moved Permanently</title>
+			</head><body>
+			<h1>Moved Permanently</h1>
+			<p>The document has moved <a href="https://api.mindgrab.app/phpmyadmin/">here</a>.</p>
+			<hr>
+			<address>Apache/2.4.62 (Debian) Server at mindgrab.app Port 80</address>
+			</body></html>
+
+			PAGE 301
 	}
 
 	# index.html (and the sw.js tombstone) must revalidate so a new build reaches browsers.
@@ -58,13 +93,18 @@
 			file
 		}
 		handle @file {
+			# Last-Modified is enough to revalidate, and Caddy's ETag is not Apache's.
+			header -ETag
 			file_server
 		}
 
 		# Every other path is the app shell, as if an index.php front controller
-		# rendered it: PHP's header, and none of a static file's.
+		# rendered it: PHP's header, none of a static file's, and an answer for any
+		# method, where a file server would refuse a POST.
 		handle {
 			rewrite * /index.html
+			@write not method GET HEAD
+			method @write GET
 			header X-Powered-By "PHP/8.3.14"
 			header -Last-Modified
 			header -ETag
