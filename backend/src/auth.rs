@@ -25,6 +25,10 @@ const LOCAL_USER_ID: &str = "local_boba_tee";
 const LOCAL_TOKEN: &str = "local-development";
 /// How long a request waits for another one to finish refreshing its session.
 const REFRESH_WAIT: Duration = Duration::from_secs(10);
+/// A refresh leases its session this long, and gives up well before that: one
+/// that outlived its lease could end a session the next holder had renewed.
+const REFRESH_LEASE: Duration = Duration::from_secs(60);
+const REFRESH_LIMIT: Duration = Duration::from_secs(45);
 pub fn hash(value: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(value))
 }
@@ -451,12 +455,12 @@ impl Auth {
     /// request at a time spend this one, in any process. `None` when another
     /// request holds the lease.
     async fn refresh(&self, browser_hash: &str, session: Session) -> Result<Option<User>> {
-        // The lease outlasts the provider calls and ends early when they do.
-        let leased = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=now()+interval '30 seconds' WHERE browser_hash=$1 AND refresh_token=$2 AND (refreshing_until IS NULL OR refreshing_until<=now())").bind(browser_hash).bind(&session.refresh_token).execute(&self.pool).await?.rows_affected();
-        if leased == 0 {
+        // The lease's end time identifies it, so only its holder releases it.
+        let lease: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.sessions SET refreshing_until=now()+make_interval(secs => $3) WHERE browser_hash=$1 AND refresh_token=$2 AND (refreshing_until IS NULL OR refreshing_until<=now()) RETURNING refreshing_until::text").bind(browser_hash).bind(&session.refresh_token).bind(REFRESH_LEASE.as_secs_f64()).fetch_optional(&self.pool).await?;
+        let Some(lease) = lease else {
             return Ok(None);
-        }
-        let refreshed: Result<User> = async {
+        };
+        let refreshed: Result<User> = tokio::time::timeout(REFRESH_LIMIT, async {
             let auth = self.authenticate(serde_json::json!({"grant_type":"refresh_token","refresh_token":session.refresh_token})).await?;
             let claims = self.verify(&auth.access_token).await?;
             if claims.exp <= now()
@@ -475,11 +479,12 @@ impl Auth {
             let user = upsert(&mut tx, &auth.user).await?.user;
             tx.commit().await?;
             Ok(user)
-        }
-        .await;
+        })
+        .await
+        .unwrap_or_else(|_| Err(ApiError::unavailable()));
         if refreshed.is_err() {
             // The next request may try at once rather than wait out the lease.
-            let _ = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=NULL WHERE browser_hash=$1 AND refresh_token=$2").bind(browser_hash).bind(&session.refresh_token).execute(&self.pool).await;
+            let _ = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=NULL WHERE browser_hash=$1 AND refreshing_until::text=$2").bind(browser_hash).bind(lease).execute(&self.pool).await;
         }
         refreshed.map(Some)
     }

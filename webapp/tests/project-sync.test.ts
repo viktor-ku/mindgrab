@@ -11,7 +11,11 @@ import type {
   ProjectHandle,
   ProjectRepository,
 } from "../src/project-repository";
-import { pendingUpload, ProjectSync } from "../src/project-sync";
+import {
+  committedVersion,
+  pendingUpload,
+  ProjectSync,
+} from "../src/project-sync";
 const controllers: ProjectSync[] = [];
 const docs: ProjectDocument[] = [];
 afterEach(() => {
@@ -130,15 +134,20 @@ function fixture() {
   return { doc, root, server, ...attach(doc, server) };
 }
 
-test("lost acknowledgements resend the same upload before later edits", async () => {
+const long = () =>
+  Array.from({ length: 1500 }, () => crypto.randomUUID()).join(" ");
+test("a save whose acknowledgement was lost is not uploaded again", async () => {
   const { doc, root, server, sync } = fixture();
+  editNodeText(doc, root, 0, 0, long());
   server.lost = true;
   await sync.syncNow();
   expect(sync.status.status).toBe("retrying");
   editNodeText(doc, root, 0, 0, "Later ");
   await sync.syncNow();
-  expect(server.merges[1]).toEqual(server.merges[0]);
-  expect(server.merges).toHaveLength(3);
+  // The cloud kept the first save, so only the later edit is sent.
+  expect(server.merges).toHaveLength(2);
+  expect(server.merges[0].length).toBeGreaterThan(40_000);
+  expect(server.merges[1].length).toBeLessThan(1000);
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
 });
@@ -165,17 +174,19 @@ test("reload recovery includes pure deletions and duplicate histories produce no
   const next = attach(reopened, server).sync;
   await next.syncNow();
   expect(server.doc.view().nodes[0].text).toBe(" 🌲");
-  expect(pendingUpload(reopened, server.doc.snapshot())).toBeUndefined();
+  expect(
+    pendingUpload(
+      reopened,
+      committedVersion(reopened.id, server.doc.snapshot()),
+    ),
+  ).toBeUndefined();
   const count = server.merges.length;
   await next.syncNow();
   expect(server.merges).toHaveLength(count);
 });
 test("saves after the first send only new changes, and the whole map again if the cloud copy was replaced", async () => {
   const { doc, root, server, sync } = fixture();
-  const long = Array.from({ length: 1500 }, () => crypto.randomUUID()).join(
-    " ",
-  );
-  editNodeText(doc, root, 0, 0, long);
+  editNodeText(doc, root, 0, 0, long());
   await sync.syncNow();
   editNodeText(doc, root, 0, 0, "Next ");
   await sync.syncNow();
@@ -192,7 +203,10 @@ test("saves after the first send only new changes, and the whole map again if th
     return result;
   };
   await sync.syncNow();
+  // The refused changes, then the whole map.
   expect(server.merges).toHaveLength(4);
+  expect(server.merges[2].length).toBeLessThan(1000);
+  expect(server.merges[3].length).toBeGreaterThan(40_000);
   expect(sync.status.status).toBe("saved");
   expect(server.doc.view()).toEqual(doc.view());
 });

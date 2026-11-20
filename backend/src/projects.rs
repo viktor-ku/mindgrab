@@ -216,11 +216,12 @@ pub async fn rpc(
         }
         "getProjectState" => {
             let args: ProjectId = parse(&headers, &body)?;
+            // The turn comes first: waiting requests then hold no snapshot.
+            let permit = app.compute.acquire(user.id).await?;
             let bytes = stored(&app, &user, args.project_id)
                 .await?
                 .snapshot
                 .ok_or_else(ApiError::missing)?;
-            let permit = app.compute.acquire(user.id).await?;
             let view = compute::run(&permit, move || {
                 Ok(mindgrab_state::Project::from_snapshot(&bytes)?.view()?)
             })

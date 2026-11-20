@@ -69,20 +69,27 @@ export function websocketProvider(
     },
   };
 }
-// What the cloud copy lacks: the whole document while the cloud has none, and
-// afterwards only the changes made since `committed`, never the complete
-// history again.
-export function pendingUpload(doc: ProjectDocument, committed: Uint8Array) {
-  if (!doc.ready) return undefined;
-  if (!committed.length) return doc.snapshot();
-  const remote = openProjectDocument(doc.id, [committed]);
+// The version of a committed cloud snapshot, or undefined while the cloud has
+// none.
+export function committedVersion(id: string, snapshot: Uint8Array) {
+  if (!snapshot.length) return undefined;
+  const remote = openProjectDocument(id, [snapshot]);
   try {
-    return remote.version() === doc.version()
-      ? undefined
-      : doc.updatesSince(remote);
+    return remote.native().version();
   } finally {
     remote.destroy();
   }
+}
+// Whether the document holds anything the cloud copy at `committed` lacks.
+function unsaved(doc: ProjectDocument, committed?: Uint8Array) {
+  return doc.ready && (!committed || committed.join(",") !== doc.version());
+}
+// What the cloud copy lacks: the whole document while the cloud has none, and
+// afterwards only the changes made since `committed`, never the complete
+// history again.
+export function pendingUpload(doc: ProjectDocument, committed?: Uint8Array) {
+  if (!unsaved(doc, committed)) return undefined;
+  return committed ? doc.updatesSince(committed) : doc.snapshot();
 }
 export interface SyncOptions {
   api?: LoroApi;
@@ -110,9 +117,10 @@ export class ProjectSync {
   #registrationChecked = false;
   #deleted = false;
   #registrationStarted = false;
-  #snapshot = new Uint8Array();
-  // A sent upload whose acknowledgement may be lost is resent unchanged.
-  #pending?: Uint8Array;
+  // The version of the cloud copy as last read. Every sync reads it again
+  // before choosing what to upload, so a save whose acknowledgement was lost
+  // is never sent a second time.
+  #committed?: Uint8Array;
   #paused = false;
   #authPaused = false;
   #status: CloudStatus = { status: "saving" };
@@ -196,14 +204,13 @@ export class ProjectSync {
     if (!savingPreferences(this.handle.doc).cloud) {
       this.#provider?.destroy();
       this.#provider = undefined;
-      this.#pending = undefined;
       this.#trigger(true);
       return;
     }
     if (this.#deleted) {
       this.#deleted = false;
       this.#registered = false;
-      this.#snapshot = new Uint8Array();
+      this.#committed = undefined;
     }
     if (origin === ORIGIN.remote || origin === this.#provider || this.#paused)
       return;
@@ -287,7 +294,7 @@ export class ProjectSync {
         await this.repository.markUnregistered(this.handle.id);
         this.#registered = false;
         this.#registrationStarted = false;
-        this.#snapshot = new Uint8Array();
+        this.#committed = undefined;
       }
       this.#deleted = true;
       this.#setStatus({ status: "disabled" });
@@ -300,11 +307,7 @@ export class ProjectSync {
     }
     // Pulling a remote change is not saving: only registration or an upload
     // shows "saving", so socket notifications don't flash it.
-    if (
-      !this.#registered ||
-      this.#pending ||
-      pendingUpload(this.handle.doc, this.#snapshot)
-    )
+    if (!this.#registered || unsaved(this.handle.doc, this.#committed))
       this.#setStatus({ status: "saving" });
     if (!this.#registered) {
       this.#registrationStarted = true;
@@ -320,29 +323,32 @@ export class ProjectSync {
     this.#alive(signal);
     await this.#apply(decodeBase64(snapshot.data), signal);
     // Edits made during an upload are uploaded by the same run.
+    let whole = false;
     let resent = false;
     for (;;) {
-      this.#pending ??= pendingUpload(this.handle.doc, this.#snapshot);
-      if (!this.#pending) break;
+      const upload = whole
+        ? this.handle.doc.snapshot()
+        : pendingUpload(this.handle.doc, this.#committed);
+      if (!upload) break;
+      whole = false;
       this.#setStatus({ status: "saving" });
       let receipt: CloudSnapshot;
       try {
-        receipt = await this.api.merge(this.handle.id, this.#pending, signal);
+        receipt = await this.api.merge(this.handle.id, upload, signal);
       } catch (error) {
         // The cloud copy no longer holds what these changes build on: it was
-        // deleted and created again elsewhere. Send the whole document once.
+        // deleted and created again since it was read. Send the whole
+        // document, once.
         if (
           resent ||
           !(error instanceof SyncError) ||
           error.code !== "missing_dependencies"
         )
           throw error;
-        resent = true;
-        this.#pending = this.handle.doc.snapshot();
+        whole = resent = true;
         continue;
       }
       this.#alive(signal);
-      this.#pending = undefined;
       await this.#apply(decodeBase64(receipt.data), signal);
     }
     this.#connect().connect();
@@ -350,7 +356,7 @@ export class ProjectSync {
   }
   async #apply(committed: Uint8Array<ArrayBuffer>, signal: AbortSignal) {
     this.handle.doc.merge(committed, ORIGIN.remote);
-    this.#snapshot = committed;
+    this.#committed = committedVersion(this.handle.id, committed);
     await this.handle.flush();
     this.#alive(signal);
     await this.handle.refreshMetadata();

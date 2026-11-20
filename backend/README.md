@@ -155,7 +155,8 @@ uploads are idempotent. Invalid bytes do not mutate accepted storage. Errors
 use `{error: {code}}`; snapshots are capped at 10 MiB.
 
 The webapp uploads a complete snapshot only while the cloud has none. After that
-it sends the changes made since the last committed snapshot. Changes that build
+it sends the changes the cloud copy lacks. It reads the cloud copy before every
+upload, so a save whose acknowledgement was lost is not sent again. Changes that build
 on history the cloud copy does not hold are refused with 422
 `missing_dependencies`, and the webapp then sends the complete snapshot once.
 
