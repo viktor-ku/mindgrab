@@ -37,6 +37,11 @@ pub(crate) fn token() -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
+/// A cookie value shaped like PHP's default session ID: 32 hex characters, which
+/// is 128 random bits. Only its hash is stored.
+fn session_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -58,15 +63,23 @@ pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         Some(value)
     }
 }
+/// `Set-Cookie` spelled as PHP spells it, attribute for attribute, copied from
+/// PHP 8.3's `setcookie()`. An empty value deletes the cookie, PHP's way.
 fn cookie(config: &Config, name: &str, value: &str, age: u32) -> String {
     let name = config.cookie_name(name);
+    let secure = if config.secure_cookies {
+        "; secure"
+    } else {
+        ""
+    };
+    if value.is_empty() {
+        return format!(
+            "{name}=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; path=/{secure}; HttpOnly; SameSite=Lax"
+        );
+    }
+    let expires = httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(age.into()));
     format!(
-        "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={age}{}",
-        if config.secure_cookies {
-            "; Secure"
-        } else {
-            ""
-        }
+        "{name}={value}; expires={expires}; Max-Age={age}; path=/{secure}; HttpOnly; SameSite=Lax"
     )
 }
 fn redirect(url: &str, cookies: Vec<String>) -> Response {
@@ -231,7 +244,7 @@ impl Auth {
     }
     pub async fn start(&self, headers: &HeaderMap) -> Result<Response> {
         self.config.same_origin(headers)?;
-        let nonce = token();
+        let nonce = session_id();
         let verifier = token();
         let mut tx = self.pool.begin().await?;
         if let Some(previous) = self.browser_cookie(headers, STATE_COOKIE) {
@@ -339,7 +352,7 @@ impl Auth {
         if claims.exp <= now() || claims.sub != auth.user.id {
             return Err(ApiError::unauthorized());
         }
-        let credential = token();
+        let credential = session_id();
         let mut tx = self.pool.begin().await?;
         let Upserted { user, created } = upsert(&mut tx, &auth.user).await?;
         sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&credential)).bind(user.id).bind(claims.sid).bind(auth.access_token).bind(auth.refresh_token).execute(&mut *tx).await?;
@@ -376,9 +389,9 @@ impl Auth {
     }
     pub async fn identify(&self, headers: &HeaderMap) -> Result<User> {
         // Parsed before the session is read, so the deploy check can prove without
-        // signing in that the edge passes this dotted header.
+        // signing in that the edge passes this header.
         let expected = headers
-            .get("x-mindgrab-account.php")
+            .get("x-mindgrab-account")
             .map(|value| {
                 value
                     .to_str()

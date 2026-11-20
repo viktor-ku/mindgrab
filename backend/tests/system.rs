@@ -127,21 +127,14 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     f.provider.delay.store(0, Ordering::SeqCst);
     let expected = f
         .post("getMe", browser)
-        .header("x-mindgrab-account.php", "999")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(expected.status(), 409);
-    let retired = f
-        .post("getMe", browser)
         .header("x-mindgrab-account", "999")
         .send()
         .await
         .unwrap();
-    assert_eq!(retired.status(), 200);
+    assert_eq!(expected.status(), 409);
     let logout = f.post("logout", browser).send().await.unwrap();
     assert_eq!(logout.status(), 303);
-    assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=")));
+    assert!(cookies(logout.headers()).contains(&format!("{SESSION_COOKIE}=deleted")));
     assert_eq!(f.rpc("getMe", browser, json!({})).await.status(), 401);
     let browser = f.credential("alice").await;
     sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$1 WHERE browser_hash=$2")
@@ -681,5 +674,32 @@ async fn concurrent_large_merges_leave_other_accounts_responsive() {
             "Edit {n}"
         );
     }
+    f.close().await;
+}
+
+/// Only a snapshot upload may be large, and only from a signed-in account: every
+/// other body the server agrees to hold is a few identifiers.
+#[tokio::test]
+async fn a_body_is_read_only_after_the_session_and_up_to_its_methods_limit() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let megabyte = vec![b' '; 1024 * 1024];
+    let stranger = f
+        .post("mergeProject", "no-such-session")
+        .query(&[("projectId", Uuid::new_v4())])
+        .header("content-type", "application/octet-stream")
+        .body(megabyte.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stranger.status(), 401);
+    let alice = f.credential("alice").await;
+    let oversized = f
+        .post("listProjects", &alice)
+        .header("content-type", "application/json")
+        .body(megabyte)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), 413);
     f.close().await;
 }

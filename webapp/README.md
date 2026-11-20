@@ -8,7 +8,9 @@ available. A build rooted only at `webapp` cannot generate these bindings.
 
 The Railway `web` service builds `webapp/Dockerfile` and serves the assets with
 Caddy. `webapp/Caddyfile` marks hashed `/assets/*` files immutable, makes everything
-else revalidate, and falls back to `index.html` for client-side routes.
+else revalidate, and falls back to `index.html` for client-side routes. It also
+keeps up the API's PHP disguise; see "Apache and PHP disguise" in
+[`backend/README.md`](../backend/README.md).
 `VITE_BACKEND_URL` is baked in at build time and points the app at the API. See
 [`backend/README.md`](../backend/README.md) for the Railway settings.
 

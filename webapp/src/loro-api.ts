@@ -187,8 +187,7 @@ export class LoroApi {
   async #request(path: string, signal: AbortSignal, init?: RequestInit) {
     signal.throwIfAborted();
     const headers = new Headers(init?.headers);
-    if (this.ownerId)
-      headers.set("X-Mindgrab-Account.php", String(this.ownerId));
+    if (this.ownerId) headers.set("X-Mindgrab-Account", String(this.ownerId));
     const response = await this.fetcher(this.endpoint(`/api/${path}`), {
       ...init,
       method: "POST",
