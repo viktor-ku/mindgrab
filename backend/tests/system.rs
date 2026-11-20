@@ -106,6 +106,25 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     assert_eq!(a.status(), 200);
     assert_eq!(b.status(), 200);
     assert_eq!(f.provider.refreshes.load(Ordering::SeqCst), 1);
+    // A request that goes away mid-refresh still stores the replacement
+    // tokens: the provider has retired the old ones by then.
+    sqlx::query("UPDATE mindgrab_loro.sessions SET access_token=$1 WHERE browser_hash=$2")
+        .bind(signed("alice", now() - 1))
+        .bind(hash(browser))
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    f.provider.delay.store(300, Ordering::SeqCst);
+    let abandoned = f
+        .post("getMe", browser)
+        .json(&json!({}))
+        .timeout(std::time::Duration::from_millis(100))
+        .send()
+        .await;
+    assert!(abandoned.is_err());
+    assert_eq!(f.rpc("getMe", browser, json!({})).await.status(), 200);
+    assert_eq!(f.provider.refreshes.load(Ordering::SeqCst), 2);
+    f.provider.delay.store(0, Ordering::SeqCst);
     let expected = f
         .post("getMe", browser)
         .header("x-mindgrab-account.php", "999")
