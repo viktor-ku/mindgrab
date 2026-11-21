@@ -385,12 +385,16 @@
   }
 }
 
-/* Menus. */
+/* Menus. Opaque, unlike the glass toolbars: a menu opens over the style panel
+   and the ideas, and its items must not share the space with what is behind. */
 .menu-panel {
   display: flex;
   flex-direction: column;
   gap: 1px;
   padding: 0.3rem;
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
   animation: pop-in 70ms ease-out;
 }
 .menu-item {
