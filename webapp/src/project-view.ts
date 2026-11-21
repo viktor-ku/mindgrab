@@ -81,6 +81,8 @@ export function createReplaceableProjectView(first?: ProjectDocument) {
       setColors(colorPreferences(current));
       setLinks(linkStyle(current));
       if (state.status !== "ready") {
+        // The empty forest has no structure, so the next map shows in full.
+        structure = "";
         setForest([]);
         return;
       }
