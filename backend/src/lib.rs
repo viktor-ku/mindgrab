@@ -32,6 +32,7 @@ pub struct Backend {
     pub config: Config,
     pub changes: broadcast::Sender<String>,
     compute: Compute,
+    share_builds: projects::ShareBuilds,
 }
 impl Backend {
     pub async fn connect(config: Config) -> Result<Arc<Self>> {
@@ -58,6 +59,7 @@ impl Backend {
             config,
             changes,
             compute: Compute::new(),
+            share_builds: Default::default(),
         });
         Ok(app)
     }

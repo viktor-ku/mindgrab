@@ -13,6 +13,7 @@ import {
 import { makeEventListener } from "@solid-primitives/event-listener";
 import { debounce } from "@solid-primitives/scheduled";
 import { createQuery } from "@tanstack/solid-query";
+import { QUICK_RETRIES, saveRetryDelay } from "./query-client";
 import { Node } from "./App";
 import { track } from "./analytics";
 import {
@@ -34,12 +35,8 @@ import { MapLinks } from "./MapLinks";
 import { NoteHeading, NoteView } from "./NotesPanel";
 import { Outline } from "./Outline";
 import { createPresence } from "./presence";
-import {
-  ORIGIN,
-  openProjectDocument,
-  type ProjectDocument,
-} from "./project-document";
-import { createProjectView } from "./project-view";
+import { openProjectDocument, type ProjectDocument } from "./project-document";
+import { createReplaceableProjectView } from "./project-view";
 import {
   fetchSharedProject,
   SharedProjectError,
@@ -73,6 +70,13 @@ export function SharedProject(props: { token: string }) {
     gcTime: 0,
     structuralSharing: false,
     refetchInterval: live() ? false : 5000,
+    // A busy server (429) or a dropped connection is worth another try; a
+    // revoked link is not.
+    retry: (failures, error) =>
+      failures < QUICK_RETRIES &&
+      error instanceof SharedProjectError &&
+      error.kind === "retry",
+    retryDelay: saveRetryDelay,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
   }));
@@ -85,14 +89,19 @@ export function SharedProject(props: { token: string }) {
       setRevoked(true);
   });
 
+  // One view across revisions, so ideas that did not change keep their place
+  // in the outline and on the map.
+  const shown = createReplaceableProjectView();
   function replace(next?: ProjectDocument) {
     const previous = untrack(doc);
+    shown.show(next);
     setDoc(next);
     if (previous && previous !== next) previous.destroy();
   }
   onCleanup(() => replace(undefined));
 
-  // Apply each newer committed snapshot to the in-memory document.
+  // Show each newer committed revision. Viewers get the map without its edit
+  // history, so revisions share none and each one replaces the document.
   let revision = -1n;
   createEffect(
     on(
@@ -100,17 +109,11 @@ export function SharedProject(props: { token: string }) {
       (data) => {
         if (!data || untrack(revoked)) return;
         const next = BigInt(data.revision);
-        const current = untrack(doc);
-        if (current && next <= revision) return;
+        if (untrack(doc) && next <= revision) return;
         try {
-          const bytes = decodeBase64(data.data);
-          if (current?.id === data.projectId) {
-            try {
-              current.merge(bytes, ORIGIN.remote);
-            } catch {
-              replace(openProjectDocument(data.projectId, [bytes]));
-            }
-          } else replace(openProjectDocument(data.projectId, [bytes]));
+          replace(
+            openProjectDocument(data.projectId, [decodeBase64(data.data)]),
+          );
           revision = next;
           setBroken(false);
         } catch {
@@ -179,10 +182,7 @@ export function SharedProject(props: { token: string }) {
     };
   });
 
-  const view = createMemo(() => {
-    const current = doc();
-    return current ? createProjectView(current) : undefined;
-  });
+  const view = () => (doc() ? shown.view : undefined);
   const name = () => view()?.name() || "Shared map";
   createEffect(() => {
     document.title =

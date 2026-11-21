@@ -446,3 +446,102 @@ fn undoing_a_move_of_a_remotely_deleted_node_leaves_no_blank_idea() {
         );
     }
 }
+
+/// Every op in the document's history and its whole state, including deleted
+/// tree nodes and their metadata, as text.
+fn everything(bytes: &[u8]) -> String {
+    let doc = LoroDoc::new();
+    doc.import(bytes).unwrap();
+    let history =
+        serde_json::to_string(&doc.export_json_updates(&Default::default(), &doc.oplog_vv()))
+            .unwrap();
+    let tree = doc.get_tree("nodes");
+    let metas: Vec<_> = tree
+        .nodes()
+        .into_iter()
+        .map(|id| tree.get_meta(id).unwrap().get_deep_value().to_json_value())
+        .collect();
+    format!(
+        "{history}{}{}",
+        doc.get_deep_value().to_json_value(),
+        serde_json::Value::from(metas)
+    )
+}
+
+#[test]
+fn share_snapshots_hold_only_the_current_map() {
+    let mut project = Project::new("Canary draft").unwrap();
+    let root = create(&mut project, None, "root");
+    let child = create(&mut project, Some(&root), "kept");
+    let gone = create(&mut project, Some(&root), "Canary idea");
+    let below = create(&mut project, Some(&gone), "Canary child");
+    for (id, note) in [
+        (&gone, "Canary note"),
+        (&below, "Canary note below"),
+        (&root, "kept Canary edit"),
+    ] {
+        project
+            .apply(Command::SetNote {
+                id: id.clone(),
+                note: note.into(),
+            })
+            .unwrap();
+    }
+    project
+        .apply(Command::SetNote {
+            id: root.clone(),
+            note: "kept".into(),
+        })
+        .unwrap();
+    project
+        .apply(Command::SetText {
+            id: child.clone(),
+            text: "kept Canary text".into(),
+        })
+        .unwrap();
+    project
+        .apply(Command::SetText {
+            id: child.clone(),
+            text: "kept".into(),
+        })
+        .unwrap();
+    project
+        .apply(Command::DeleteNode {
+            id: gone,
+            gap: Some(40.0),
+        })
+        .unwrap();
+    project
+        .apply(Command::SetPosition {
+            id: child.clone(),
+            position: Some(Position { x: 3.0, y: 4.0 }),
+        })
+        .unwrap();
+    project
+        .apply(Command::SetLinks {
+            style: LinkStyle::Square,
+        })
+        .unwrap();
+    project
+        .apply(Command::SetColors {
+            quick: vec![Color::shade("sky", 400).unwrap()],
+            new_ideas: Color::shade("rose", 200).unwrap(),
+        })
+        .unwrap();
+    project
+        .apply(Command::Rename {
+            name: "Plan".into(),
+        })
+        .unwrap();
+
+    // The owner's snapshot keeps everything, so the check below can see it.
+    assert!(everything(&project.snapshot().unwrap()).contains("Canary"));
+    let shared = project.share_snapshot().unwrap();
+    assert!(!everything(&shared).contains("Canary"));
+    assert!(!shared.windows(6).any(|window| window == b"Canary"));
+    // Viewers see the same map, with the same node IDs.
+    assert_eq!(
+        Project::from_snapshot(&shared).unwrap().view().unwrap(),
+        project.view().unwrap()
+    );
+}

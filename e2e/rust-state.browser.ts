@@ -275,3 +275,177 @@ test("a failed upload retries without losing unsent local edits", async () => {
   })) as ProjectView;
   expect(view.nodes[0].text).toBe("Retained across retries 🦀");
 });
+
+// The owner's stored map keeps its whole edit history, and the owner can step
+// back through it. A share link shows only the map as it is now, follows the
+// owner's edits live, and cannot change anything.
+test("a share link follows the owner's edits live, read-only, without the deleted history the owner keeps", async () => {
+  await login(page);
+  await page.getByRole("button", { name: "Project menu" }).click();
+  await page.getByRole("menuitem", { name: "New map" }).click();
+  await edit(page, "Team offsite");
+  const ideas = (target: Page) =>
+    target
+      .locator("[data-node-id]")
+      .evaluateAll((nodes) => nodes.map((node) => node.textContent?.trim()));
+  async function addChild(parent: string, text: string) {
+    await page.getByRole("button", { name: parent, exact: true }).click();
+    await page.keyboard.press("Tab");
+    await page.keyboard.type(text);
+    await page.keyboard.press("Enter");
+  }
+  async function addNote(note: string) {
+    await page.keyboard.press("Alt+n");
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Idea notes",
+    );
+    await page.keyboard.type(note);
+    await page.keyboard.press("Escape");
+  }
+
+  // A draft the owner deletes before sharing.
+  await addChild("Team offsite", "Canary salaries");
+  await addNote("Canary password hunter2");
+  await saved(page);
+  await page
+    .getByRole("button", { name: "Canary salaries", exact: true })
+    .click();
+  await page.keyboard.press("Delete");
+  expect(await ideas(page)).toEqual(["Team offsite"]);
+  await saved(page);
+
+  await page.getByRole("button", { name: "Project menu" }).click();
+  await page.getByRole("menuitem", { name: "Share link…" }).click();
+  await page
+    .getByRole("switch", { name: "Anyone with the link can view" })
+    .click();
+  const link = page.getByRole("textbox", { name: "Share link", exact: true });
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('[aria-label="Share link"]') as HTMLInputElement)
+        ?.value,
+  );
+  const url = new URL(await link.inputValue());
+  await page.getByRole("button", { name: "Close sharing" }).click();
+
+  // The viewer has no account and stays on the one open page throughout.
+  const viewer = await newPage();
+  const writes: string[] = [];
+  viewer.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (
+      path.startsWith("/api/") &&
+      !["/api/getSharedProject.php", "/api/getMe.php"].includes(path)
+    )
+      writes.push(path);
+  });
+  await viewer.goto(`${origin}${url.pathname}`);
+  await viewer.getByText("View only", { exact: true }).waitFor();
+  await viewer
+    .getByRole("button", { name: "Team offsite", exact: true })
+    .waitFor();
+  const payload = () =>
+    viewer.evaluate(async (token) => {
+      const response = await fetch("/api/getSharedProject.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+        credentials: "omit",
+      });
+      const { data, revision } = await response.json();
+      const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      return { text: new TextDecoder("latin1").decode(bytes), revision };
+    }, url.pathname.split("/").pop());
+  expect((await payload()).text).not.toContain("Canary");
+  expect(await ideas(viewer)).toEqual(["Team offsite"]);
+  // The owner's own copy still holds it, so the check above can see it.
+  const owned = await rpc(page, "getProjectSnapshot", {
+    projectId: await currentId(page),
+  });
+  expect(Buffer.from(owned.data, "base64").toString("latin1")).toContain(
+    "Canary",
+  );
+
+  // Each edit reaches the open viewer.
+  await addChild("Team offsite", "Venue: Lisbon");
+  await viewer
+    .getByRole("button", { name: "Venue: Lisbon", exact: true })
+    .waitFor();
+  await addChild("Team offsite", "Agenda");
+  await addNote("Day one: kickoff");
+  await viewer.getByRole("button", { name: "Agenda", exact: true }).waitFor();
+  await viewer.getByRole("button", { name: "Agenda", exact: true }).click();
+  await viewer.getByText("Day one: kickoff", { exact: true }).waitFor();
+  expect(
+    await viewer
+      .getByRole("textbox", { name: "Idea notes" })
+      .getAttribute("contenteditable"),
+  ).toBe("false");
+  await saved(page);
+  expect((await payload()).text).not.toContain("Canary");
+
+  // The viewer cannot change the map.
+  await viewer.getByRole("button", { name: "Agenda", exact: true }).dblclick();
+  await viewer.keyboard.type("x");
+  for (const key of ["Delete", "Backspace", "ControlOrMeta+z"])
+    await viewer.keyboard.press(key);
+  expect(new URL(viewer.url()).pathname).toBe(url.pathname);
+  expect(await viewer.getByRole("textbox", { name: "Node text" }).count()).toBe(
+    0,
+  );
+  expect(await ideas(viewer)).toEqual([
+    "Team offsite",
+    "Venue: Lisbon",
+    "Agenda",
+  ]);
+  expect(writes).toEqual([]);
+
+  // The owner still has every step, back to the deleted draft; while undone
+  // to it, it is the map again, and the viewer sees it.
+  const undo = page.getByRole("button", { name: "Undo", exact: true });
+  const redo = page.getByRole("button", { name: "Redo", exact: true });
+  while (!(await ideas(page)).includes("Canary salaries")) {
+    expect(await undo.isDisabled()).toBe(false);
+    await undo.click();
+  }
+  await viewer
+    .getByRole("button", { name: "Canary salaries", exact: true })
+    .waitFor();
+  while (!(await redo.isDisabled())) await redo.click();
+  expect(await ideas(page)).toEqual([
+    "Team offsite",
+    "Venue: Lisbon",
+    "Agenda",
+  ]);
+  await saved(page);
+  // Uploads are not debounced, so the viewer may pass through steps first.
+  await viewer.waitForFunction(
+    (expected) =>
+      JSON.stringify(
+        [...document.querySelectorAll("[data-node-id]")].map((node) =>
+          node.textContent?.trim(),
+        ),
+      ) === expected,
+    JSON.stringify(["Team offsite", "Venue: Lisbon", "Agenda"]),
+  );
+  expect((await payload()).text).not.toContain("Canary");
+
+  // Each revision is a new document, but the viewer keeps one view: a text
+  // edit leaves the outline's rows in place.
+  await viewer.getByRole("button", { name: "Outline", exact: true }).click();
+  const row = viewer.getByRole("treeitem").last();
+  await row.evaluate((element) => {
+    (element as HTMLElement).dataset.kept = "";
+  });
+  await page.getByRole("button", { name: "Agenda", exact: true }).dblclick();
+  await page
+    .getByRole("textbox", { name: "Node text", exact: true })
+    .fill("Agenda v2");
+  await page.keyboard.press("Enter");
+  await viewer
+    .getByRole("button", { name: "Agenda v2", exact: true })
+    .waitFor();
+  expect(await row.innerText()).toContain("Agenda v2");
+  expect(await row.getAttribute("data-kept")).toBe("");
+  expect(writes).toEqual([]);
+});

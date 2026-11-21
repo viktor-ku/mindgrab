@@ -34,3 +34,7 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.projects (
 CREATE INDEX IF NOT EXISTS projects_owner ON mindgrab_loro.projects(owner_id,id) WHERE NOT deleted;
 -- A project's "anyone with the link can view" token. NULL keeps it private.
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS share_token TEXT UNIQUE;
+-- What share link viewers load: the map at `shared_revision` without its edit
+-- history, which keeps deleted ideas and notes. Built when first viewed.
+ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_snapshot BYTEA;
+ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_revision BIGINT;
