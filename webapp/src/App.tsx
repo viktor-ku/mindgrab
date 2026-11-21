@@ -1925,6 +1925,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Branch focus shows one branch as if it were the whole map. It is a view;
   // the document and every other branch are untouched.
   const [focusId, setFocusId] = createSignal<string>();
+  // Select-all covers the branch in view; once the view changes (focus left,
+  // or the focused branch was deleted elsewhere) it would cover other ideas.
+  createEffect(on(focusId, () => setAllSelected(false), { defer: true }));
   const scopeForest = createMemo(() => {
     const focus = focusId();
     const root = focus ? findNode(forest(), focus) : undefined;

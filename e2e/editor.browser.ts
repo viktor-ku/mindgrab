@@ -568,6 +568,20 @@ test("Ctrl+A selects every idea to copy or delete, and keeps selecting text whil
   await notice("Deleted 3 ideas").waitFor();
   await page.keyboard.press("ControlOrMeta+z");
   expect((await call("ids")).length).toBe(3);
+
+  // Inside a focused branch only that branch is selected, and the selection
+  // ends with the focus, even when another device deletes the branch.
+  const other = await addChild(root, "Other");
+  await node(child).click();
+  await page.keyboard.press("Alt+f");
+  await page.keyboard.press("ControlOrMeta+a");
+  expect(await allSelected()).toBe(true);
+  await call("remove", child);
+  await node(child).waitFor({ state: "detached" });
+  await node(other).waitFor();
+  expect(await page.locator("[data-selected=true]").count()).toBe(0);
+  await page.keyboard.press("Delete");
+  expect(await call("ids")).toEqual([root, other]);
 });
 
 test("a backup downloads offline and imports twice with fresh identities and empty undo stacks", async () => {
