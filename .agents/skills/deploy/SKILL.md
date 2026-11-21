@@ -35,14 +35,18 @@ environment variable for the command. Never print it.
 
 ## 1. Preflight
 
-1. `git fetch origin`. Local `main` must equal `origin/main`. If local `main` is
+1. Work in the main checkout with `main` checked out (`git switch main`), then
+   `git fetch origin`. Local `main` must equal `origin/main`. If local `main` is
    behind, fast-forward it (`git merge --ff-only origin/main`). If it is ahead or has
    diverged, stop and ask: those commits must reach `main` through a pull request.
    Golive pushes local `main`, and `live` must never contain commits that are missing
    from `origin/main`.
 2. Check for commits that exist only on `live`:
-   `git log --oneline origin/main..origin/live`. If this prints anything, stop. Those
-   commits would be lost, so first bring them to `main` (cherry-pick onto a branch and open a pull request).
+   `git log --oneline origin/main..origin/live`. If this prints anything, stop and
+   tell the user. Those commits would be lost, so first bring their changes to `main`
+   through a pull request (cherry-pick them onto a branch). Merging rewrites them, so
+   this check keeps listing the originals afterwards: confirm each one's change is in
+   `origin/main`, and get the user's go-ahead before golive overwrites them.
 3. Show what will ship: `git log --oneline origin/live..main` and
    `git diff --stat origin/live..main`. If the range is empty, nothing will deploy.
    Say so and stop, unless the user asked for a redeploy (`railway redeploy "${R[@]}" -y`).
@@ -177,8 +181,13 @@ fix forward instead and tell the user.
    conventional message such as `fix(deploy): …`.
 4. Push the branch and open a pull request. Wait for CodeRabbit to approve it and
    address what it raises; do not tick the ruleset bypass unless the user says so.
-   Merge it, fast-forward local `main` to `origin/main`, then `mise run golive`, then
-   monitor again (step 3).
+   Merge it.
+5. In the main checkout on `main`, run `git fetch origin`, then
+   `git merge --ff-only origin/main`, and confirm local `main` contains the hotfix.
+   Repeat the live-only check (step 1.2) now, since a commit may have reached `live`
+   while the pull request waited. Do not fetch again between that check and golive:
+   `--force-with-lease` trusts the last fetched `origin/live`.
+6. `mise run golive`, then monitor again (step 3).
 
 For a **config** problem, fix it in Railway: `railway variable set …` without
 `--skip-deploys` triggers a redeploy. A changed `VITE_*` build variable needs a
