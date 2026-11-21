@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::json;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[error("{code}")]
 pub struct ApiError {
     pub status: StatusCode,

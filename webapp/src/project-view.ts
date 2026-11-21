@@ -1,8 +1,10 @@
 import { batch, createSignal, onCleanup } from "solid-js";
 import type { Accessor, Setter } from "solid-js";
-import type { MindMapNode } from "./mind-map";
+import { DEFAULT_LINK_STYLE, type MindMapNode } from "./mind-map";
 import {
   colorPreferences,
+  DEFAULT_COLOR_PREFERENCES,
+  DEFAULT_SAVING_PREFERENCES,
   linkStyle,
   projectMindMap,
   sameColorPreferences,
@@ -27,13 +29,27 @@ export interface ProjectView {
   note(id: string): string;
 }
 export function createProjectView(doc: ProjectDocument): ProjectView {
+  return createReplaceableProjectView(doc).view;
+}
+/**
+ * One view of the documents shown in turn, as a shared map replaces its
+ * document with each revision. Ideas and structure that did not change keep
+ * their identity, so nothing on screen is rebuilt for them.
+ */
+export function createReplaceableProjectView(first?: ProjectDocument) {
+  let doc = first;
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
   const [name, setName] = createSignal("");
-  const [saving, setSaving] = createSignal(savingPreferences(doc));
-  const [colors, setColors] = createSignal(colorPreferences(doc), {
-    equals: sameColorPreferences,
-  });
-  const [links, setLinks] = createSignal(linkStyle(doc));
+  const [saving, setSaving] = createSignal(
+    doc ? savingPreferences(doc) : { ...DEFAULT_SAVING_PREFERENCES },
+  );
+  const [colors, setColors] = createSignal(
+    doc ? colorPreferences(doc) : DEFAULT_COLOR_PREFERENCES,
+    { equals: sameColorPreferences },
+  );
+  const [links, setLinks] = createSignal(
+    doc ? linkStyle(doc) : DEFAULT_LINK_STYLE,
+  );
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
   const notes = new Map<string, [Accessor<string>, Setter<string>]>();
@@ -49,13 +65,24 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
     return signal;
   }
   function refresh() {
-    const state = readProject(doc);
+    if (!doc) {
+      batch(() => {
+        setStatus("loading");
+        setForest([]);
+      });
+      structure = "";
+      return;
+    }
+    const current = doc;
+    const state = readProject(current);
     batch(() => {
       setStatus(state.status);
-      setSaving(savingPreferences(doc));
-      setColors(colorPreferences(doc));
-      setLinks(linkStyle(doc));
+      setSaving(savingPreferences(current));
+      setColors(colorPreferences(current));
+      setLinks(linkStyle(current));
       if (state.status !== "ready") {
+        // The empty forest has no structure, so the next map shows in full.
+        structure = "";
         setForest([]);
         return;
       }
@@ -74,10 +101,17 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
       }
     });
   }
-  doc.on("snapshot", refresh);
-  onCleanup(() => doc.off("snapshot", refresh));
+  function show(next?: ProjectDocument) {
+    if (next === doc) return;
+    doc?.off("snapshot", refresh);
+    doc = next;
+    doc?.on("snapshot", refresh);
+    refresh();
+  }
+  doc?.on("snapshot", refresh);
+  onCleanup(() => doc?.off("snapshot", refresh));
   refresh();
-  return {
+  const view: ProjectView = {
     status,
     name,
     saving,
@@ -87,4 +121,5 @@ export function createProjectView(doc: ProjectDocument): ProjectView {
     text: (id) => textSignal(id)[0](),
     note: (id) => noteSignal(id)[0](),
   };
+  return { view, show };
 }

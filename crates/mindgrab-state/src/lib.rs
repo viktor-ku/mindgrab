@@ -80,6 +80,82 @@ impl Project {
         Ok(bytes)
     }
 
+    /// A snapshot of only what the map shows now, for people it is shared with.
+    /// [`Project::snapshot`] carries the whole edit history, and even a shallow
+    /// Loro snapshot keeps deleted ideas with their notes, so this builds a new
+    /// document from the visible view. It shares no history with the project,
+    /// so a viewer replaces its copy with each one instead of merging.
+    pub fn share_snapshot(&self) -> Result<Vec<u8>> {
+        let view = self.view()?;
+        let doc = LoroDoc::new();
+        let meta = doc.get_map("project");
+        // Written from the validated view, so no earlier value or stray
+        // container comes along. Preferences a map never set stay unset.
+        meta.insert("format", FORMAT)?;
+        meta.insert("schemaVersion", SCHEMA_VERSION)?;
+        meta.insert("name", view.name.as_str())?;
+        meta.insert(
+            "saving",
+            loro::loro_value!({"local": view.saving.local, "cloud": view.saving.cloud}),
+        )?;
+        let current = self.doc.get_map("project");
+        if current.get("colors").is_some() {
+            meta.insert(
+                "colors",
+                loro::LoroValue::from(serde_json::to_value(&view.colors)?),
+            )?;
+        }
+        if current.get("links").is_some() {
+            meta.insert(
+                "links",
+                loro::LoroValue::from(serde_json::to_value(view.links)?),
+            )?;
+        }
+        let tree = doc.get_tree("nodes");
+        tree.enable_fractional_index(8);
+        let mut created = std::collections::HashMap::new();
+        // The view lists nodes parents first, each parent's children in order.
+        for node in &view.nodes {
+            let parent = node
+                .parent
+                .as_ref()
+                .map(|parent| {
+                    created
+                        .get(parent)
+                        .copied()
+                        .ok_or_else(|| StateError::MissingNode(parent.clone()))
+                })
+                .transpose()?;
+            let id = tree.create(parent)?;
+            created.insert(node.id.clone(), id);
+            let meta = tree.get_meta(id)?;
+            meta.insert("id", node.id.clone())?;
+            meta.insert("color", node.color.to_string())?;
+            meta.insert_container("text", LoroText::new())?
+                .insert(0, &node.text)?;
+            let note = meta.ensure_mergeable_text("note")?;
+            if !node.note.is_empty() {
+                note.insert(0, &node.note)?;
+            }
+            if let Some(position) = node.position {
+                meta.insert(
+                    "position",
+                    loro::loro_value!({"x": position.x, "y": position.y}),
+                )?;
+            }
+            if let Some(space) = node.gap {
+                meta.insert(GAP, space)?;
+            }
+            if let Some(space) = node.end_gap {
+                meta.insert(END_GAP, space)?;
+            }
+        }
+        doc.commit();
+        let bytes = doc.export(ExportMode::Snapshot)?;
+        check_size(&bytes)?;
+        Ok(bytes)
+    }
+
     /// Validate on a disposable replica first, so rejected input cannot mutate
     /// the accepted document or its local undo history.
     pub fn merge(&mut self, bytes: &[u8]) -> Result<()> {

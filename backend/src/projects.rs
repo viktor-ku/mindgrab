@@ -18,7 +18,12 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::FromRow;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::watch;
 use uuid::Uuid;
 
 #[derive(FromRow)]
@@ -199,7 +204,7 @@ pub async fn rpc(
             let args: ProjectId = parse(&headers, &body)?;
             let mut tx = app.pool.begin().await?;
             // Deleting the cloud copy also revokes its share link.
-            sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=NULL,name=NULL,share_token=NULL,deleted=true,revision=revision+1,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(args.project_id).bind(user.id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=NULL,name=NULL,share_token=NULL,shared_snapshot=NULL,shared_revision=NULL,deleted=true,revision=revision+1,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(args.project_id).bind(user.id).execute(&mut *tx).await?;
             notify(&mut tx, user.id, args.project_id).await?;
             tx.commit().await?;
             Ok(Json(json!({"deleted":true})).into_response())
@@ -242,9 +247,10 @@ pub async fn rpc(
             }
             let args: Args = parse(&headers, &body)?;
             // One link per project: enabling keeps an existing token, and
-            // disabling discards it so a later link is a new one.
+            // disabling discards it, with what viewers load, so a later link
+            // is a new one.
             let mut tx = app.pool.begin().await?;
-            let token: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.projects SET share_token=CASE WHEN $3 THEN COALESCE(share_token,$4) END WHERE id=$1 AND owner_id=$2 AND NOT deleted RETURNING share_token").bind(args.project_id).bind(user.id).bind(args.enabled).bind(crate::auth::token()).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
+            let token: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.projects SET share_token=CASE WHEN $3 THEN COALESCE(share_token,$4) END,shared_snapshot=CASE WHEN $3 THEN shared_snapshot END,shared_revision=CASE WHEN $3 THEN shared_revision END WHERE id=$1 AND owner_id=$2 AND NOT deleted RETURNING share_token").bind(args.project_id).bind(user.id).bind(args.enabled).bind(crate::auth::token()).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::missing)?;
             // Wake open viewers so a revoked link closes promptly. This uses
             // its own channel: the content did not change, so the owner's
             // editors have nothing to sync.
@@ -440,10 +446,14 @@ struct Shared {
     id: Uuid,
     owner_id: i64,
     name: Option<String>,
-    snapshot: Option<Vec<u8>>,
     revision: i64,
+    /// What viewers load, when built for this revision and asked for.
+    view: Option<Vec<u8>>,
 }
 async fn shared_project(app: &Backend, token: &str) -> Result<Shared> {
+    shared_row(app, token, false).await
+}
+async fn shared_row(app: &Backend, token: &str, view: bool) -> Result<Shared> {
     // Tokens are 32 random bytes, URL-safe base64 without padding.
     if token.len() != 43
         || !token
@@ -452,20 +462,131 @@ async fn shared_project(app: &Backend, token: &str) -> Result<Shared> {
     {
         return Err(ApiError::missing());
     }
-    sqlx::query_as("SELECT id,owner_id,name,snapshot,revision FROM mindgrab_loro.projects WHERE share_token=$1 AND NOT deleted AND snapshot IS NOT NULL").bind(token).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)
+    sqlx::query_as("SELECT id,owner_id,name,revision,CASE WHEN $2 AND shared_revision=revision THEN shared_snapshot END AS view FROM mindgrab_loro.projects WHERE share_token=$1 AND NOT deleted AND snapshot IS NOT NULL").bind(token).bind(view).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)
 }
-async fn shared(app: &Backend, headers: &HeaderMap, body: &Bytes) -> Result<Response> {
+/// The project as its viewers see it. The stored snapshot holds the full edit
+/// history, deleted ideas and notes included, so viewers get a copy of only
+/// the current map instead (`Project::share_snapshot`). It is built once per
+/// revision and kept for the next viewer.
+async fn shared_view(app: &Arc<Backend>, token: &str) -> Result<Shared> {
+    for _ in 0..SHARE_ATTEMPTS {
+        let project = shared_row(app, token, true).await?;
+        if project.view.is_some() {
+            return Ok(project);
+        }
+        let mut build = share_build(app, project.id, project.owner_id, project.revision);
+        let built = build
+            .wait_for(Option::is_some)
+            .await
+            .map_err(|_| ApiError::unavailable())?
+            .clone();
+        match built {
+            Some(Built::Ready(view)) => {
+                // The link may have been turned off during the build, or off
+                // and on again, which gives it a new token.
+                shared_project(app, token).await?;
+                return Ok(Shared {
+                    view: Some(view.to_vec()),
+                    ..project
+                });
+            }
+            // The owner saved meanwhile: build the newer revision instead.
+            Some(Built::Stale) => continue,
+            Some(Built::Failed(error)) => return Err(error),
+            None => unreachable!(),
+        }
+    }
+    Err(ApiError::busy())
+}
+/// Viewers that find the owner saved during a build start over this many times.
+const SHARE_ATTEMPTS: usize = 3;
+/// A finished build of viewers' copy of one project revision.
+#[derive(Clone)]
+pub(crate) enum Built {
+    Ready(Arc<Vec<u8>>),
+    /// The project has moved past that revision, or is no longer shared.
+    Stale,
+    Failed(ApiError),
+}
+/// Builds in progress, one per project revision, each awaited by every viewer
+/// of that revision.
+pub(crate) type ShareBuilds = Mutex<HashMap<(Uuid, i64), watch::Receiver<Option<Built>>>>;
+/// Viewers of a revision share one build. It runs as its own task, so it takes
+/// one of the owner's compute seats however many viewers wait, and a viewer
+/// that gives up does not waste it.
+fn share_build(
+    app: &Arc<Backend>,
+    id: Uuid,
+    owner: i64,
+    revision: i64,
+) -> watch::Receiver<Option<Built>> {
+    let mut builds = app.share_builds.lock().unwrap();
+    // A build whose task has gone without an answer is started again.
+    if let Some(build) = builds.get(&(id, revision))
+        && build.has_changed().is_ok()
+    {
+        return build.clone();
+    }
+    let (sender, build) = watch::channel(None);
+    builds.insert((id, revision), build.clone());
+    let app = app.clone();
+    tokio::spawn(async move {
+        let built = match build_share(&app, id, owner, revision).await {
+            Ok(Some(view)) => Built::Ready(Arc::new(view)),
+            Ok(None) => Built::Stale,
+            Err(error) => Built::Failed(error),
+        };
+        app.share_builds.lock().unwrap().remove(&(id, revision));
+        let _ = sender.send(Some(built));
+    });
+    build
+}
+async fn build_share(
+    app: &Backend,
+    id: Uuid,
+    owner: i64,
+    revision: i64,
+) -> Result<Option<Vec<u8>>> {
+    // The turn comes first: waiting builds then hold no snapshot.
+    let permit = app.compute.acquire(owner).await?;
+    // Another server may have built it while this one waited.
+    #[derive(FromRow)]
+    struct Row {
+        snapshot: Option<Vec<u8>>,
+        view: Option<Vec<u8>>,
+    }
+    let row: Option<Row> = sqlx::query_as("SELECT snapshot,CASE WHEN shared_revision=revision THEN shared_snapshot END AS view FROM mindgrab_loro.projects WHERE id=$1 AND revision=$2 AND share_token IS NOT NULL AND NOT deleted").bind(id).bind(revision).fetch_optional(&app.pool).await?;
+    let Some(Row {
+        snapshot: Some(snapshot),
+        view,
+    }) = row
+    else {
+        return Ok(None);
+    };
+    if view.is_some() {
+        return Ok(view);
+    }
+    let view = compute::run(&permit, move || {
+        Ok(mindgrab_state::Project::from_snapshot(&snapshot)?.share_snapshot()?)
+    })
+    .await?;
+    let saved = sqlx::query("UPDATE mindgrab_loro.projects SET shared_snapshot=$3,shared_revision=$2 WHERE id=$1 AND revision=$2 AND share_token IS NOT NULL AND NOT deleted").bind(id).bind(revision).bind(&view).execute(&app.pool).await?.rows_affected();
+    // Saving nothing means the owner saved, unshared or deleted meanwhile:
+    // no viewer gets this copy, and each looks again.
+    Ok((saved == 1).then_some(view))
+}
+async fn shared(app: &Arc<Backend>, headers: &HeaderMap, body: &Bytes) -> Result<Response> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Args {
         token: String,
     }
     let args: Args = parse(headers, body)?;
-    let project = shared_project(app, &args.token).await?;
+    let project = shared_view(app, &args.token).await?;
     let mut value = baseline(
         project.id,
         Stored {
-            snapshot: project.snapshot,
+            snapshot: project.view,
             revision: project.revision,
         },
     );

@@ -133,7 +133,7 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/deleteProject.php` | Delete the cloud snapshot |
 | `/api/getShareLink.php` | The owner's `{projectId, token}`; `token` is null while private |
 | `/api/setShareLink.php` | Owner turns the view-only link on (keeps an existing token) or off (revokes it) |
-| `/api/getSharedProject.php` | Anyone with `{token}`: snapshot, revision and name; no session |
+| `/api/getSharedProject.php` | Anyone with `{token}`: the current map without its edit history, revision and name; no session |
 
 GET `/api/auth/callback.php` completes login. GET `/ws/project/<uuid>?ownerId=<id>`
 upgrades to a read-only notification socket. Notifications contain committed
@@ -144,6 +144,15 @@ GET `/ws/share/<token>` is the same notification socket for a shared link,
 without a session; it closes with code 1008 once the link is revoked. Deleting a
 cloud copy also revokes its link. The webapp's read-only viewer lives at
 `/s/<token>`.
+
+The stored snapshot is the owner's full Loro history, which still holds deleted
+ideas, notes and earlier names. Viewers never get it: `getSharedProject` serves
+a new document built from the visible map (`Project::share_snapshot`). It is
+built once per revision, on its first view, by one background task that every
+viewer of that revision awaits and that takes one of the owner's compute seats,
+and kept in `shared_snapshot`/`shared_revision`. It shares no history with
+earlier ones, so the viewer replaces its document on each revision instead of
+merging, keeping one view so unchanged ideas are not rebuilt on screen.
 
 Uploads validate and merge with the shared Rust core off the async executor,
 holding no database connection or row lock meanwhile. The result is stored only

@@ -574,6 +574,166 @@ async fn share_links_grant_anonymous_read_only_access_until_revoked() {
     f.close().await;
 }
 
+/// Every op in a document's history and its whole state, deleted tree nodes
+/// and their metadata included, as text.
+fn everything(bytes: &[u8]) -> String {
+    let doc = loro::LoroDoc::new();
+    doc.import(bytes).unwrap();
+    let history =
+        serde_json::to_string(&doc.export_json_updates(&Default::default(), &doc.oplog_vv()))
+            .unwrap();
+    let tree = doc.get_tree("nodes");
+    let metas: Vec<_> = tree
+        .nodes()
+        .into_iter()
+        .map(|id| {
+            use loro::ToJson;
+            tree.get_meta(id).unwrap().get_deep_value().to_json_value()
+        })
+        .collect();
+    format!(
+        "{history}{}{}",
+        loro::ToJson::to_json_value(&doc.get_deep_value()),
+        Value::from(metas)
+    )
+}
+async fn viewed(f: &Fixture, token: &str) -> (Vec<u8>, String) {
+    let response = shared(f, token).await;
+    assert_eq!(response.status(), 200);
+    let value: Value = response.json().await.unwrap();
+    (
+        STANDARD.decode(value["data"].as_str().unwrap()).unwrap(),
+        value["revision"].as_str().unwrap().into(),
+    )
+}
+
+/// Viewers get the map as it is now, without the edit history that still
+/// holds what the owner deleted. The owner keeps that history.
+#[tokio::test]
+async fn share_links_never_reveal_deleted_ideas_or_notes() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let mut project = Project::new("Canary draft").unwrap();
+    let create = |project: &mut Project, text: &str| {
+        project
+            .apply(Command::CreateNode {
+                parent: None,
+                index: None,
+                text: text.into(),
+                color: Color::BLUE,
+                fill: None,
+            })
+            .unwrap()
+            .created_node
+            .unwrap()
+    };
+    let kept = create(&mut project, "Kept");
+    let secret = create(&mut project, "Canary idea");
+    project
+        .apply(Command::SetNote {
+            id: secret.clone(),
+            note: "Canary note: hunter2".into(),
+        })
+        .unwrap();
+    project
+        .apply(Command::DeleteNode {
+            id: secret,
+            gap: None,
+        })
+        .unwrap();
+    project
+        .apply(Command::Rename {
+            name: "Plan".into(),
+        })
+        .unwrap();
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    let token = share(&f, &alice, id, true).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (bytes, revision) = viewed(&f, &token).await;
+    assert_eq!(revision, "1");
+    assert!(!everything(&bytes).contains("Canary"));
+    assert!(!bytes.windows(6).any(|window| window == b"Canary"));
+    assert_eq!(
+        Project::from_snapshot(&bytes).unwrap().view().unwrap(),
+        project.view().unwrap()
+    );
+    // The same revision is served again as it was built.
+    assert_eq!(viewed(&f, &token).await, (bytes, revision));
+    // The owner still has every past edit to go back to.
+    let (owned, _) = baseline(&f, &alice, id).await;
+    assert!(everything(&owned.snapshot().unwrap()).contains("Canary note: hunter2"));
+
+    // Viewers follow the owner's edits.
+    let response = f
+        .rpc(
+            "commandProject",
+            &alice,
+            json!({"projectId":id,"command":{"type":"setText","id":kept,"text":"Edited"}}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let (owned, _) = baseline(&f, &alice, id).await;
+    let (bytes, revision) = viewed(&f, &token).await;
+    assert_eq!(revision, "2");
+    assert!(!everything(&bytes).contains("Canary"));
+    let view = Project::from_snapshot(&bytes).unwrap().view().unwrap();
+    assert_eq!(view.nodes[0].text, "Edited");
+    assert_eq!(view, owned.view().unwrap());
+
+    // Viewers arriving together at a new revision share one build.
+    let response = f
+        .rpc(
+            "commandProject",
+            &alice,
+            json!({"projectId":id,"command":{"type":"setText","id":kept,"text":"Together"}}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    let views = futures_util::future::join_all((0..8).map(|_| viewed(&f, &token))).await;
+    for view in &views {
+        assert_eq!(view, &views[0]);
+    }
+    assert_eq!(views[0].1, "3");
+
+    // Turning the link off, or deleting the project, discards viewers' copy.
+    let stored = |id: Uuid| {
+        sqlx::query_scalar::<_, bool>("SELECT shared_snapshot IS NOT NULL OR shared_revision IS NOT NULL FROM mindgrab_loro.projects WHERE id=$1")
+            .bind(id)
+            .fetch_one(&f.backend.pool)
+    };
+    assert!(stored(id).await.unwrap());
+    share(&f, &alice, id, false).await;
+    assert!(!stored(id).await.unwrap());
+    let token = share(&f, &alice, id, true).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    viewed(&f, &token).await;
+    assert!(stored(id).await.unwrap());
+    assert_eq!(
+        f.rpc("deleteProject", &alice, json!({"projectId":id}))
+            .await
+            .status(),
+        200
+    );
+    assert!(!stored(id).await.unwrap());
+    f.close().await;
+}
+
 /// Merges compute without a pool connection or a row lock, so one account's
 /// burst of merges on a large map cannot keep other accounts from the database.
 #[tokio::test]

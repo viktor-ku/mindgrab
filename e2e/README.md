@@ -12,7 +12,7 @@ mise run state:setup
 | Command | Coverage |
 | --- | --- |
 | `mise run e2e:test` | Editor interactions, notes, clipboard, backups, reload persistence and account sign-in/sign-out |
-| `mise run state:interop` | Main app with Rust, isolated Postgres, OAuth callback, native commands, live sockets, concurrent offline edits and retry recovery |
+| `mise run state:interop` | Main app with Rust, isolated Postgres, OAuth callback, native commands, live sockets, concurrent offline edits, retry recovery, and a live read-only share link that never carries deleted history |
 | `mise run e2e:check` | Lint, formatting and browser harness type checks |
 
 The editor and account suites isolate browser behavior. The interoperability
