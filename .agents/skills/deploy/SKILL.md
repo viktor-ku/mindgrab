@@ -11,8 +11,10 @@ services `mindgrab` (API, root `Dockerfile`) and `web` (static webapp,
 Production is `https://mindgrab.app`, the API is `https://api.mindgrab.app` and its
 healthcheck is `/`. See `backend/README.md`.
 
-The rule behind every step: **`live` is only ever a copy of `main`.** Commit every
-change, including hotfixes, to `main`, push `main`, then run `mise run golive`.
+The rule behind every step: **`live` is only ever a copy of `main`.** Land every
+change, including hotfixes, on `main` through a pull request, then run
+`mise run golive`. `main` rejects direct pushes: a ruleset requires a pull request
+approved by CodeRabbit.
 Never commit to `live`, push another ref to it, or edit it on GitHub. The next golive
 erases anything that exists only on `live`.
 
@@ -33,13 +35,14 @@ environment variable for the command. Never print it.
 
 ## 1. Preflight
 
-1. `git fetch origin`. Local `main` must equal `origin/main`. If local `main` is ahead,
-   push it first with `git push origin main`. Golive pushes local `main`, and `live`
-   must never contain commits that are missing from `origin/main`. If local `main` is
-   behind or has diverged, stop and ask.
+1. `git fetch origin`. Local `main` must equal `origin/main`. If local `main` is
+   behind, fast-forward it (`git merge --ff-only origin/main`). If it is ahead or has
+   diverged, stop and ask: those commits must reach `main` through a pull request.
+   Golive pushes local `main`, and `live` must never contain commits that are missing
+   from `origin/main`.
 2. Check for commits that exist only on `live`:
    `git log --oneline origin/main..origin/live`. If this prints anything, stop. Those
-   commits would be lost, so first bring them to `main` (cherry-pick, commit, push).
+   commits would be lost, so first bring them to `main` (cherry-pick onto a branch and open a pull request).
 3. Show what will ship: `git log --oneline origin/live..main` and
    `git diff --stat origin/live..main`. If the range is empty, nothing will deploy.
    Say so and stop, unless the user asked for a redeploy (`railway redeploy "${R[@]}" -y`).
@@ -165,14 +168,17 @@ fix forward instead and tell the user.
 
 ### 4.3 Hotfix: `main` first, then `live`
 
-1. Work in the main checkout on `main`. Make the smallest fix that addresses the
-   diagnosed cause. Do not bundle in other changes.
+1. Branch from `origin/main` (for example `hotfix/<what>`). Make the smallest fix
+   that addresses the diagnosed cause. Do not bundle in other changes.
 2. Reproduce and verify locally before pushing. For a build failure, run
    `docker build .` from the repository root. For runtime failures, run the relevant
    `mise` tests or `mise run backend:dev`.
 3. Commit through the normal hooks: never `--no-verify`, never skip the hooks. Use a
    conventional message such as `fix(deploy): …`.
-4. `git push origin main`, then `mise run golive`, then monitor again (step 3).
+4. Push the branch and open a pull request. Wait for CodeRabbit to approve it and
+   address what it raises; do not tick the ruleset bypass unless the user says so.
+   Merge it, fast-forward local `main` to `origin/main`, then `mise run golive`, then
+   monitor again (step 3).
 
 For a **config** problem, fix it in Railway: `railway variable set …` without
 `--skip-deploys` triggers a redeploy. A changed `VITE_*` build variable needs a
