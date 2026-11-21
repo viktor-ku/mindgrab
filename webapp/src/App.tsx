@@ -345,6 +345,9 @@ interface TextSelection {
 
 interface UndoSelection {
   id?: string;
+  // Where a run of selected siblings started, or every idea selected.
+  runAnchor?: string;
+  all?: boolean;
   writing: boolean;
   text?: TextSelection;
 }
@@ -1431,6 +1434,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     let selectionBefore: UndoSelection = { writing: false };
     const captureSelection = (): UndoSelection => ({
       id: selectedId(),
+      ...(multiSelected() &&
+        (allSelected() ? { all: true } : { runAnchor: runAnchor() })),
       writing: writing(),
       ...(editorSelection && { text: { ...editorSelection } }),
     });
@@ -1456,7 +1461,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         !document.activeElement?.matches(
           '[aria-label="Idea notes"], textarea[aria-label="Idea title"]',
         );
-      setSelectedId(selection.id);
+      batch(() => {
+        setSelectedId(selection.id);
+        if (selection.all) setAllSelected(true);
+        else setRunAnchor(selection.runAnchor);
+      });
       setWriting(resumeWriting);
       editorSelection = selection.text;
       if (resumeWriting && selection.text) {
@@ -1915,9 +1924,13 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Ctrl/Cmd+A selects every idea in view, with no single idea selected.
   // Choosing an idea, or nothing, ends it.
   const [allSelected, setAllSelected] = createSignal(false);
+  // Shift+Up/Down selects a run of sibling ideas, from the idea it started on
+  // (the anchor) to the selected one. Choosing an idea, or nothing, ends it.
+  const [runAnchor, setRunAnchor] = createSignal<string>();
   const setSelectedId = (id: string | undefined) =>
     batch(() => {
       setAllSelected(false);
+      setRunAnchor(undefined);
       setSelectedIdSignal(id);
     });
   const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
@@ -1927,7 +1940,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [focusId, setFocusId] = createSignal<string>();
   // Select-all covers the branch in view; once the view changes (focus left,
   // or the focused branch was deleted elsewhere) it would cover other ideas.
-  createEffect(on(focusId, () => setAllSelected(false), { defer: true }));
+  createEffect(
+    on(
+      focusId,
+      () =>
+        batch(() => {
+          setAllSelected(false);
+          setRunAnchor(undefined);
+        }),
+      { defer: true },
+    ),
+  );
   const scopeForest = createMemo(() => {
     const focus = focusId();
     const root = focus ? findNode(forest(), focus) : undefined;
@@ -1936,6 +1959,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const visibleForest = createMemo(() =>
     visibleMindMap(scopeForest(), collapsedIds()),
   );
+  // An idea and its siblings in map order, as the map shows them. A focused
+  // branch's idea stands alone.
+  const siblingsInView = (id: string) => {
+    const parent = details().get(id)?.parent;
+    return parent
+      ? (findNode(visibleForest(), parent)?.next ?? [])
+      : visibleForest();
+  };
+  // The selected run of siblings in map order, else the selected idea. A run
+  // whose anchor is no longer a sibling shrinks to the selected idea.
+  const selectedRun = createMemo(() => {
+    const id = selectedId();
+    if (!id) return [];
+    const anchor = runAnchor();
+    const siblings = anchor && anchor !== id ? siblingsInView(id) : [];
+    const from = siblings.findIndex((node) => node.id === anchor);
+    const to = siblings.findIndex((node) => node.id === id);
+    if (from < 0 || to < 0) return [id];
+    return siblings
+      .slice(Math.min(from, to), Math.max(from, to) + 1)
+      .map((node) => node.id);
+  });
+  // The branches the selection covers: every idea in view after Ctrl/Cmd+A,
+  // else the selected run of siblings, else the selected idea.
+  const selectedRoots = createMemo(() =>
+    allSelected() ? scopeForest().map((node) => node.id) : selectedRun(),
+  );
+  // More than one idea is selected, so commands act on all of them.
+  const multiSelected = () => allSelected() || selectedRun().length > 1;
+  // Every idea drawn as selected; after Ctrl/Cmd+A that includes ideas under
+  // collapsed ones.
+  const selectedIds = createMemo(() => {
+    if (!allSelected()) return new Set(selectedRun());
+    const ids = new Set<string>();
+    for (const root of selectedRoots())
+      for (const id of branchIds(forest(), root)) ids.add(id);
+    return ids;
+  });
   const [colorScope, setColorScope] = createSignal<ColorScope>("node");
   const [writing, setWriting] = createSignal(false);
   const [contextMenu, setContextMenu] = createSignal<
@@ -2492,18 +2553,45 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // A color under the pointer (or keyboard focus) in the style panel shows on
   // the ideas it would change, until the pointer leaves. Nothing is saved.
   const [colorPreview, setColorPreview] = createSignal<NodeColor>();
-  createEffect(on(selectedId, () => setColorPreview(undefined)));
-  const previewIds = createMemo(() => {
-    const id = selectedId();
-    if (!id || !colorPreview()) return undefined;
-    return colorScope() === "branch" ? branchIds(forest(), id) : new Set([id]);
+  createEffect(
+    on([selectedId, allSelected, runAnchor], () => setColorPreview(undefined)),
+  );
+  // The ideas a color picked now would change: each selected idea, or each
+  // selected branch whole.
+  const colorTargets = createMemo(() => {
+    if (colorScope() !== "branch") return selectedIds();
+    const ids = new Set<string>();
+    for (const root of selectedRoots())
+      for (const id of branchIds(forest(), root)) ids.add(id);
+    return ids;
   });
+  const previewIds = createMemo(() =>
+    colorPreview() ? colorTargets() : undefined,
+  );
   const shownColor = (id: string, color: NodeColor | undefined) =>
     previewIds()?.has(id) ? colorPreview() : color;
   // Drawn as a central idea: a root, or the idea a branch is focused on.
-  const selectedIsRoot = () =>
-    !details().get(selectedId() ?? "")?.parent || focusId() === selectedId();
+  const isCentral = (id: string) =>
+    !details().get(id)?.parent || focusId() === id;
+  const selectedIsRoot = () => isCentral(selectedId() ?? "");
   const selectedLook = () => nodeLook(selectedNode()?.color, selectedIsRoot());
+  // The color every selected idea shares; none when they differ.
+  const selectedColor = createMemo(() => {
+    const colors = new Set<NodeColor>();
+    const visit = (nodes: readonly MindMapNode[], deep: boolean) => {
+      for (const node of nodes) {
+        colors.add(node.color ?? DEFAULT_NODE_COLOR);
+        if (deep) visit(node.next ?? [], true);
+      }
+    };
+    if (allSelected()) visit(scopeForest(), true);
+    else
+      visit(
+        selectedRun().flatMap((id) => findNode(forest(), id) ?? []),
+        false,
+      );
+    return colors.size === 1 ? [...colors][0] : undefined;
+  });
   const stylePanel = (place: {
     class: string;
     ref?: (element: HTMLElement) => void;
@@ -2513,9 +2601,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       class={place.class}
       ref={place.ref}
       palette={place.palette}
-      color={selectedNode()?.color ?? DEFAULT_NODE_COLOR}
-      root={selectedIsRoot()}
-      descendants={details().get(selectedId() ?? "")?.descendants ?? 0}
+      color={selectedColor()}
+      root={[...selectedIds()].every(isCentral)}
+      count={selectedIds().size}
+      // After Ctrl/Cmd+A nothing is left under the selected ideas.
+      descendants={
+        allSelected()
+          ? 0
+          : selectedRun().reduce(
+              (count, id) => count + (details().get(id)?.descendants ?? 0),
+              0,
+            )
+      }
       scope={colorScope()}
       quick={view().colors().quick}
       onAddQuick={(color) =>
@@ -2668,7 +2765,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     restoreFocus: () => canvas.focus({ preventScroll: true }),
   });
   const styleShown = () =>
-    !isPhone() && !!selectedId() && !writing() && !drag();
+    !isPhone() && selectedRoots().length > 0 && !writing() && !drag();
   // The style panel takes a corner, not a side: the map fits and centres as
   // if it were not there, and only an idea under it moves (see keepInView).
   const viewInsets = () => panelInsets(canvasSize().width, sideOpen());
@@ -3756,19 +3853,32 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
-  // Deletes every selected idea as one undo step.
-  function removeAll() {
-    const roots = scopeForest();
-    if (!allSelected() || !roots.length) return;
+  // Deletes every selected branch as one undo step. After a run of siblings
+  // the selection moves to the next sibling, else the previous one, else the
+  // parent, as it does after deleting one idea.
+  function removeMany() {
+    const roots = selectedRoots();
+    if (!multiSelected() || !roots.length) return;
+    finishWriting();
+    let nextId: string | undefined;
+    if (!allSelected()) {
+      const parent = details().get(roots[0])?.parent;
+      const siblings = siblingsInView(roots[0]);
+      const first = siblings.findIndex((node) => node.id === roots[0]);
+      const after = siblings[first + roots.length]?.id;
+      const before = siblings[first - 1]?.id;
+      nextId = after ?? before ?? parent;
+      holdStill(parent, before, after, ...otherRoots(...roots));
+    }
     const removed = roots.reduce(
-      (count, root) => count + 1 + (details().get(root.id)?.descendants ?? 0),
+      (count, id) => count + 1 + (details().get(id)?.descendants ?? 0),
       0,
     );
     if (
       !command((doc) =>
         doc.batch(() =>
           roots.reduce(
-            (changed, root) => deleteSubtree(doc, root.id) || changed,
+            (changed, id) => deleteSubtree(doc, id) || changed,
             false,
           ),
         ),
@@ -3776,7 +3886,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     )
       return;
     track("idea_deleted", { removed });
-    setSelectedId(undefined);
+    setSelectedId(nextId);
+    setColorScope("node");
     showNotice({
       message: removed === 1 ? "Deleted 1 idea" : `Deleted ${removed} ideas`,
       action: { label: "Undo", run: undo },
@@ -3794,11 +3905,22 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     command((doc) => setLinkStyle(doc, value));
   }
 
+  // Colors every selected idea, or every selected branch, as one undo step.
   function colorSelectedNode(color: NodeColor) {
-    const id = selectedId();
-    if (!id || writing()) return;
+    if (!selectedRoots().length || writing()) return;
     const scope = colorScope();
-    if (command((doc) => setNodeColor(doc, id, color, scope === "branch")))
+    const branch = scope === "branch";
+    const ids = branch ? selectedRoots() : [...selectedIds()];
+    if (
+      command((doc) =>
+        doc.batch(() =>
+          ids.reduce(
+            (changed, id) => setNodeColor(doc, id, color, branch) || changed,
+            false,
+          ),
+        ),
+      )
+    )
       track("idea_colored", { scope });
   }
 
@@ -4029,6 +4151,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         e.preventDefault();
         if (pointer) cancelPointer();
         else if (allSelected()) setAllSelected(false);
+        else if (multiSelected()) setRunAnchor(undefined);
         else if (selectedId()) {
           setSelectedId(undefined);
           setColorScope("node");
@@ -4038,14 +4161,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
       if (pointer) return;
       if (
-        allSelected() &&
+        multiSelected() &&
         (e.key === "Delete" || e.key === "Backspace") &&
         !e.shiftKey &&
         !e.ctrlKey &&
         !e.altKey
       ) {
         e.preventDefault();
-        removeAll();
+        removeMany();
         return;
       }
       // With an idea selected every printable key types into it, so these
@@ -4144,7 +4267,25 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       // Option+arrows move ideas everywhere. Ctrl+arrows also work, except that
       // macOS reserves them for Mission Control.
       const move = arrow && !e.shiftKey && !e.metaKey && e.altKey !== e.ctrlKey;
-      if (option && matchesLetter(e, "g")) {
+      // Shift+Up/Down grows or shrinks a run of selected siblings.
+      const extend =
+        (arrow === "up" || arrow === "down") &&
+        e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.metaKey;
+      if (extend) {
+        e.preventDefault();
+        const siblings = siblingsInView(id);
+        const index = siblings.findIndex((node) => node.id === id);
+        const target =
+          index < 0 ? undefined : siblings[index + (arrow === "up" ? -1 : 1)];
+        if (target)
+          batch(() => {
+            if (selectedRun().length < 2) setRunAnchor(id);
+            setSelectedIdSignal(target.id);
+          });
+      } else if (option && matchesLetter(e, "g")) {
         e.preventDefault();
         toggleCollapse(id);
       } else if (option && matchesLetter(e, "f")) {
@@ -4153,6 +4294,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         else focusBranch();
       } else if (move) {
         e.preventDefault();
+        // Only the selected idea moves; the run would change under it.
+        setRunAnchor(undefined);
         if (arrow === "right") indentSelected();
         else if (arrow === "left") outdentSelected();
         else if (!blockedByFocus(id, "move")) {
@@ -4378,11 +4521,12 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         e.target.closest("input, textarea, [contenteditable=true], dialog")
       );
     let lastCopy: { text: string; entries: OutlineEntry[] } | undefined;
-    // Copies the selected branch, or every branch while all ideas are selected.
+    // Copies every selected branch.
     const copyBranch = (e: ClipboardEvent) => {
-      const id = selectedId();
-      const single = id && findNode(forest(), id);
-      const nodes = single ? [single] : allSelected() ? scopeForest() : [];
+      const nodes = selectedRoots().flatMap(
+        (id) => findNode(forest(), id) ?? [],
+      );
+      const single = multiSelected() ? undefined : nodes[0];
       if (!nodes.length || !canvasClipboard(e) || !e.clipboardData) return;
       e.preventDefault();
       const label = (key: string) => view().text(key);
@@ -4399,7 +4543,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       lastCopy = { text, entries };
       if (e.type === "cut") {
         if (single) removeSelected();
-        else removeAll();
+        else removeMany();
       } else if (single)
         showNotice({
           message: `Copied “${nodeLabel(single.id)}”${single.next?.length ? " with its branch" : ""}`,
@@ -5543,7 +5687,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 color={shownColor(id, node().color)}
                 x={node().x}
                 y={node().y}
-                selected={selectedId() === id || allSelected()}
+                selected={selectedIds().has(id)}
                 hinted={hintedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}

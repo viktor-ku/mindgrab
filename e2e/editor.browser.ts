@@ -584,6 +584,88 @@ test("Ctrl+A selects every idea to copy or delete, and keeps selecting text whil
   expect(await call("ids")).toEqual([root, other]);
 });
 
+test("Shift+Up/Down selects sibling ideas to color, copy or delete together", async () => {
+  const root = await rootId();
+  const a = await addChild(root, "A");
+  const b = await addChild(root, "B");
+  const c = await addChild(root, "C");
+  const d = await addChild(root, "D");
+  const under = await addChild(b, "B1");
+  const selectedIds = async () =>
+    (
+      await page
+        .locator("[data-selected=true]")
+        .evaluateAll((nodes) =>
+          nodes.map((node) => node.getAttribute("data-node-id")),
+        )
+    ).sort();
+  const expectSelected = async (ids: string[]) =>
+    expect(await selectedIds()).toEqual([...ids].sort());
+  const colorOf = async (id: string) => (await nodeData(id))?.color;
+  const style = page.locator('[aria-label="Idea style"]');
+  const pick = (name: string) =>
+    style.getByRole("button", { name, exact: true }).click();
+
+  await node(b).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expectSelected([b, c, d]);
+  // The run stops at the last sibling, and shrinks back toward where it
+  // started before growing the other way.
+  await page.keyboard.press("Shift+ArrowDown");
+  await expectSelected([b, c, d]);
+  await page.keyboard.press("Shift+ArrowUp");
+  await page.keyboard.press("Shift+ArrowUp");
+  await expectSelected([b]);
+  await page.keyboard.press("Shift+ArrowUp");
+  await expectSelected([a, b]);
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expectSelected([b, c]);
+
+  // A color goes to each selected idea, as one undo step.
+  expect(await style.getByRole("button", { name: "These ideas" }).count()).toBe(
+    1,
+  );
+  await pick("Green 200");
+  expect(await colorOf(b)).toBe("green-200");
+  expect(await colorOf(c)).toBe("green-200");
+  expect(await colorOf(under)).toBe("slate");
+  expect(await colorOf(a)).toBe("slate");
+  expect(await colorOf(d)).toBe("slate");
+  await expectSelected([b, c]);
+  // Mixed colors leave no swatch pressed.
+  await page.keyboard.press("Shift+ArrowDown");
+  expect(
+    await style.locator('.style-swatch[aria-pressed="true"]').count(),
+  ).toBe(0);
+  await page.keyboard.press("Shift+ArrowUp");
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await colorOf(b)).toBe("slate");
+  expect(await colorOf(c)).toBe("slate");
+  await style.getByRole("button", { name: "Their branches" }).click();
+  await pick("Blue 200");
+  expect(await colorOf(under)).toBe("blue-200");
+  expect(await colorOf(c)).toBe("blue-200");
+
+  // Esc ends the run, keeping the idea the keys moved to.
+  await page.keyboard.press("Escape");
+  await expectSelected([c]);
+
+  await node(a).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  expect(await clipboard("copy")).toBe("- A\n- B\n  - B1");
+  await page.keyboard.press("Delete");
+  await notice("Deleted 3 ideas").waitFor();
+  expect(await childrenOf(root)).toEqual([c, d]);
+  await expectSelected([c]);
+
+  // Ctrl/Cmd+A colors every idea.
+  await page.keyboard.press("ControlOrMeta+a");
+  await pick("Red 200");
+  for (const id of await call("ids")) expect(await colorOf(id)).toBe("red-200");
+});
+
 test("a backup downloads offline and imports twice with fresh identities and empty undo stacks", async () => {
   await page.getByRole("textbox", { name: "Project name" }).fill("Portable");
   const originalId = await call("projectId");
