@@ -482,6 +482,9 @@ async fn shared_view(app: &Arc<Backend>, token: &str) -> Result<Shared> {
             .clone();
         match built {
             Some(Built::Ready(view)) => {
+                // The link may have been turned off during the build, or off
+                // and on again, which gives it a new token.
+                shared_project(app, token).await?;
                 return Ok(Shared {
                     view: Some(view.to_vec()),
                     ..project
@@ -567,8 +570,10 @@ async fn build_share(
         Ok(mindgrab_state::Project::from_snapshot(&snapshot)?.share_snapshot()?)
     })
     .await?;
-    sqlx::query("UPDATE mindgrab_loro.projects SET shared_snapshot=$3,shared_revision=$2 WHERE id=$1 AND revision=$2 AND share_token IS NOT NULL AND NOT deleted").bind(id).bind(revision).bind(&view).execute(&app.pool).await?;
-    Ok(Some(view))
+    let saved = sqlx::query("UPDATE mindgrab_loro.projects SET shared_snapshot=$3,shared_revision=$2 WHERE id=$1 AND revision=$2 AND share_token IS NOT NULL AND NOT deleted").bind(id).bind(revision).bind(&view).execute(&app.pool).await?.rows_affected();
+    // Saving nothing means the owner saved, unshared or deleted meanwhile:
+    // no viewer gets this copy, and each looks again.
+    Ok((saved == 1).then_some(view))
 }
 async fn shared(app: &Arc<Backend>, headers: &HeaderMap, body: &Bytes) -> Result<Response> {
     #[derive(Deserialize)]
