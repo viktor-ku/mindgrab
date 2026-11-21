@@ -26,8 +26,8 @@ export function branchEntry(
   };
 }
 
-// Undefined unless the data is a well-formed copied branch.
-export function parseBranchEntry(data: string): OutlineEntry | undefined {
+// Undefined unless the data is a well-formed copied branch, or a list of them.
+export function parseBranchEntries(data: string): OutlineEntry[] | undefined {
   const parse = (value: unknown, depth: number): OutlineEntry | undefined => {
     if (depth > 10_000 || !value || typeof value !== "object") return;
     const { text, note, color, children } = value as Record<string, unknown>;
@@ -46,7 +46,18 @@ export function parseBranchEntry(data: string): OutlineEntry | undefined {
     };
   };
   try {
-    return parse(JSON.parse(data), 0);
+    const value: unknown = JSON.parse(data);
+    if (!Array.isArray(value)) {
+      const entry = parse(value, 0);
+      return entry && [entry];
+    }
+    const entries: OutlineEntry[] = [];
+    for (const item of value) {
+      const entry = parse(item, 0);
+      if (!entry) return;
+      entries.push(entry);
+    }
+    return entries.length ? entries : undefined;
   } catch {
     return undefined;
   }

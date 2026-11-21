@@ -1,4 +1,5 @@
 import { makeEventListener } from "@solid-primitives/event-listener";
+import { useKeyDownEvent } from "@solid-primitives/keyboard";
 import { debounce } from "@solid-primitives/scheduled";
 import { Dialog } from "./Dialog";
 import { ProjectPreferences } from "./ProjectPreferences";
@@ -111,7 +112,7 @@ import {
   branchEntry,
   branchOutline,
   outlineSize,
-  parseBranchEntry,
+  parseBranchEntries,
   parseOutline,
 } from "./outline-text";
 import type { OutlineEntry } from "./outline-text";
@@ -1910,7 +1911,15 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
-  const [selectedId, setSelectedId] = createSignal<string>();
+  const [selectedId, setSelectedIdSignal] = createSignal<string>();
+  // Ctrl/Cmd+A selects every idea in view, with no single idea selected.
+  // Choosing an idea, or nothing, ends it.
+  const [allSelected, setAllSelected] = createSignal(false);
+  const setSelectedId = (id: string | undefined) =>
+    batch(() => {
+      setAllSelected(false);
+      setSelectedIdSignal(id);
+    });
   const [collapsedIds, setCollapsedIds] = createSignal(new Set<string>());
   const details = createMemo(() => nodeDetails(forest()));
   // Branch focus shows one branch as if it were the whole map. It is a view;
@@ -3734,6 +3743,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
+  // Selects every idea in view: the whole map, or the focused branch.
+  function selectAll() {
+    if (!scopeForest().length) return;
+    finishWriting();
+    setSelectedId(undefined);
+    setColorScope("node");
+    setAllSelected(true);
+    canvas.focus({ preventScroll: true });
+  }
+
+  // Deletes every selected idea as one undo step.
+  function removeAll() {
+    const roots = scopeForest();
+    if (!allSelected() || !roots.length) return;
+    const removed = roots.reduce(
+      (count, root) => count + 1 + (details().get(root.id)?.descendants ?? 0),
+      0,
+    );
+    if (
+      !command((doc) =>
+        doc.batch(() =>
+          roots.reduce(
+            (changed, root) => deleteSubtree(doc, root.id) || changed,
+            false,
+          ),
+        ),
+      )
+    )
+      return;
+    track("idea_deleted", { removed });
+    setSelectedId(undefined);
+    showNotice({
+      message: removed === 1 ? "Deleted 1 idea" : `Deleted ${removed} ideas`,
+      action: { label: "Undo", run: undo },
+    });
+    canvas.focus({ preventScroll: true });
+  }
+
   // The map's quick colors and new-idea color: preferences, not undoable.
   function setColors(value: ColorPreferences) {
     command((doc) => setColorPreferences(doc, value));
@@ -3978,6 +4025,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (e.key === "Escape") {
         e.preventDefault();
         if (pointer) cancelPointer();
+        else if (allSelected()) setAllSelected(false);
         else if (selectedId()) {
           setSelectedId(undefined);
           setColorScope("node");
@@ -3986,6 +4034,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         return;
       }
       if (pointer) return;
+      if (
+        allSelected() &&
+        (e.key === "Delete" || e.key === "Backspace") &&
+        !e.shiftKey &&
+        !e.ctrlKey &&
+        !e.altKey
+      ) {
+        e.preventDefault();
+        removeAll();
+        return;
+      }
       // With an idea selected every printable key types into it, so these
       // single-key shortcuts apply only when nothing is selected.
       if (
@@ -4052,6 +4111,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
       if (
         !selectedId() &&
+        !allSelected() &&
         e.key === "Enter" &&
         !e.shiftKey &&
         !e.ctrlKey &&
@@ -4276,6 +4336,34 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     };
     makeEventListener(window, "keydown", shortcuts);
     makeEventListener(window, "keydown", keydown);
+    // Ctrl/Cmd+A selects every idea on the map. In text fields and while an
+    // idea is edited it keeps selecting text.
+    const selectAllShortcut = (e: KeyboardEvent) => {
+      if (
+        !(e.ctrlKey || e.metaKey) ||
+        e.altKey ||
+        e.shiftKey ||
+        !matchesLetter(e, "a") ||
+        e.isComposing ||
+        overlayOpen() ||
+        writing() ||
+        searchOpen() ||
+        contextMenu() ||
+        menuOpen() ||
+        pointer ||
+        inOpenMenu(e.target) ||
+        (e.target instanceof Element &&
+          e.target.closest("textarea, input, [contenteditable=true], dialog"))
+      )
+        return;
+      e.preventDefault();
+      selectAll();
+    };
+    const keyDown = useKeyDownEvent();
+    createEffect(() => {
+      const e = keyDown();
+      if (e) untrack(() => selectAllShortcut(e));
+    });
     makeEventListener(window, "pointerup", (e) => stopPointer(e, true));
     makeEventListener(canvas, "wheel", wheel, { passive: false });
     const canvasClipboard = (e: ClipboardEvent) =>
@@ -4286,32 +4374,46 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         e.target instanceof Element &&
         e.target.closest("input, textarea, [contenteditable=true], dialog")
       );
-    let lastCopy: { text: string; entry: OutlineEntry } | undefined;
+    let lastCopy: { text: string; entries: OutlineEntry[] } | undefined;
+    // Copies the selected branch, or every branch while all ideas are selected.
     const copyBranch = (e: ClipboardEvent) => {
       const id = selectedId();
-      const node = id && findNode(forest(), id);
-      if (!node || !canvasClipboard(e) || !e.clipboardData) return;
+      const single = id && findNode(forest(), id);
+      const nodes = single ? [single] : allSelected() ? scopeForest() : [];
+      if (!nodes.length || !canvasClipboard(e) || !e.clipboardData) return;
       e.preventDefault();
-      const text = branchOutline(node, (key) => view().text(key));
-      const entry = branchEntry(node, (key) => view().text(key));
+      const label = (key: string) => view().text(key);
+      const text = nodes.map((node) => branchOutline(node, label)).join("\n");
+      const entries = nodes.map((node) => branchEntry(node, label));
       e.clipboardData.setData("text/plain", text);
-      e.clipboardData.setData(BRANCH_MIME, JSON.stringify(entry));
+      // One branch is stored on its own, as earlier versions read it.
+      e.clipboardData.setData(
+        BRANCH_MIME,
+        JSON.stringify(entries.length === 1 ? entries[0] : entries),
+      );
       // Some browsers drop custom clipboard types; the same text pasted back
       // still restores notes and colors.
-      lastCopy = { text, entry };
-      if (e.type === "cut") removeSelected();
-      else
+      lastCopy = { text, entries };
+      if (e.type === "cut") {
+        if (single) removeSelected();
+        else removeAll();
+      } else if (single)
         showNotice({
-          message: `Copied “${nodeLabel(node.id)}”${node.next?.length ? " with its branch" : ""}`,
+          message: `Copied “${nodeLabel(single.id)}”${single.next?.length ? " with its branch" : ""}`,
         });
+      else {
+        const count = outlineSize(entries);
+        showNotice({
+          message: count === 1 ? "Copied 1 idea" : `Copied ${count} ideas`,
+        });
+      }
     };
     const paste = (e: ClipboardEvent) => {
       if (!canvasClipboard(e) || !e.clipboardData) return;
       const text = e.clipboardData.getData("text/plain");
-      const rich =
-        parseBranchEntry(e.clipboardData.getData(BRANCH_MIME)) ??
-        (lastCopy?.text === text ? lastCopy.entry : undefined);
-      const entries = rich ? [rich] : parseOutline(text);
+      const entries =
+        parseBranchEntries(e.clipboardData.getData(BRANCH_MIME)) ??
+        (lastCopy?.text === text ? lastCopy.entries : parseOutline(text));
       if (!entries.length) return;
       e.preventDefault();
       pasteOutline(entries);
@@ -5438,7 +5540,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 color={shownColor(id, node().color)}
                 x={node().x}
                 y={node().y}
-                selected={selectedId() === id}
+                selected={selectedId() === id || allSelected()}
                 hinted={hintedId() === id}
                 writing={selectedId() === id && writing()}
                 dragging={draggingId() === id}

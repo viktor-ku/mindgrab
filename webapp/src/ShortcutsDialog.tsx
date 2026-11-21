@@ -26,6 +26,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     title: "Move and organize",
     items: [
       ["Arrow keys", "Select a nearby idea"],
+      [`${MOD_LABEL}A`, "Select all ideas to delete or copy them"],
       [`${ALT_LABEL}↑ · ${ALT_LABEL}↓`, "Reorder among siblings"],
       [`${ALT_LABEL}→`, "Move under the idea above"],
       [`${ALT_LABEL}←`, "Move out to the parent’s level"],
