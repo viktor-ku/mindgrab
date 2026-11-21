@@ -2100,10 +2100,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     visit(visibleForest());
     return ids;
   });
-  const selectedNode = createMemo(() => {
-    const id = selectedId();
-    return id ? findNode(forest(), id) : undefined;
-  });
   const nodeIds = createMemo(() => layout().nodes.map((node) => node.id));
   const connections = createMemo(
     () =>
@@ -2573,8 +2569,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Drawn as a central idea: a root, or the idea a branch is focused on.
   const isCentral = (id: string) =>
     !details().get(id)?.parent || focusId() === id;
-  const selectedIsRoot = () => isCentral(selectedId() ?? "");
-  const selectedLook = () => nodeLook(selectedNode()?.color, selectedIsRoot());
+  const selectedIsCentral = () => [...selectedIds()].every(isCentral);
+  const selectedLook = () => nodeLook(selectedColor(), selectedIsCentral());
   // The color every selected idea shares; none when they differ.
   const selectedColor = createMemo(() => {
     const colors = new Set<NodeColor>();
@@ -2602,7 +2598,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ref={place.ref}
       palette={place.palette}
       color={selectedColor()}
-      root={[...selectedIds()].every(isCentral)}
+      root={selectedIsCentral()}
       count={selectedIds().size}
       // After Ctrl/Cmd+A nothing is left under the selected ideas.
       descendants={
@@ -4334,6 +4330,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         insertParent();
       } else if (arrow && plain) {
         e.preventDefault();
+        // A plain arrow ends a run of siblings even where it cannot move.
+        setRunAnchor(undefined);
         const target =
           navigationTarget(visibleForest(), id, arrow) ?? nearbyIdea(id, arrow);
         if (target) {
@@ -5511,7 +5509,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         class="pointer-events-none absolute bottom-3 z-30 flex flex-col items-center gap-2"
         style={stripStyle(bottomStrip())}
       >
-        <Show when={selectedId() && !writing() && !drag()}>
+        {/* After Ctrl/Cmd+A no one idea is selected; phones keep only Color. */}
+        <Show
+          when={
+            (selectedId() || (isPhone() && allSelected())) &&
+            !writing() &&
+            !drag()
+          }
+        >
           <section
             data-no-pan
             data-toolbar
@@ -5533,27 +5538,29 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   }),
               })}
             </Show>
-            <button
-              type="button"
-              class="tool-button"
-              title="Add a child idea (Tab)"
-              {...press(() => add("child"))}
-            >
-              <ChildIcon />
-              <span class="max-sm:sr-only">Child</span>
-            </button>
-            <button
-              type="button"
-              class="tool-button"
-              // Enter on a central idea adds a child instead.
-              title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
-              disabled={selectedId() === focusId()}
-              {...press(() => add("sibling"))}
-            >
-              <SiblingIcon />
-              <span class="max-sm:sr-only">Sibling</span>
-            </button>
-            <span class="toolbar-divider" />
+            <Show when={selectedId()}>
+              <button
+                type="button"
+                class="tool-button"
+                title="Add a child idea (Tab)"
+                {...press(() => add("child"))}
+              >
+                <ChildIcon />
+                <span class="max-sm:sr-only">Child</span>
+              </button>
+              <button
+                type="button"
+                class="tool-button"
+                // Enter on a central idea adds a child instead.
+                title={`Add a sibling idea${details().get(selectedId() ?? "")?.parent ? " (Enter)" : ""}`}
+                disabled={selectedId() === focusId()}
+                {...press(() => add("sibling"))}
+              >
+                <SiblingIcon />
+                <span class="max-sm:sr-only">Sibling</span>
+              </button>
+              <span class="toolbar-divider" />
+            </Show>
             <button
               type="button"
               class="icon-button phone-only"
@@ -5571,90 +5578,92 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 style={selectedLook().style}
               />
             </button>
-            <button
-              type="button"
-              class="icon-button relative"
-              aria-label="Notes"
-              title={`Notes (${ALT_LABEL}N)`}
-              aria-expanded={notesOpen()}
-              {...press(() => toggleNotes())}
-            >
-              <NoteIcon />
-              <Show
-                when={view()
-                  .note(selectedId() ?? "")
-                  .trim()}
+            <Show when={selectedId()}>
+              <button
+                type="button"
+                class="icon-button relative"
+                aria-label="Notes"
+                title={`Notes (${ALT_LABEL}N)`}
+                aria-expanded={notesOpen()}
+                {...press(() => toggleNotes())}
               >
-                <span
-                  aria-hidden="true"
-                  class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-accent"
-                />
+                <NoteIcon />
+                <Show
+                  when={view()
+                    .note(selectedId() ?? "")
+                    .trim()}
+                >
+                  <span
+                    aria-hidden="true"
+                    class="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-accent"
+                  />
+                </Show>
+              </button>
+              <Show when={details().get(selectedId() ?? "")?.descendants}>
+                <button
+                  type="button"
+                  class="icon-button"
+                  aria-label={
+                    collapsedIds().has(selectedId() ?? "")
+                      ? "Expand children"
+                      : "Collapse children"
+                  }
+                  title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
+                  {...press(() => toggleCollapse(selectedId() as string))}
+                >
+                  <Show
+                    when={collapsedIds().has(selectedId() ?? "")}
+                    fallback={<FoldIcon />}
+                  >
+                    <UnfoldIcon />
+                  </Show>
+                </button>
+                <button
+                  type="button"
+                  class="icon-button narrow-hide"
+                  aria-label={
+                    focusId() === selectedId()
+                      ? "Leave focus"
+                      : "Focus on this branch"
+                  }
+                  title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
+                  aria-pressed={focusId() === selectedId()}
+                  {...press(() =>
+                    focusId() === selectedId() ? exitFocus() : focusBranch(),
+                  )}
+                >
+                  <FocusIcon />
+                </button>
               </Show>
-            </button>
-            <Show when={details().get(selectedId() ?? "")?.descendants}>
               <button
                 type="button"
                 class="icon-button"
-                aria-label={
-                  collapsedIds().has(selectedId() ?? "")
-                    ? "Expand children"
-                    : "Collapse children"
-                }
-                title={`${collapsedIds().has(selectedId() ?? "") ? "Expand" : "Collapse"} children (${ALT_LABEL}G)`}
-                {...press(() => toggleCollapse(selectedId() as string))}
+                aria-label="More actions"
+                title="More actions"
+                aria-haspopup="menu"
+                aria-expanded={!!contextMenu()?.above}
+                {...press((e) => {
+                  if (contextMenu()?.above) {
+                    setContextMenu(undefined);
+                    backToCanvas(e);
+                    return;
+                  }
+                  const bounds = e.currentTarget.getBoundingClientRect();
+                  const id = selectedId();
+                  setContextMenu({
+                    x: Math.max(
+                      8,
+                      Math.min(bounds.left, window.innerWidth - 232),
+                    ),
+                    y: bounds.top - 8,
+                    nodeId: id,
+                    above: true,
+                  });
+                })}
               >
-                <Show
-                  when={collapsedIds().has(selectedId() ?? "")}
-                  fallback={<FoldIcon />}
-                >
-                  <UnfoldIcon />
-                </Show>
-              </button>
-              <button
-                type="button"
-                class="icon-button narrow-hide"
-                aria-label={
-                  focusId() === selectedId()
-                    ? "Leave focus"
-                    : "Focus on this branch"
-                }
-                title={`${focusId() === selectedId() ? "Leave focus" : "Focus on this branch"} (${ALT_LABEL}F)`}
-                aria-pressed={focusId() === selectedId()}
-                {...press(() =>
-                  focusId() === selectedId() ? exitFocus() : focusBranch(),
-                )}
-              >
-                <FocusIcon />
+                <MoreIcon />
               </button>
             </Show>
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="More actions"
-              title="More actions"
-              aria-haspopup="menu"
-              aria-expanded={!!contextMenu()?.above}
-              {...press((e) => {
-                if (contextMenu()?.above) {
-                  setContextMenu(undefined);
-                  backToCanvas(e);
-                  return;
-                }
-                const bounds = e.currentTarget.getBoundingClientRect();
-                const id = selectedId();
-                setContextMenu({
-                  x: Math.max(
-                    8,
-                    Math.min(bounds.left, window.innerWidth - 232),
-                  ),
-                  y: bounds.top - 8,
-                  nodeId: id,
-                  above: true,
-                });
-              })}
-            >
-              <MoreIcon />
-            </button>
           </section>
         </Show>
       </div>
@@ -5962,9 +5971,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                       type="button"
                       role="menuitem"
                       class="menu-item text-rose-700!"
-                      {...press(run(removeSelected))}
+                      {...press(() => {
+                        // From the toolbar's More actions a run of siblings
+                        // is still selected; Delete takes all of it.
+                        if (multiSelected() && nodeId() === selectedId()) {
+                          setContextMenu(undefined);
+                          removeMany();
+                        } else run(removeSelected)();
+                      })}
                     >
-                      Delete
+                      {multiSelected() && nodeId() === selectedId()
+                        ? `Delete ${selectedRoots().length} ideas`
+                        : "Delete"}
                       <kbd class="ml-auto">{DELETE_LABEL}</kbd>
                     </button>
                   </>

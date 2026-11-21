@@ -651,6 +651,11 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   // Esc ends the run, keeping the idea the keys moved to.
   await page.keyboard.press("Escape");
   await expectSelected([c]);
+  // A plain arrow ends the run too, even where it cannot move.
+  await page.keyboard.press("Shift+ArrowDown");
+  await expectSelected([c, d]);
+  await page.keyboard.press("ArrowDown");
+  await expectSelected([d]);
 
   await node(a).click();
   await page.keyboard.press("Shift+ArrowDown");
@@ -659,11 +664,30 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   await notice("Deleted 3 ideas").waitFor();
   expect(await childrenOf(root)).toEqual([c, d]);
   await expectSelected([c]);
+  // The toolbar's More actions deletes the whole run as well.
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: /^Delete 2 ideas/ }).click();
+  expect(await childrenOf(root)).toEqual([]);
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await childrenOf(root)).toEqual([c, d]);
 
   // Ctrl/Cmd+A colors every idea.
   await page.keyboard.press("ControlOrMeta+a");
   await pick("Red 200");
   for (const id of await call("ids")) expect(await colorOf(id)).toBe("red-200");
+
+  // Phones color the selection from the toolbar, which after Ctrl/Cmd+A
+  // offers nothing that needs one idea.
+  await page.setViewportSize({ width: 390, height: 800 });
+  const toolbar = page.getByRole("region", { name: "Selected idea" });
+  await toolbar.getByRole("button", { name: "Color" }).click();
+  expect(
+    await toolbar.getByRole("button", { name: "More actions" }).count(),
+  ).toBe(0);
+  await pick("Green 200");
+  for (const id of await call("ids"))
+    expect(await colorOf(id)).toBe("green-200");
 });
 
 test("a backup downloads offline and imports twice with fresh identities and empty undo stacks", async () => {
