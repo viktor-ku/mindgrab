@@ -8,16 +8,19 @@ import { transientLayer } from "./transient-layer";
 
 export type ColorScope = "node" | "branch";
 
-// Everything about how the selected idea looks. The quick colors are small
+// Everything about how the selected ideas look. The quick colors are small
 // copies of an idea card in that color, so each shows its fill, edge and text;
 // the plus opens every color. Pointing at a color (or reaching it from the
 // keyboard) previews it on the map, on the idea or the whole branch.
 export function StylePanel(props: {
-  color: NodeColor;
+  // The color the selected ideas share; none when they differ.
+  color: NodeColor | undefined;
   // Central ideas take the strong fill of a named color, and so do their
   // swatches.
   root: boolean;
-  // Ideas under the selected one; a branch of none is just the idea.
+  // How many ideas are selected.
+  count: number;
+  // Ideas under the selected ones; a branch of none is just the idea.
   descendants: number;
   scope: ColorScope;
   // The map's quick colors, in its order.
@@ -35,9 +38,18 @@ export function StylePanel(props: {
 }) {
   onCleanup(() => props.onPreview(undefined));
   const scope = (): ColorScope => (props.descendants ? props.scope : "node");
-  const target = () => (scope() === "node" ? "this idea" : "this branch");
+  const many = () => props.count > 1;
+  const target = () =>
+    scope() === "node"
+      ? many()
+        ? `these ${props.count} ideas`
+        : "this idea"
+      : many()
+        ? "their branches"
+        : "this branch";
   const [paletteOpen, setPaletteOpen] = createSignal(false);
-  const custom = () => !props.quick.includes(props.color);
+  const custom = () =>
+    props.color !== undefined && !props.quick.includes(props.color);
   let more!: HTMLButtonElement;
 
   // Read as it draws, so the chip follows the idea: its color, and whether
@@ -73,7 +85,7 @@ export function StylePanel(props: {
             aria-pressed={scope() === "node"}
             {...press((e) => props.onScope("node", e))}
           >
-            This idea
+            {many() ? "These ideas" : "This idea"}
           </button>
           <button
             type="button"
@@ -82,12 +94,14 @@ export function StylePanel(props: {
             disabled={!props.descendants}
             title={
               props.descendants
-                ? `This idea and the ${props.descendants === 1 ? "idea" : `${props.descendants} ideas`} under it`
-                : "Nothing under this idea yet"
+                ? `${many() ? "These ideas" : "This idea"} and the ${props.descendants === 1 ? "idea" : `${props.descendants} ideas`} under ${many() ? "them" : "it"}`
+                : many()
+                  ? "Nothing else under these ideas"
+                  : "Nothing under this idea yet"
             }
             {...press((e) => props.onScope("branch", e))}
           >
-            This branch
+            {many() ? "Their branches" : "This branch"}
           </button>
         </div>
       </fieldset>
@@ -133,7 +147,7 @@ export function StylePanel(props: {
             aria-pressed={custom()}
             aria-expanded={paletteOpen()}
             title={
-              custom()
+              props.color !== undefined && custom()
                 ? `Other color: ${colorLabel(props.color, props.root)}`
                 : "Other color"
             }
@@ -147,7 +161,7 @@ export function StylePanel(props: {
                 </span>
               }
             >
-              {chip(() => props.color)}
+              {chip(() => props.color ?? "slate")}
             </Show>
           </button>
         </div>
@@ -178,7 +192,7 @@ export function StylePanel(props: {
 // Every color, in a popover beside the panel (inside it on phones). The idea's
 // own color, when it is not a quick color yet, can become one from here.
 function Palette(props: {
-  color: NodeColor;
+  color: NodeColor | undefined;
   root: boolean;
   quick: readonly NodeColor[];
   target: string;
@@ -192,10 +206,15 @@ function Palette(props: {
   const [pointed, setPointed] = createSignal<NodeColor>();
   const named = () => {
     const color = pointed() ?? props.color;
-    return isPickable(color) ? colorLabel(color, props.root) : "";
+    return color && isPickable(color) ? colorLabel(color, props.root) : "";
   };
-  const addable = () =>
-    isPickable(props.color) && !props.quick.includes(props.color);
+  // The selected ideas' own color, when it is not a quick color yet.
+  const addable = () => {
+    const color = props.color;
+    return color && isPickable(color) && !props.quick.includes(color)
+      ? color
+      : undefined;
+  };
   let grid!: HTMLElement;
   // However it closes, the color pointed at stops showing on the map.
   onCleanup(() => props.onPreview(undefined));
@@ -234,18 +253,20 @@ function Palette(props: {
         }
       />
       <Show when={addable()}>
-        <button
-          type="button"
-          class="style-add-quick"
-          {...press(() => {
-            props.onAddQuick(props.color);
-            // This button goes away with the press.
-            focusGrid();
-          })}
-        >
-          <PlusIcon class="size-3.5" />
-          Add {colorLabel(props.color, props.root)} to quick colors
-        </button>
+        {(color) => (
+          <button
+            type="button"
+            class="style-add-quick"
+            {...press(() => {
+              props.onAddQuick(color());
+              // This button goes away with the press.
+              focusGrid();
+            })}
+          >
+            <PlusIcon class="size-3.5" />
+            Add {colorLabel(color(), props.root)} to quick colors
+          </button>
+        )}
       </Show>
     </section>
   );
