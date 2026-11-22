@@ -10,7 +10,8 @@
 - `main` is protected by a GitHub ruleset: changes land only through a pull request
   approved by CodeRabbit (its approval counts as the required review and stays
   through later pushes). CodeRabbit reviews each push and pauses after 10 reviewed
-  commits; if it paused before approving, comment `@coderabbitai review`. Direct
+  commits; whenever it has paused, comment `@coderabbitai review` so later pushes
+  are reviewed too, even after it approved. Direct
   pushes and force-pushes to `main` are rejected. Repo admins
   can bypass only when merging a pull request; do that only when the user asks.
 - Earn CodeRabbit's approval honestly. Read every comment it leaves and judge it:

@@ -1945,13 +1945,16 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [focusId, setFocusId] = createSignal<string>();
   // Select-all covers the branch in view; once the view changes (focus left,
   // or the focused branch was deleted elsewhere) it would cover other ideas.
+  // A run of siblings stays while it is still one in the new view, as when
+  // undo selects a run outside the focused branch and focus leaves to show
+  // it. Focusing an idea in the run leaves it no siblings, and ends the run.
   createEffect(
     on(
       focusId,
       () =>
         batch(() => {
           setAllSelected(false);
-          setRunAnchor(undefined);
+          if (selectedRun().length < 2) setRunAnchor(undefined);
         }),
       { defer: true },
     ),

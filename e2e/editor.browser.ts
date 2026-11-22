@@ -685,6 +685,21 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   expect(await colorOf(c)).toBe("blue-200");
   await expectSelected([]);
 
+  // Undo from inside another branch's focus brings back the whole run: focus
+  // leaves to show it, and the run stays selected.
+  const inC = await addChild(c, "C1");
+  await node(c).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await pick("Green 200");
+  expect(await colorOf(d)).toBe("green-200");
+  await node(inC).click();
+  await page.keyboard.press("Alt+f");
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await colorOf(c)).toBe("blue-200");
+  expect(await colorOf(d)).toBe("slate");
+  await node(root).waitFor();
+  await expectSelected([c, d]);
+
   // Ctrl/Cmd+A colors every idea.
   await page.keyboard.press("ControlOrMeta+a");
   await pick("Red 200");
