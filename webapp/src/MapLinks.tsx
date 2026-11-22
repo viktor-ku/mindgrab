@@ -13,6 +13,9 @@ export function MapLinks(props: {
   connection: (id: string) => Connection | undefined;
   style?: LinkStyle;
   color: (connection: Connection) => NodeColor | undefined;
+  // The map area the lines fill, such as an image's; by default they draw
+  // from the layer's origin and overflow it.
+  viewBox?: { x: number; y: number; width: number; height: number };
 }) {
   const neutral = lineLook(undefined);
   const parts = (id: string) =>
@@ -24,6 +27,10 @@ export function MapLinks(props: {
     <svg
       class="map-links absolute inset-0 w-full h-full overflow-visible pointer-events-none"
       aria-hidden="true"
+      viewBox={
+        props.viewBox &&
+        `${props.viewBox.x} ${props.viewBox.y} ${props.viewBox.width} ${props.viewBox.height}`
+      }
     >
       <For each={props.ids}>
         {(id) => {

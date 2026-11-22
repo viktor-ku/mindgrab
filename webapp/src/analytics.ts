@@ -22,7 +22,10 @@ export interface AnalyticsEvents {
   project_opened: { idea_count: number };
   project_renamed: Record<string, never>;
   project_saved: { local: boolean };
-  project_exported: { format: "json" | "markdown"; idea_count: number };
+  project_exported: {
+    format: "json" | "markdown" | "png" | "svg" | "clipboard";
+    idea_count: number;
+  };
   project_imported: { idea_count: number; file_kb: number };
   project_list_opened: { project_count: number };
   saving_changed: { local: boolean; cloud: boolean };

@@ -342,7 +342,7 @@ type SaveFilePicker = (options: {
   types: { description: string; accept: Record<string, string[]> }[];
 }) => Promise<{
   createWritable(): Promise<{
-    write(data: string): Promise<void>;
+    write(data: string | Blob): Promise<void>;
     close(): Promise<void>;
   }>;
 }>;
@@ -357,6 +357,10 @@ const JSON_FILE_TYPE = [
 const MARKDOWN_FILE_TYPE = [
   { description: "Markdown outline", accept: { "text/markdown": [".md"] } },
 ];
+const IMAGE_FILE_TYPES = {
+  png: [{ description: "PNG image", accept: { "image/png": [".png"] } }],
+  svg: [{ description: "SVG image", accept: { "image/svg+xml": [".svg"] } }],
+};
 
 function safeFileName(name: string): string {
   return Array.from(name, (character) =>
@@ -405,6 +409,21 @@ export function writeMarkdownFile(fileName: string, markdown: string) {
   );
 }
 
+// The image can still be rendering: the save dialog opens straight away,
+// while the press still counts as one, and the file is written once it's ready.
+export function writeImageFile(
+  fileName: string,
+  format: "png" | "svg",
+  image: Promise<Blob>,
+) {
+  return writeFile(
+    `${safeFileName(fileName)}.${format}`,
+    image,
+    format === "png" ? "image/png" : "image/svg+xml",
+    IMAGE_FILE_TYPES[format],
+  );
+}
+
 // A readable outline of every node, folded or not. Nested list items keep the
 // hierarchy; line breaks inside a node continue its list item.
 interface OutlineNode {
@@ -448,21 +467,25 @@ const escapeMarkdown = (line: string) => escapeLine(line.trimStart());
 
 async function writeFile(
   suggestedName: string,
-  contents: string,
+  contents: string | Blob | Promise<string | Blob>,
   type: string,
   types: { description: string; accept: Record<string, string[]> }[],
 ): Promise<void> {
   const picker = (window as Window & { showSaveFilePicker?: SaveFilePicker })
     .showSaveFilePicker;
+  // Closing the save dialog leaves the contents unread; their failure then
+  // has nobody to report to.
+  if (contents instanceof Promise) contents.catch(() => {});
   if (picker) {
     const handle = await picker.call(window, { suggestedName, types });
+    const data = await contents;
     const writable = await handle.createWritable();
-    await writable.write(contents);
+    await writable.write(data);
     await writable.close();
     return;
   }
 
-  const url = URL.createObjectURL(new Blob([contents], { type }));
+  const url = URL.createObjectURL(new Blob([await contents], { type }));
   const link = document.createElement("a");
   link.href = url;
   link.download = suggestedName;

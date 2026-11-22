@@ -61,6 +61,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       [`${MOD_LABEL}Z`, "Undo"],
       [`${MOD_LABEL}${SHIFT_LABEL}Z`, "Redo"],
       [`${MOD_LABEL}S`, "Save now (saving is automatic)"],
+      [`${MOD_LABEL}${SHIFT_LABEL}E`, "Export an image of the map"],
     ],
   },
 ];

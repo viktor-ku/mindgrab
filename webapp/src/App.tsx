@@ -4,6 +4,9 @@ import { debounce } from "@solid-primitives/scheduled";
 import { Dialog } from "./Dialog";
 import { ProjectPreferences } from "./ProjectPreferences";
 import { ShareDialog } from "./ShareDialog";
+import { ExportImageDialog } from "./ExportImageDialog";
+import type { MapImageScope } from "./ExportImageDialog";
+import { MAP_IMAGE_PADDING } from "./map-image";
 import {
   createMutation,
   createQuery,
@@ -446,6 +449,8 @@ export function Node(props: {
               aria-keyshortcuts={
                 props.descendants && !props.readOnly ? "Alt+G" : undefined
               }
+              // Image export finds an idea's text by this.
+              data-idea-text
               class={`min-w-0 flex-1 whitespace-pre-wrap wrap-anywhere text-left cursor-pointer ${
                 props.readOnly
                   ? "rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-current"
@@ -1793,7 +1798,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // Undefined while the name field is not being edited.
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
-  const [showBackup, setShowBackup] = createSignal(false);
+  const [showExport, setShowExport] = createSignal(false);
   // Project preferences live in the address, `?preferences=true&tab=colors`,
   // so a reload or a link opens them again and Back closes them. The editor
   // route's search is typed by its schema (see app-search.ts).
@@ -1847,6 +1852,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const setShowPreferences = (open: boolean) =>
     open ? openPreferences() : closePreferences();
   const [showShare, setShowShare] = createSignal(false);
+  const [showImage, setShowImage] = createSignal(false);
+  const [imageScope, setImageScope] = createSignal<MapImageScope>("map");
   // Share sends people to the preferences to turn cloud saving on, and takes
   // them back once it is. An effect, not the dialog's onClose, which fires
   // twice per close. Leaving the preferences for another task clears the flag.
@@ -1872,6 +1879,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const overlayOpen = () =>
     showPreferences() ||
     showShare() ||
+    showImage() ||
     showHelp() ||
     saveErrorOpen() ||
     (isPhone() && menuOpen());
@@ -2567,6 +2575,85 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ? `Move under “${name}”`
       : `Move ${target.kind} “${name}”`;
   };
+
+  // Image export draws an off-screen copy of what the map shows, or of the
+  // selected branch, while its dialog is open.
+  // The idea selected when the dialog opened: its branch is the one offered.
+  const [imageBranch, setImageBranch] = createSignal<string>();
+  const imageHead = () =>
+    imageScope() === "branch" ? imageBranch() : undefined;
+  // A branch deleted meanwhile, here or on another device, is no longer
+  // offered, and the picture shows the whole map again.
+  createEffect(() => {
+    const id = imageBranch();
+    if (id && !positionedNodes().has(id)) {
+      setImageBranch(undefined);
+      setImageScope("map");
+    }
+  });
+  const imageIds = createMemo(() => {
+    if (!showImage()) return [];
+    const head = imageHead();
+    if (!head) return nodeIds();
+    const branch = branchIds(forest(), head);
+    return nodeIds().filter((id) => branch.has(id));
+  });
+  const imageBounds = createMemo(() => {
+    let [left, top, right, bottom] = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const id of imageIds()) {
+      const node = positionedNodes().get(id);
+      if (!node) continue;
+      left = Math.min(left, node.x);
+      top = Math.min(top, node.y);
+      right = Math.max(right, node.x + node.width);
+      bottom = Math.max(bottom, node.y + node.height);
+    }
+    if (left > right) return { x: 0, y: 0, width: 0, height: 0 };
+    return {
+      x: left - MAP_IMAGE_PADDING,
+      y: top - MAP_IMAGE_PADDING,
+      width: Math.ceil(right - left + MAP_IMAGE_PADDING * 2),
+      height: Math.ceil(bottom - top + MAP_IMAGE_PADDING * 2),
+    };
+  });
+  const drawnAsRoot = (id: string) =>
+    !details().get(id)?.parent || focusId() === id;
+  // Everything the picture shows, hashed: a new value draws it again.
+  const imageSignature = createMemo(() => {
+    if (!showImage()) return "";
+    const text = JSON.stringify([
+      view().links() ?? null,
+      imageHead() ?? null,
+      imageIds().map((id) => {
+        const node = positionedNodes().get(id);
+        return [
+          id,
+          node?.x,
+          node?.y,
+          node?.width,
+          node?.height,
+          view().text(id),
+          shownColor(id, node?.color) ?? null,
+          drawnAsRoot(id),
+          collapsedIds().has(id),
+          details().get(id)?.descendants ?? 0,
+          !!view().note(id).trim(),
+        ];
+      }),
+    ]);
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++)
+      hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+    return `${text.length}:${(hash >>> 0).toString(36)}`;
+  });
+  const [imageScene, setImageScene] = createSignal<HTMLElement>();
+  function openImageExport() {
+    finishWriting();
+    finishProjectName();
+    setImageBranch(selectedId());
+    setImageScope("map");
+    setShowImage(true);
+  }
 
   async function exportMarkdown() {
     finishWriting();
@@ -4312,6 +4399,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
       // A modal dialog owns the keyboard; map shortcuts would act behind it.
       if (overlayOpen()) return;
+      if (mod && event.shiftKey && matchesLetter(event, "e")) {
+        event.preventDefault();
+        openImageExport();
+        return;
+      }
       // F6 moves between the canvas and the toolbars from anywhere, including
       // text fields, without tabbing through the map (Tab adds ideas there).
       if (
@@ -4498,7 +4590,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     finishWriting();
     finishProjectName();
     setShowLoad(false);
-    setShowBackup(false);
+    setShowExport(false);
     setMenuOpen((open) => !open);
   };
   // "Sign in" inside a dialog: the dialog closes and the normal sign-in
@@ -4679,6 +4771,25 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         onExport={exportCurrentProject}
         onSignIn={signInFrom(setShowPreferences)}
       />
+      <ExportImageDialog
+        open={showImage()}
+        onClose={() => setShowImage(false)}
+        name={view().name()}
+        scene={imageScene()}
+        signature={imageSignature()}
+        width={imageBounds().width}
+        height={imageBounds().height}
+        scope={imageScope()}
+        onScope={setImageScope}
+        branch={
+          imageBranch()
+            ? truncate(view().text(imageBranch() ?? "") || "New idea", 40)
+            : undefined
+        }
+        onExported={(format) =>
+          track("project_exported", { format, idea_count: imageIds().length })
+        }
+      />
       <ShareDialog
         open={showShare()}
         onClose={() => setShowShare(false)}
@@ -4820,6 +4931,28 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 Save now
                 <kbd class="ml-auto">{MOD_LABEL}S</kbd>
               </button>
+              <div class="menu-divider" />
+              {/* Read out through each item's name; the heading is for the eye. */}
+              <div class="menu-heading" aria-hidden="true">
+                Export
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item"
+                aria-haspopup="dialog"
+                aria-label="Export image…"
+                {...press(() => {
+                  setMenuOpen(false);
+                  openImageExport();
+                })}
+              >
+                Image…
+                <kbd class="ml-auto">
+                  {MOD_LABEL}
+                  {SHIFT_LABEL}E
+                </kbd>
+              </button>
               <button
                 type="button"
                 role="menuitem"
@@ -4828,8 +4961,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   setMenuOpen(false);
                   exportCurrentProject();
                 })}
+                aria-label="Export JSON"
               >
-                Export backup (.json)
+                JSON
+                <span class="menu-hint">.json</span>
               </button>
               <button
                 type="button"
@@ -4839,8 +4974,10 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   setMenuOpen(false);
                   void exportMarkdown();
                 })}
+                aria-label="Export Markdown outline"
               >
-                Export outline (.md)
+                Markdown
+                <span class="menu-hint">.md</span>
               </button>
               <div class="menu-divider" />
               <button
@@ -5596,6 +5733,71 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           )}
         </Show>
       </div>
+      <Show when={showImage()}>
+        <div class="map-image-stage" aria-hidden="true" inert>
+          <div
+            ref={(el) => {
+              setImageScene(el);
+              onCleanup(() => setImageScene(undefined));
+            }}
+            class="relative overflow-hidden"
+            style={{
+              width: `${imageBounds().width}px`,
+              height: `${imageBounds().height}px`,
+            }}
+          >
+            <MapLinks
+              ids={imageIds()}
+              connection={(id) =>
+                id === imageHead() ? undefined : connections().get(id)
+              }
+              style={view().links()}
+              color={(connection) =>
+                shownColor(connection.to.id, connection.to.color)
+              }
+              viewBox={imageBounds()}
+            />
+            <div
+              class="absolute top-0 left-0"
+              style={{
+                transform: `translate(${-imageBounds().x}px, ${-imageBounds().y}px)`,
+              }}
+            >
+              <For each={imageIds()}>
+                {(id) => {
+                  const node = () => positionedNodes().get(id)!;
+                  return (
+                    <Node
+                      doc={session().doc}
+                      readOnly
+                      id={id}
+                      text={view().text(id)}
+                      color={shownColor(id, node().color)}
+                      x={node().x}
+                      y={node().y}
+                      selected={false}
+                      writing={false}
+                      dragging={false}
+                      root={drawnAsRoot(id)}
+                      note={!!view().note(id).trim()}
+                      descendants={details().get(id)?.descendants ?? 0}
+                      collapsed={collapsedIds().has(id)}
+                      onToggleCollapse={() => {}}
+                      onSize={() => {}}
+                      onSelect={() => {}}
+                      onWrite={() => {}}
+                      onFinish={() => {}}
+                      onTab={() => {}}
+                      onSelectionChange={() => {}}
+                      onPointerDown={() => {}}
+                    />
+                  );
+                }}
+              </For>
+            </div>
+          </div>
+        </div>
+      </Show>
       <Show when={drag() && dragPointer()}>
         <div
           aria-hidden="true"
@@ -6005,36 +6207,46 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             <button
               type="button"
               class="menu-item"
-              aria-expanded={showBackup()}
-              {...press(() => setShowBackup((open) => !open))}
+              {...press(fromPanel(importProjectFromFile))}
             >
-              Backup and export
+              Import backup…
+            </button>
+            <button
+              type="button"
+              class="menu-item"
+              aria-expanded={showExport()}
+              {...press(() => setShowExport((open) => !open))}
+            >
+              Export
               <ChevronRightIcon
-                class={`ml-auto size-4 transition-transform duration-100 ${showBackup() ? "rotate-90" : ""}`}
+                class={`ml-auto size-4 transition-transform duration-100 ${showExport() ? "rotate-90" : ""}`}
               />
             </button>
-            <Show when={showBackup()}>
+            <Show when={showExport()}>
               <div class="mx-1 mb-1 rounded-lg bg-stone-50 p-1">
                 <button
                   type="button"
                   class="menu-item"
-                  {...press(fromPanel(importProjectFromFile))}
+                  aria-haspopup="dialog"
+                  {...press(fromPanel(openImageExport))}
                 >
-                  Import backup…
+                  Image…
                 </button>
                 <button
                   type="button"
                   class="menu-item"
                   {...press(fromPanel(exportCurrentProject))}
                 >
-                  Export backup (.json)
+                  JSON
+                  <span class="menu-hint">.json</span>
                 </button>
                 <button
                   type="button"
                   class="menu-item"
                   {...press(fromPanel(() => void exportMarkdown()))}
                 >
-                  Export outline (.md)
+                  Markdown
+                  <span class="menu-hint">.md</span>
                 </button>
               </div>
             </Show>

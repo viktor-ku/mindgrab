@@ -233,7 +233,7 @@ async function downloadProject() {
     }),
   );
   const download = page.waitForEvent("download");
-  await projectMenu("Export backup (.json)");
+  await projectMenu("Export JSON");
   const saved = await download;
   const path = await saved.path();
   if (!path) throw new Error("No downloaded file.");
@@ -645,4 +645,165 @@ test("a backup downloads offline and imports twice with fresh identities and emp
   expect(
     await page.getByRole("button", { name: "Undo", exact: true }).count(),
   ).toBe(0);
+});
+
+test("the map exports as a PNG, an SVG or a copied image, whole or one branch", async () => {
+  await page.getByRole("textbox", { name: "Project name" }).fill("Pictured");
+  const root = await rootId();
+  const branch = await addChild(root, "Branch idea");
+  await addChild(branch, "Leaf");
+  await addChild(root, "Other side");
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showSaveFilePicker", {
+      value: undefined,
+      configurable: true,
+    }),
+  );
+  const dialog = page.getByRole("dialog", { name: "Export image" });
+  const save = async (format: "PNG" | "SVG") => {
+    const download = page.waitForEvent("download");
+    await dialog.getByRole("button", { name: format, exact: true }).click();
+    const saved = await download;
+    const path = await saved.path();
+    if (!path) throw new Error("No downloaded file.");
+    return { name: saved.suggestedFilename(), file: Bun.file(path) };
+  };
+  // A PNG's width and height are the first two fields of its header.
+  const pngSize = async (file: Blob) => {
+    const view = new DataView(await file.arrayBuffer());
+    expect(view.getUint32(0)).toBe(0x89504e47);
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  };
+
+  await projectMenu("Export image…");
+  await dialog.getByRole("img", { name: "Preview of the map" }).waitFor();
+  const png = await save("PNG");
+  expect(png.name).toBe("Pictured.png");
+  const whole = await pngSize(png.file);
+  // Twice the map's size by default, padding included.
+  expect(whole.width).toBeGreaterThan(400);
+  expect(whole.height).toBeGreaterThan(200);
+
+  const svg = await save("SVG");
+  expect(svg.name).toBe("Pictured.svg");
+  const markup = await svg.file.text();
+  expect(markup).toStartWith("<?xml");
+  expect(markup).toContain("<foreignObject");
+  expect(markup).toContain("Branch idea");
+  // The fonts travel inside the file.
+  expect(markup).toContain("data:font/woff2");
+
+  await dialog.getByRole("button", { name: "Copy to clipboard" }).click();
+  await dialog.getByText("Copied to the clipboard").waitFor();
+  expect(
+    await page.evaluate(async () =>
+      (await navigator.clipboard.read()).flatMap((item) => item.types),
+    ),
+  ).toContain("image/png");
+
+  await page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  await node(branch).click();
+  await page.keyboard.press("Control+Shift+E");
+  await dialog.getByRole("button", { name: "Branch", exact: true }).click();
+  await dialog.getByRole("img", { name: "Preview of the branch" }).waitFor();
+  const part = await pngSize((await save("PNG")).file);
+  expect(part.width).toBeLessThan(whole.width);
+  expect(part.height).toBeLessThan(whole.height);
+});
+
+test("image export survives deleted branches, odd text, huge maps and an emptied map", async () => {
+  const root = await rootId();
+  const branch = await addChild(root, "Branch");
+  await addChild(branch, "Under it");
+  const odd = await addChild(root, "Vertical\u000btab");
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showSaveFilePicker", {
+      value: undefined,
+      configurable: true,
+    }),
+  );
+  const dialog = page.getByRole("dialog", { name: "Export image" });
+  const save = async (format: "PNG" | "SVG") => {
+    const download = page.waitForEvent("download");
+    await dialog.getByRole("button", { name: format, exact: true }).click();
+    const path = await (await download).path();
+    if (!path) throw new Error("No downloaded file.");
+    return Bun.file(path);
+  };
+
+  await node(branch).click();
+  await page.keyboard.press("Control+Shift+E");
+  await dialog.getByRole("button", { name: "Branch", exact: true }).click();
+  await dialog.getByRole("img", { name: "Preview of the branch" }).waitFor();
+  // Deleted on another device: the picture goes back to the whole map.
+  await call("remove", branch);
+  await dialog.getByRole("img", { name: "Preview of the map" }).waitFor();
+  expect(
+    await dialog
+      .getByRole("button", { name: "Whole map", exact: true })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    await dialog
+      .getByRole("button", { name: "Branch", exact: true })
+      .isDisabled(),
+  ).toBe(true);
+
+  // Characters XML forbids are left out, so the SVG still parses.
+  const markup = await (await save("SVG")).text();
+  expect(markup).toContain("Verticaltab");
+  expect(
+    await page.evaluate(
+      (text) =>
+        !new DOMParser()
+          .parseFromString(text, "image/svg+xml")
+          .querySelector("parsererror"),
+      markup,
+    ),
+  ).toBe(true);
+
+  // Too big for a canvas: drawn smaller, still a real PNG.
+  await call("place", odd, 100_000, 0);
+  await dialog.getByText("(reduced to fit)").waitFor();
+  const view = new DataView(await (await save("PNG")).arrayBuffer());
+  expect(view.getUint32(0)).toBe(0x89504e47);
+  expect(view.getUint32(16)).toBeLessThanOrEqual(65_535);
+  expect(view.getUint32(16)).toBeGreaterThan(0);
+
+  // Emptied meanwhile: no stale preview, nothing to save.
+  await call("remove", odd);
+  await call("remove", root);
+  await dialog.getByText("Nothing to export yet").waitFor();
+  expect(await dialog.getByRole("img").count()).toBe(0);
+  expect(
+    await dialog.getByRole("button", { name: "PNG", exact: true }).isDisabled(),
+  ).toBe(true);
+});
+
+test("a save still writing when the scale changes still reports its failure", async () => {
+  // The save dialog accepts, then writing the file fails a moment later.
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: async () => ({
+        createWritable: () =>
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Disk full")), 500),
+          ),
+      }),
+    }),
+  );
+  await page.keyboard.press("Control+Shift+E");
+  const dialog = page.getByRole("dialog", { name: "Export image" });
+  await dialog.getByRole("img", { name: "Preview of the map" }).waitFor();
+  const png = dialog.getByRole("button", { name: "PNG", exact: true });
+  await png.click();
+  await dialog.getByRole("button", { name: "3×" }).click();
+  // Still working: a second press waits for the first.
+  expect(await png.getAttribute("aria-disabled")).toBe("true");
+  await dialog
+    .getByRole("alert")
+    .filter({ hasText: "Couldn’t save the image: Disk full" })
+    .waitFor();
 });

@@ -74,8 +74,17 @@ declare global {
 }
 
 // Account requests are answered as signed out; there is no API server here.
-window.fetch = (async () =>
-  new Response(null, { status: 401 })) as unknown as typeof window.fetch;
+// The app's own fonts still load, for image export to embed.
+const pageFetch = window.fetch.bind(window);
+window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(
+    input instanceof Request ? input.url : String(input),
+    location.href,
+  );
+  return url.origin === location.origin && url.pathname.endsWith(".woff2")
+    ? pageFetch(input, init)
+    : new Response(null, { status: 401 });
+}) as typeof window.fetch;
 window.harness = harness;
 const root = document.getElementById("root") as HTMLElement;
 render(

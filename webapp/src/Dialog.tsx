@@ -61,7 +61,11 @@ export function Dialog(props: {
       aria-labelledby={props.heading ? undefined : titleId}
       aria-label={props.heading ? props.title : undefined}
       data-no-pan
-      onClose={props.onClose}
+      // A close is reported a moment after it happens; by then the dialog
+      // may have been opened again, and that close is no longer news.
+      onClose={() => {
+        if (!dialog.open) props.onClose();
+      }}
       onCancel={props.onClose}
       {...backdropDismiss(() => props.onClose())}
     >
