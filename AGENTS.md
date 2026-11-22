@@ -8,8 +8,9 @@
 - Keep the API on a subdomain of the app. Login cookies are `SameSite=Lax`, so an API
   on another site, including a `*.up.railway.app` domain, cannot hold a session.
 - `main` is protected by a GitHub ruleset: changes land only through a pull request
-  approved by CodeRabbit (its approval counts as the required review and stays
-  through later pushes). Direct pushes and force-pushes to `main` are rejected.
+  approved by CodeRabbit (its approval counts as the required review; CodeRabbit
+  withdraws it when new commits arrive and approves again once it has reviewed
+  them). Direct pushes and force-pushes to `main` are rejected.
   Repo admins can bypass only when merging a pull request; do that only when the
   user asks.
 - Earn CodeRabbit's approval honestly. Read every comment it leaves and judge it:
