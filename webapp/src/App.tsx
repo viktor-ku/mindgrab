@@ -1975,13 +1975,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ? (findNode(visibleForest(), parent)?.next ?? [])
       : visibleForest();
   };
+  // The ideas a run can grow over: the children of one parent. Top-level
+  // ideas are separate maps, not siblings, so they never form a run.
+  const runSiblings = (id: string) =>
+    details().get(id)?.parent ? siblingsInView(id) : [];
   // The selected run of siblings in map order, else the selected idea. A run
   // whose anchor is no longer a sibling shrinks to the selected idea.
   const selectedRun = createMemo(() => {
     const id = selectedId();
     if (!id) return [];
     const anchor = runAnchor();
-    const siblings = anchor && anchor !== id ? siblingsInView(id) : [];
+    const siblings = anchor && anchor !== id ? runSiblings(id) : [];
     const from = siblings.findIndex((node) => node.id === anchor);
     const to = siblings.findIndex((node) => node.id === id);
     if (from < 0 || to < 0) return [id];
@@ -4287,7 +4291,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         !e.metaKey;
       if (extend) {
         e.preventDefault();
-        const siblings = siblingsInView(id);
+        const siblings = runSiblings(id);
         const index = siblings.findIndex((node) => node.id === id);
         const target =
           index < 0 ? undefined : siblings[index + (arrow === "up" ? -1 : 1)];

@@ -606,6 +606,22 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   const pick = (name: string) =>
     style.getByRole("button", { name, exact: true }).click();
 
+  // Top-level ideas are separate maps, not siblings, so they never form a run.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
+  await editor().waitFor();
+  await page.keyboard.type("Other map");
+  await page.keyboard.press("Escape");
+  const other = (await idWithText("Other map")) as string;
+  expect((await call("content")).roots).toEqual([root, other]);
+  await node(root).click();
+  await page.keyboard.press("Shift+ArrowDown");
+  await expectSelected([root]);
+  await node(other).click();
+  await page.keyboard.press("Shift+ArrowUp");
+  await expectSelected([other]);
+
   await node(b).click();
   await page.keyboard.press("Shift+ArrowDown");
   await page.keyboard.press("Shift+ArrowDown");
@@ -654,7 +670,7 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   // A plain arrow ends the run too, even where it cannot move.
   await page.keyboard.press("Shift+ArrowDown");
   await expectSelected([c, d]);
-  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
   await expectSelected([d]);
 
   await node(a).click();
