@@ -20,9 +20,9 @@
   - Never force an approval: do not comment `@coderabbitai approve`, resolve a
     blocking thread without addressing it, or change CodeRabbit's configuration to
     quiet it. If CodeRabbit skipped the PR, `@coderabbitai review` is fine.
-- Railway deploys the `live` branch. `mise run golive` force-pushes `main` to `live`,
-  so a commit that exists only on `live` is lost on the next golive. Put deploy and
-  config changes on `main` first, through a pull request.
+- Railway deploys the `live` branch. `mise run golive <live-sha>` force-pushes `main`
+  to `live`, so a commit that exists only on `live` is lost on the next golive. Put
+  deploy and config changes on `main` first, through a pull request.
 - Prefer the Railway CLI. It may be installed at `~/.railway/bin/railway` and missing
   from the agent shell's `PATH`; if so, prefix `PATH="$HOME/.railway/bin:$PATH"`. The
   user's login is account-level and can delete or disconnect services.

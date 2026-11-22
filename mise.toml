@@ -6,7 +6,8 @@ rust = "1.96.0"
 
 [tasks.golive]
 description = "Make origin/live reference current local main"
-run = "git push --force-with-lease origin main:live"
+usage = 'arg "<live_sha>" help="The origin/live commit checked during preflight. The push fails if live has moved since."'
+run = 'git push --force-with-lease="live:${usage_live_sha?}" origin main:live'
 
 [tasks.db]
 description = "Start local Postgres"

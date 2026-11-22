@@ -41,7 +41,8 @@ environment variable for the command. Never print it.
    diverged, stop and ask: those commits must reach `main` through a pull request.
    Golive pushes local `main`, and `live` must never contain commits that are missing
    from `origin/main`.
-2. Check for commits that exist only on `live`:
+2. Record the `live` commit you are checking (`git rev-parse origin/live`); golive
+   takes it as its lease. Check for commits that exist only on `live`:
    `git log --oneline origin/main..origin/live`. If this prints anything, stop and
    tell the user. Those commits would be lost, so first bring their changes to `main`
    through a pull request (cherry-pick them onto a branch). Once it merges, restart
@@ -87,11 +88,12 @@ environment variable for the command. Never print it.
 ## 2. Go live
 
 ```sh
-mise run golive            # git push --force-with-lease origin main:live
+mise run golive <live-sha>  # git push --force-with-lease=live:<live-sha> origin main:live
 git fetch origin && test "$(git rev-parse origin/live)" = "$(git rev-parse main)"
 ```
 
-If `--force-with-lease` rejects the push, someone moved `live`. Go back to step 1.2.
+Pass the `live` SHA recorded in step 1.2. If the lease rejects the push, `live` moved
+after you checked it. Go back to step 1.2.
 
 ## 3. Monitor the rollout
 
@@ -190,9 +192,9 @@ fix forward instead and tell the user.
    `main` contains the hotfix. If you rolled back (4.2), `origin/live` still points at
    the failed commit, so in steps 1.3 and 1.4 review `<last-good-sha>..main` instead
    of `origin/live..main`, and reapply any healthcheck or callback settings that
-   range needs. Do not fetch again between the preflight and golive:
-   `--force-with-lease` trusts the last fetched `origin/live`.
-6. `mise run golive`, then monitor again (step 3).
+   range needs.
+6. `mise run golive <live-sha>` with the SHA recorded in this preflight's step 1.2,
+   then monitor again (step 3).
 
 For a **config** problem, fix it in Railway: `railway variable set …` without
 `--skip-deploys` triggers a redeploy. A changed `VITE_*` build variable needs a
