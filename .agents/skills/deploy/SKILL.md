@@ -78,7 +78,8 @@ environment variable for the command. Never print it.
 5. Run checks. Commit hooks already run lint, format and Clippy. For any change to
    code, dependencies or the `Dockerfile`, also run `mise run check`, or at least the
    tasks covering the changed areas (`backend:test`, `webapp:test`, `e2e:test`,
-   `webapp:build`). If a check fails, stop and fix it on `main`. Changes to docs or
+   `webapp:build`). If a check fails, stop. Fix it on a branch, merge it through an
+   approved pull request, then restart the preflight from step 1.1. Changes to docs or
    agent files alone can skip this step.
 6. Record the rollback target, the current successful deployment:
    `railway deployment list "${R[@]}" --limit 10 --json | jq -r 'map(select(.status=="SUCCESS"))[0] | "\(.id) \(.meta.commitHash)"'`.
@@ -183,9 +184,10 @@ fix forward instead and tell the user.
 4. Push the branch and open a pull request. Wait for CodeRabbit to approve it and
    address what it raises; do not tick the ruleset bypass unless the user says so.
    Merge it.
-5. Run preflight steps 1.1 and 1.2 again: local `main` must equal `origin/main`, and
-   a commit may have reached `live` while the pull request waited. Confirm local
-   `main` contains the hotfix. Do not fetch again between these checks and golive:
+5. Run the whole preflight (section 1) again: local `main` must equal `origin/main`,
+   a commit may have reached `live` while the pull request waited, and other pull
+   requests may have merged that need the same risk review and checks. Confirm local
+   `main` contains the hotfix. Do not fetch again between the preflight and golive:
    `--force-with-lease` trusts the last fetched `origin/live`.
 6. `mise run golive`, then monitor again (step 3).
 
