@@ -44,9 +44,10 @@ environment variable for the command. Never print it.
 2. Check for commits that exist only on `live`:
    `git log --oneline origin/main..origin/live`. If this prints anything, stop and
    tell the user. Those commits would be lost, so first bring their changes to `main`
-   through a pull request (cherry-pick them onto a branch). Merging rewrites them, so
-   this check keeps listing the originals afterwards: confirm each one's change is in
-   `origin/main`, and get the user's go-ahead before golive overwrites them.
+   through a pull request (cherry-pick them onto a branch). Once it merges, restart
+   the preflight from step 1.1 so local `main` picks it up. Merging rewrites the
+   commits, so this check keeps listing the originals: confirm each one's change is
+   in `origin/main`, and get the user's go-ahead before golive overwrites them.
 3. Show what will ship: `git log --oneline origin/live..main` and
    `git diff --stat origin/live..main`. If the range is empty, nothing will deploy.
    Say so and stop, unless the user asked for a redeploy (`railway redeploy "${R[@]}" -y`).
@@ -182,10 +183,9 @@ fix forward instead and tell the user.
 4. Push the branch and open a pull request. Wait for CodeRabbit to approve it and
    address what it raises; do not tick the ruleset bypass unless the user says so.
    Merge it.
-5. In the main checkout on `main`, run `git fetch origin`, then
-   `git merge --ff-only origin/main`, and confirm local `main` contains the hotfix.
-   Repeat the live-only check (step 1.2) now, since a commit may have reached `live`
-   while the pull request waited. Do not fetch again between that check and golive:
+5. Run preflight steps 1.1 and 1.2 again: local `main` must equal `origin/main`, and
+   a commit may have reached `live` while the pull request waited. Confirm local
+   `main` contains the hotfix. Do not fetch again between these checks and golive:
    `--force-with-lease` trusts the last fetched `origin/live`.
 6. `mise run golive`, then monitor again (step 3).
 
