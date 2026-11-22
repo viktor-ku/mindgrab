@@ -8,8 +8,9 @@
 - Keep the API on a subdomain of the app. Login cookies are `SameSite=Lax`, so an API
   on another site, including a `*.up.railway.app` domain, cannot hold a session.
 - `main` is protected by a GitHub ruleset: changes land only through a pull request
-  approved by CodeRabbit (its approval counts as the required review; a new push
-  dismisses it). Direct pushes and force-pushes to `main` are rejected. Repo admins
+  approved by CodeRabbit (its approval counts as the required review and stays
+  through later pushes). CodeRabbit reviews every push; it does not pause after a
+  run of commits. Direct pushes and force-pushes to `main` are rejected. Repo admins
   can bypass only when merging a pull request; do that only when the user asks.
 - Earn CodeRabbit's approval honestly. Read every comment it leaves and judge it:
   - Findings that block the approval (it requested changes): fix them. If you think
@@ -20,6 +21,10 @@
   - Never force an approval: do not comment `@coderabbitai approve`, resolve a
     blocking thread without addressing it, or change CodeRabbit's configuration to
     quiet it. If CodeRabbit skipped the PR, `@coderabbitai review` is fine.
+  - Findings "outside the diff" sit in the review text and have no thread to
+    resolve, so they keep blocking the approval after you fix them. Once every
+    finding is fixed or answered, comment `@coderabbitai full review` to have it
+    judge the current code afresh.
 - Railway deploys the `live` branch. `mise run golive <live-sha>` force-pushes `main`
   to `live`, so a commit that exists only on `live` is lost on the next golive. Put
   deploy and config changes on `main` first, through a pull request.
