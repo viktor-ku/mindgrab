@@ -43,9 +43,10 @@ environment variable for the command. Never print it.
    from `origin/main`.
 2. Record the `live` commit as `<live-sha>` (`git rev-parse origin/live`). Use that
    SHA, not `origin/live`, in every check below; golive takes it as its lease. Check
-   for commits that exist only on `live`: `git log --oneline origin/main..<live-sha>`. If this prints anything, stop and
-   tell the user. Those commits would be lost, so first bring their changes to `main`
-   through a pull request (cherry-pick them onto a branch). Once it merges, restart
+   for commits that exist only on `live`: `git log --oneline origin/main..<live-sha>`.
+   If this prints anything, stop and tell the user. Those commits would be lost, so
+   first bring their changes to `main` through a pull request (cherry-pick them onto
+   a branch). Once it merges, restart
    the preflight from step 1.1 so local `main` picks it up. Merging rewrites the
    commits, so this check keeps listing the originals: confirm each one's change is
    in `origin/main`, and get the user's go-ahead before golive overwrites them.
