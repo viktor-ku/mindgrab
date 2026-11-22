@@ -94,7 +94,8 @@ git fetch origin && test "$(git rev-parse origin/live)" = "$(git rev-parse main)
 ```
 
 Pass the `live` SHA recorded in step 1.2. If the lease rejects the push, `live` moved
-after you checked it. Go back to step 1.2.
+after you checked it. Restart the preflight from step 1.1, which fetches the new
+`live` before you record it again.
 
 ## 3. Monitor the rollout
 
