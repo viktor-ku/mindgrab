@@ -780,3 +780,30 @@ test("image export survives deleted branches, odd text, huge maps and an emptied
     await dialog.getByRole("button", { name: "PNG", exact: true }).isDisabled(),
   ).toBe(true);
 });
+
+test("a save still writing when the scale changes still reports its failure", async () => {
+  // The save dialog accepts, then writing the file fails a moment later.
+  await page.evaluate(() =>
+    Object.defineProperty(window, "showSaveFilePicker", {
+      configurable: true,
+      value: async () => ({
+        createWritable: () =>
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Disk full")), 500),
+          ),
+      }),
+    }),
+  );
+  await page.keyboard.press("Control+Shift+E");
+  const dialog = page.getByRole("dialog", { name: "Export image" });
+  await dialog.getByRole("img", { name: "Preview of the map" }).waitFor();
+  const png = dialog.getByRole("button", { name: "PNG", exact: true });
+  await png.click();
+  await dialog.getByRole("button", { name: "3×" }).click();
+  // Still working: a second press waits for the first.
+  expect(await png.getAttribute("aria-disabled")).toBe("true");
+  await dialog
+    .getByRole("alert")
+    .filter({ hasText: "Couldn’t save the image: Disk full" })
+    .waitFor();
+});

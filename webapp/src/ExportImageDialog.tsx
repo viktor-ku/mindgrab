@@ -163,11 +163,14 @@ export function ExportImageDialog(props: {
       navigator.clipboard.write([new ClipboardItem({ "image/png": image() })]),
     onSuccess: () => props.onExported?.("clipboard"),
   }));
-  // A copy or save belongs to the picture it was made from.
+  // What a finished copy or save reported belongs to the picture it was made
+  // from, so new choices clear it. One still running stays watched, so its
+  // outcome is still reported and a second press still waits for it. (`on`
+  // reads `isPending` untracked: finishing doesn't clear its own outcome.)
   createEffect(
     on([() => props.open, () => props.signature, options], () => {
-      copy.reset();
-      save.reset();
+      if (!copy.isPending) copy.reset();
+      if (!save.isPending) save.reset();
     }),
   );
 
