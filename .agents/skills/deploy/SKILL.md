@@ -41,16 +41,16 @@ environment variable for the command. Never print it.
    diverged, stop and ask: those commits must reach `main` through a pull request.
    Golive pushes local `main`, and `live` must never contain commits that are missing
    from `origin/main`.
-2. Record the `live` commit you are checking (`git rev-parse origin/live`); golive
-   takes it as its lease. Check for commits that exist only on `live`:
-   `git log --oneline origin/main..origin/live`. If this prints anything, stop and
+2. Record the `live` commit as `<live-sha>` (`git rev-parse origin/live`). Use that
+   SHA, not `origin/live`, in every check below; golive takes it as its lease. Check
+   for commits that exist only on `live`: `git log --oneline origin/main..<live-sha>`. If this prints anything, stop and
    tell the user. Those commits would be lost, so first bring their changes to `main`
    through a pull request (cherry-pick them onto a branch). Once it merges, restart
    the preflight from step 1.1 so local `main` picks it up. Merging rewrites the
    commits, so this check keeps listing the originals: confirm each one's change is
    in `origin/main`, and get the user's go-ahead before golive overwrites them.
-3. Show what will ship: `git log --oneline origin/live..main` and
-   `git diff --stat origin/live..main`. If the range is empty, nothing will deploy.
+3. Show what will ship: `git log --oneline <live-sha>..main` and
+   `git diff --stat <live-sha>..main`. If the range is empty, nothing will deploy.
    Say so and stop, unless the user asked for a redeploy (`railway redeploy "${R[@]}" -y`).
 4. Review the diff for deploy risk and handle these **before** golive:
    - **Schema.** `backend/schema.sql` runs on startup against the production database.
@@ -191,7 +191,7 @@ fix forward instead and tell the user.
    requests may have merged that need the same risk review and checks. Confirm local
    `main` contains the hotfix. If you rolled back (4.2), `origin/live` still points at
    the failed commit, so in steps 1.3 and 1.4 review `<last-good-sha>..main` instead
-   of `origin/live..main`, and reapply any healthcheck or callback settings that
+   of `<live-sha>..main`, and reapply any healthcheck or callback settings that
    range needs.
 6. `mise run golive <live-sha>` with the SHA recorded in this preflight's step 1.2,
    then monitor again (step 3).
