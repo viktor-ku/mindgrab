@@ -672,6 +672,19 @@ test("Shift+Up/Down selects sibling ideas to color, copy or delete together", as
   await page.keyboard.press("ControlOrMeta+z");
   expect(await childrenOf(root)).toEqual([c, d]);
 
+  // Undo brings back a select-all only in the view it was made in.
+  await node(c).click();
+  await page.keyboard.press("Alt+f");
+  await page.keyboard.press("ControlOrMeta+a");
+  await pick("Yellow 200");
+  expect(await colorOf(c)).toBe("yellow-200");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await node(d).waitFor();
+  await page.keyboard.press("ControlOrMeta+z");
+  expect(await colorOf(c)).toBe("blue-200");
+  await expectSelected([]);
+
   // Ctrl/Cmd+A colors every idea.
   await page.keyboard.press("ControlOrMeta+a");
   await pick("Red 200");

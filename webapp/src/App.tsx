@@ -345,9 +345,10 @@ interface TextSelection {
 
 interface UndoSelection {
   id?: string;
-  // Where a run of selected siblings started, or every idea selected.
+  // Where a run of selected siblings started, or every idea selected in the
+  // branch then in focus (none for the whole map).
   runAnchor?: string;
-  all?: boolean;
+  all?: { focus?: string };
   writing: boolean;
   text?: TextSelection;
 }
@@ -1435,7 +1436,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const captureSelection = (): UndoSelection => ({
       id: selectedId(),
       ...(multiSelected() &&
-        (allSelected() ? { all: true } : { runAnchor: runAnchor() })),
+        (allSelected()
+          ? { all: { focus: focusId() } }
+          : { runAnchor: runAnchor() })),
       writing: writing(),
       ...(editorSelection && { text: { ...editorSelection } }),
     });
@@ -1463,7 +1466,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         );
       batch(() => {
         setSelectedId(selection.id);
-        if (selection.all) setAllSelected(true);
+        // Select-all covered the view it was made in; another view would
+        // stretch it over ideas that were never selected.
+        if (selection.all) setAllSelected(selection.all.focus === focusId());
         else setRunAnchor(selection.runAnchor);
       });
       setWriting(resumeWriting);
