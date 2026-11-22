@@ -2586,11 +2586,18 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       }
     };
     if (allSelected()) visit(scopeForest(), true);
-    else
+    else {
+      // A run shares one parent, so one lookup finds every idea in it.
+      const run = new Set(selectedRun());
+      const parent = details().get(selectedRun()[0] ?? "")?.parent;
+      const siblings = parent
+        ? (findNode(forest(), parent)?.next ?? [])
+        : forest();
       visit(
-        selectedRun().flatMap((id) => findNode(forest(), id) ?? []),
+        siblings.filter((node) => run.has(node.id)),
         false,
       );
+    }
     return colors.size === 1 ? [...colors][0] : undefined;
   });
   const stylePanel = (place: {
