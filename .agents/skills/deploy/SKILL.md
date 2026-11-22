@@ -187,7 +187,10 @@ fix forward instead and tell the user.
 5. Run the whole preflight (section 1) again: local `main` must equal `origin/main`,
    a commit may have reached `live` while the pull request waited, and other pull
    requests may have merged that need the same risk review and checks. Confirm local
-   `main` contains the hotfix. Do not fetch again between the preflight and golive:
+   `main` contains the hotfix. If you rolled back (4.2), `origin/live` still points at
+   the failed commit, so in steps 1.3 and 1.4 review `<last-good-sha>..main` instead
+   of `origin/live..main`, and reapply any healthcheck or callback settings that
+   range needs. Do not fetch again between the preflight and golive:
    `--force-with-lease` trusts the last fetched `origin/live`.
 6. `mise run golive`, then monitor again (step 3).
 
