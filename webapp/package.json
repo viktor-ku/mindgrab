@@ -31,6 +31,7 @@
     "@tiptap/markdown": "3.32.2",
     "@tiptap/pm": "3.32.2",
     "@tiptap/starter-kit": "3.32.2",
+    "modern-screenshot": "4.7.0",
     "posthog-js": "1.444.0",
     "solid-js": "=1.9.15",
     "zod": "^4"
