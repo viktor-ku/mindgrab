@@ -9,8 +9,9 @@
   on another site, including a `*.up.railway.app` domain, cannot hold a session.
 - `main` is protected by a GitHub ruleset: changes land only through a pull request
   approved by CodeRabbit (its approval counts as the required review and stays
-  through later pushes). CodeRabbit reviews every push; it does not pause after a
-  run of commits. Direct pushes and force-pushes to `main` are rejected. Repo admins
+  through later pushes). CodeRabbit reviews each push and pauses after 10 reviewed
+  commits; if it paused before approving, comment `@coderabbitai review`. Direct
+  pushes and force-pushes to `main` are rejected. Repo admins
   can bypass only when merging a pull request; do that only when the user asks.
 - Earn CodeRabbit's approval honestly. Read every comment it leaves and judge it:
   - Findings that block the approval (it requested changes): fix them. If you think
