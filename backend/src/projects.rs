@@ -362,7 +362,7 @@ async fn merge(
     command: Option<mindgrab_state::Command>,
 ) -> Result<Stored> {
     // A map kept out of the cloud is not stored there.
-    if !crate::preferences::resolve(&app.pool, user.id, id, PreferenceName::SaveInCloud, None)
+    if !crate::preferences::resolve(&app.pool, user.id, id, PreferenceName::SaveInCloud)
         .await?
         .unwrap_or(true)
     {
@@ -597,25 +597,32 @@ async fn shared(app: &Arc<Backend>, headers: &HeaderMap, body: &Bytes) -> Result
     }
     let args: Args = parse(headers, body)?;
     let project = shared_view(app, &args.token).await?;
-    // An older map keeps its own style in its document until its owner opens
-    // it and it moves into preferences; the share snapshot carries it so far.
-    let legacy = project.view.as_deref().and_then(|view| {
-        mindgrab_state::Project::from_snapshot(view)
-            .ok()?
-            .view()
-            .ok()?
-            .legacy?
-            .links
-    });
-    let style: Option<LinkStyle> = crate::preferences::resolve(
+    let (own, global): (Option<LinkStyle>, Option<LinkStyle>) = crate::preferences::levels(
         &app.pool,
         project.owner_id,
         project.id,
         PreferenceName::LinkStyle,
-        legacy,
     )
     .await?;
-    let style = style.unwrap_or_default();
+    // An older map keeps its own style in its document until its owner opens
+    // it and it moves into preferences; the share snapshot carries it so far.
+    // Reading it decodes the snapshot, so it takes one of the owner's compute
+    // seats, and only when the map has no style of its own.
+    let own = match (own, project.view.clone()) {
+        (Some(own), _) => Some(own),
+        (None, Some(view)) => {
+            let permit = app.compute.acquire(project.owner_id).await?;
+            compute::run(&permit, move || {
+                Ok(mindgrab_state::Project::from_snapshot(&view)?
+                    .view()?
+                    .legacy
+                    .and_then(|legacy| legacy.links))
+            })
+            .await?
+        }
+        (None, None) => None,
+    };
+    let style = own.or(global).unwrap_or_default();
     let mut value = baseline(
         project.id,
         Stored {

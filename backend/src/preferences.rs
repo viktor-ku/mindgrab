@@ -148,12 +148,21 @@ pub async fn resolve<T: serde::de::DeserializeOwned>(
     owner: i64,
     project_id: Uuid,
     name: PreferenceName,
-    // What the map set for itself before preferences, kept in its document:
-    // it counts as the map's own value until a row replaces it.
-    legacy: Option<T>,
 ) -> Result<Option<T>> {
+    let (own, global) = levels(pool, owner, project_id, name).await?;
+    Ok(own.or(global))
+}
+
+/// The map's own value for a preference and the one for all of the owner's
+/// maps, each if set and readable.
+pub async fn levels<T: serde::de::DeserializeOwned>(
+    pool: &PgPool,
+    owner: i64,
+    project_id: Uuid,
+    name: PreferenceName,
+) -> Result<(Option<T>, Option<T>)> {
     let rows: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT scope::text, value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3::text::mindgrab_loro.preference_name AND (scope='global' OR project_id=$2) ORDER BY scope DESC",
+        "SELECT scope::text, value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3::text::mindgrab_loro.preference_name AND (scope='global' OR project_id=$2)",
     )
     .bind(owner)
     .bind(project_id)
@@ -165,5 +174,5 @@ pub async fn resolve<T: serde::de::DeserializeOwned>(
             .find(|(row, _)| row == scope)
             .and_then(|(_, value)| serde_json::from_value(value.clone()).ok())
     };
-    Ok(value("map").or(legacy).or_else(|| value("global")))
+    Ok((value("map"), value("global")))
 }

@@ -425,8 +425,8 @@ export class PreferenceStore {
 
 // Gives a copied map what its original used: what it set for itself, and
 // each value it took from the preferences for all maps there that the ones
-// where it goes would change. It keeps its look, and stays out of the cloud
-// when it was.
+// where it goes would change, so it keeps its look and stays out of the cloud
+// when it was. A copy made again replaces what an earlier one set.
 export async function copyMapPreferences(
   from: PreferenceStore,
   fromId: string,
@@ -435,17 +435,20 @@ export async function copyMapPreferences(
 ) {
   const source = await from.levels(fromId);
   const used = resolvePreferences(source);
-  const there = resolvePreferences({ ...(await to.levels()), map: {} });
+  const { global, map: earlier } = await to.levels(toId);
+  const there = resolvePreferences({ global, map: {} });
   const own: PreferenceLevel = {};
+  const clear: PreferenceTarget[] = [];
   for (const name of PREFERENCE_NAMES) {
     // Consent is the person's, never a map's.
     if (name === "analyticsConsent") continue;
     const value = source.map[name] ?? used[name];
     if (source.map[name] !== undefined || !sameValue(value, there[name]))
       Object.assign(own, { [name]: value });
+    else if (earlier[name] !== undefined)
+      clear.push({ scope: "map", projectId: toId, name });
   }
-  const set = levelRows("map", toId, own);
-  if (set.length) await to.change({ set });
+  await to.change({ set: levelRows("map", toId, own), clear });
 }
 
 // Moves what an older map kept in its document into its own preferences,

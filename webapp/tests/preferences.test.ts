@@ -307,3 +307,18 @@ test("changes and what a sync brings in are announced", async () => {
   await store.sync(api(cloud), signal());
   expect(announced).toBe(2);
 });
+
+test("a copy made again drops what the original no longer sets", async () => {
+  const from = local();
+  const to = synced();
+  await from.change({
+    set: [preferenceRow("map", MAP, "linkStyle", "square")],
+  });
+  await copyMapPreferences(from, MAP, to, "copy");
+  expect((await to.levels("copy")).map.linkStyle).toBe("square");
+  // The first copy did not finish, and the map went back to the style for all
+  // maps before the next one.
+  await from.change({ clear: [target("map", "linkStyle")] });
+  await copyMapPreferences(from, MAP, to, "copy");
+  expect((await to.levels("copy")).map).toEqual({});
+});

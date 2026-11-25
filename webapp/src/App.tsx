@@ -1866,6 +1866,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       queryFn: async ({ signal }) => {
         if (!userId || !source) return 0;
         const api = new LoroApi(undefined, undefined, userId, queryClient);
+        // A copy takes the account's preferences for all maps where they
+        // match its own, so they must be the account's, not just this
+        // browser's: a later pull could otherwise move a map kept out of
+        // the cloud into it.
+        await destination.preferences.sync(api, signal);
         let total = 0;
         for (;;) {
           const open = untrack(() => {
