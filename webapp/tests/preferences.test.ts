@@ -11,6 +11,7 @@ import {
   preferenceRow,
   resolvePreferences,
   savingOf,
+  syncAccountPreferences,
 } from "../src/preferences";
 import type {
   PreferenceChanges,
@@ -321,4 +322,34 @@ test("a copy made again drops what the original no longer sets", async () => {
   await from.change({ clear: [target("map", "linkStyle")] });
   await copyMapPreferences(from, MAP, to, "copy");
   expect((await to.levels("copy")).map).toEqual({});
+});
+
+test("this browser's answer about analytics goes to the account only once a pull shows it has none", async () => {
+  const cloud = new Cloud();
+  const store = synced();
+  const consent = target("global", "analyticsConsent");
+  cloud.rows.set(
+    preferenceKey(consent),
+    preferenceRow("global", null, "analyticsConsent", "denied"),
+  );
+  // Offline, the cookie's answer stays in the browser.
+  cloud.offline = true;
+  await expect(
+    syncAccountPreferences(store, api(cloud), signal(), "granted"),
+  ).rejects.toThrow("offline");
+  expect((await store.levels()).global.analyticsConsent).toBeUndefined();
+  // Back online, the account's answer wins.
+  cloud.offline = false;
+  await syncAccountPreferences(store, api(cloud), signal(), "granted");
+  expect((await store.levels()).global.analyticsConsent).toBe("denied");
+  expect(cloud.rows.get(preferenceKey(consent))?.value).toBe("denied");
+  // An account without an answer takes this browser's.
+  cloud.rows.clear();
+  const fresh = synced();
+  await syncAccountPreferences(fresh, api(cloud), signal(), "granted");
+  expect(cloud.rows.get(preferenceKey(consent))?.value).toBe("granted");
+  // Nothing is given before there is an answer here.
+  cloud.rows.clear();
+  await syncAccountPreferences(synced(), api(cloud), signal(), "pending");
+  expect(cloud.rows.size).toBe(0);
 });

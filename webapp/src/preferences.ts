@@ -423,6 +423,25 @@ export class PreferenceStore {
   }
 }
 
+// Syncs an account's preferences, then gives the account this browser's
+// answer about analytics if a pull, just done, shows it has none. Offline, or
+// while pulls fail, nothing is given: the cookie keeps deciding for this
+// browser and the account keeps what it has.
+export async function syncAccountPreferences(
+  store: PreferenceStore,
+  api: LoroApi,
+  signal: AbortSignal,
+  consent: AnalyticsConsent | "pending",
+) {
+  await store.sync(api, signal);
+  if (consent === "pending" || (await store.levels()).global.analyticsConsent)
+    return;
+  await store.change({
+    set: [preferenceRow("global", null, "analyticsConsent", consent)],
+  });
+  await store.sync(api, signal);
+}
+
 // Gives a copied map what its original used: what it set for itself, and
 // each value it took from the preferences for all maps there that the ones
 // where it goes would change, so it keeps its look and stays out of the cloud

@@ -75,6 +75,7 @@ import {
   resolvePreferences,
   sameQuickColors,
   savingOf,
+  syncAccountPreferences,
 } from "./preferences";
 import type {
   ColorPreferences,
@@ -1577,20 +1578,27 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ? userId
       : undefined;
   };
-  const preferenceSync = createQuery(() => {
+  createQuery(() => {
     const owner = activeOwner();
     const userId = syncedAccount(owner);
     return {
       queryKey: [...preferencesSyncKey(owner), userId ?? null],
       queryFn: async ({ signal }: { signal: AbortSignal }) => {
         if (userId === undefined) return false;
-        await owner.preferences.sync(
+        await syncAccountPreferences(
+          owner.preferences,
           new LoroApi(undefined, undefined, userId, queryClient),
           signal,
+          analyticsEnabled ? untrack(consent) : "pending",
         );
         return true;
       },
       enabled: userId !== undefined,
+      // Quick retries, then focus and reconnect take over.
+      retry: (count, error) =>
+        count < QUICK_RETRIES &&
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
       refetchOnWindowFocus: true,
       refetchOnReconnect: true,
     };
@@ -1674,21 +1682,9 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     if (syncedAccount(owner) === undefined) return;
     const stored = preferenceLevels().global.analyticsConsent;
     const chosen = untrack(consent);
+    // Where the account has no answer yet, the preference sync gives it the
+    // cookie's.
     if (stored && stored !== chosen) setConsent(stored);
-    // The cookie's answer becomes the account's only once the account's own
-    // is known to be missing: after its first pull here, and the read that
-    // follows it. Offline, or while that pull fails, the cookie keeps
-    // deciding for this browser and the account keeps what it has. An answer
-    // given meanwhile goes to the account at once (below).
-    else if (
-      !stored &&
-      chosen !== "pending" &&
-      preferenceSync.isSuccess &&
-      !preferenceQuery.isFetching
-    )
-      changePreferences({
-        set: [preferenceRow("global", null, "analyticsConsent", chosen)],
-      });
   });
   createEffect(
     on(
