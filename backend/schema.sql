@@ -40,29 +40,19 @@ ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_snapshot BYTE
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_revision BIGINT;
 -- How each account wants Mindgrab to work: how its maps look, where they are
 -- saved, and its answer about analytics. A preference is set for all of the
--- account's maps (global) or for one map, whose own value wins. Rust checks
--- every value against its name, and which scopes it allows, before it is
--- stored.
-DO $$ BEGIN
-    CREATE TYPE mindgrab_loro.preference_scope AS ENUM ('global', 'map');
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-DO $$ BEGIN
-    CREATE TYPE mindgrab_loro.preference_name AS ENUM (
-        'quick_colors', 'new_idea_color', 'link_style',
-        'save_locally', 'save_in_cloud', 'analytics_consent'
-    );
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
+-- account's maps (global) or for one map, whose own value wins. Scopes and
+-- names are plain text: Rust knows every one, checks each value against its
+-- name and the scopes it allows before it is stored, and skips a row it
+-- cannot read, so a new preference or scope needs no change here.
 CREATE TABLE IF NOT EXISTS mindgrab_loro.preferences (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),
-    scope mindgrab_loro.preference_scope NOT NULL,
+    scope TEXT NOT NULL,
     -- The map a map preference is for. Not a reference to projects: a map
     -- saved only in the browser has no row there, and its preferences still
     -- follow the account.
     project_id UUID,
-    name mindgrab_loro.preference_name NOT NULL,
+    name TEXT NOT NULL,
     value JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((scope = 'map') = (project_id IS NOT NULL)),

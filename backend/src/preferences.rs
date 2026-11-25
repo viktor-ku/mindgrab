@@ -69,7 +69,7 @@ fn project(target: &PreferenceTarget) -> Result<Option<Uuid>> {
 /// Every preference the account has set.
 pub async fn list(pool: &PgPool, user: &User) -> Result<Value> {
     let rows: Vec<(String, Option<Uuid>, String, Value)> = sqlx::query_as(
-        "SELECT scope::text,project_id,name::text,value FROM mindgrab_loro.preferences WHERE user_id=$1 ORDER BY id",
+        "SELECT scope,project_id,name,value FROM mindgrab_loro.preferences WHERE user_id=$1 ORDER BY id",
     )
     .bind(user.id)
     .fetch_all(pool)
@@ -108,7 +108,7 @@ pub async fn change(pool: &PgPool, user: &User, changes: Changes) -> Result<()> 
     }
     let mut tx = pool.begin().await?;
     for (target, project_id) in clear {
-        sqlx::query("DELETE FROM mindgrab_loro.preferences WHERE user_id=$1 AND scope=$2::text::mindgrab_loro.preference_scope AND project_id IS NOT DISTINCT FROM $3 AND name=$4::text::mindgrab_loro.preference_name")
+        sqlx::query("DELETE FROM mindgrab_loro.preferences WHERE user_id=$1 AND scope=$2 AND project_id IS NOT DISTINCT FROM $3 AND name=$4")
             .bind(user.id)
             .bind(scope_text(target.scope))
             .bind(project_id)
@@ -117,7 +117,7 @@ pub async fn change(pool: &PgPool, user: &User, changes: Changes) -> Result<()> 
             .await?;
     }
     for (target, project_id, value) in set {
-        sqlx::query("INSERT INTO mindgrab_loro.preferences(user_id,scope,project_id,name,value) VALUES($1,$2::text::mindgrab_loro.preference_scope,$3,$4::text::mindgrab_loro.preference_name,$5) ON CONFLICT (user_id,scope,project_id,name) DO UPDATE SET value=EXCLUDED.value,updated_at=now()")
+        sqlx::query("INSERT INTO mindgrab_loro.preferences(user_id,scope,project_id,name,value) VALUES($1,$2,$3,$4,$5) ON CONFLICT (user_id,scope,project_id,name) DO UPDATE SET value=EXCLUDED.value,updated_at=now()")
             .bind(user.id)
             .bind(scope_text(target.scope))
             .bind(project_id)
@@ -162,7 +162,7 @@ pub async fn levels<T: serde::de::DeserializeOwned>(
     name: PreferenceName,
 ) -> Result<(Option<T>, Option<T>)> {
     let rows: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT scope::text, value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3::text::mindgrab_loro.preference_name AND (scope='global' OR project_id=$2)",
+        "SELECT scope, value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3 AND (scope='global' OR project_id=$2)",
     )
     .bind(owner)
     .bind(project_id)
