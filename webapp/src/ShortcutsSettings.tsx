@@ -1,5 +1,4 @@
 import { For } from "solid-js";
-import { Dialog } from "./Dialog";
 
 const APPLE =
   typeof navigator !== "undefined" &&
@@ -70,28 +69,25 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
   },
 ];
 
-export function ShortcutsDialog(props: {
-  open: boolean;
-  onClose: () => void;
+// The Shortcuts preferences section: the keys there are, and what a scroll
+// wheel does on the canvas. The keys cannot be changed yet.
+export function ShortcutsSettings(props: {
   wheelMode: "pan" | "zoom";
   onWheelMode: (mode: "pan" | "zoom") => void;
 }) {
   return (
-    <Dialog
-      open={props.open}
-      onClose={props.onClose}
-      title="Shortcuts and navigation"
-      closeLabel="Close shortcuts"
-      variant="center"
-    >
-      {/* Positioned so the sr-only legend below cannot overflow the dialog. */}
-      <div class="scroll-fade relative grid min-h-0 gap-x-8 gap-y-6 overflow-y-auto px-6 pt-5 pb-8 sm:grid-cols-2">
+    <>
+      <p class="mb-6 max-w-2xl text-sm leading-6 text-stone-600">
+        Press ? with nothing selected to open this list from the map. The keys
+        cannot be changed yet.
+      </p>
+      <div class="grid gap-x-8 gap-y-6 lg:grid-cols-2">
         <For each={GROUPS}>
           {(group) => (
             <section>
-              <h3 class="mb-2.5 text-sm font-semibold text-stone-900">
+              <h4 class="mb-2.5 text-sm font-semibold text-stone-900">
                 {group.title}
-              </h3>
+              </h4>
               <dl class="space-y-2 text-sm">
                 <For each={group.items}>
                   {([keys, action]) => (
@@ -107,10 +103,10 @@ export function ShortcutsDialog(props: {
             </section>
           )}
         </For>
-        <section class="sm:col-span-2">
-          <h3 class="mb-2.5 text-sm font-semibold text-stone-900">
+        <section class="lg:col-span-2">
+          <h4 class="mb-2.5 text-sm font-semibold text-stone-900">
             Scrolling on the canvas
-          </h3>
+          </h4>
           <fieldset class="grid gap-2 sm:grid-cols-2">
             <legend class="sr-only">What scrolling does</legend>
             <label class="choice-card">
@@ -149,6 +145,6 @@ export function ShortcutsDialog(props: {
           </fieldset>
         </section>
       </div>
-    </Dialog>
+    </>
   );
 }

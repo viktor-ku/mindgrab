@@ -28,7 +28,7 @@ import {
 import type { ProjectDocument } from "./project-document";
 import { bindTextarea } from "./text-binding";
 import { press } from "./press";
-import { MOD_LABEL, SHIFT_LABEL } from "./ShortcutsDialog";
+import { MOD_LABEL, SHIFT_LABEL } from "./ShortcutsSettings";
 
 // The panel's arrow cursor would carry into the notes: unlike a textarea, an
 // editable element shows the text cursor only when asked to.

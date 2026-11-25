@@ -1325,8 +1325,13 @@ kbd {
   font-weight: 500;
   cursor: pointer;
 }
-.scope-select:hover {
+.scope-select:hover:not(:disabled) {
   border-color: var(--color-stone-300);
+}
+/* Held at all maps where a section has no settings for one map. */
+.scope-select:disabled {
+  color: var(--color-stone-500);
+  cursor: default;
 }
 .scope-reset {
   display: inline-flex;

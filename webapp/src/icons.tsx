@@ -79,14 +79,6 @@ export const FitMapIcon = (props: IconProps) => (
   </Icon>
 );
 
-export const HelpIcon = (props: IconProps) => (
-  <Icon class={props.class}>
-    <circle cx="10" cy="10" r="7" />
-    <path d="M8 8a2 2 0 1 1 2.75 1.85c-.5.2-.75.6-.75 1.15v.5" />
-    <path d="M10 14h.01" stroke-width="2.2" />
-  </Icon>
-);
-
 export const ChildIcon = (props: IconProps) => (
   <Icon class={props.class}>
     <rect x="2.75" y="3.5" width="6" height="4.5" rx="1" />
