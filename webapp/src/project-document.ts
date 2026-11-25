@@ -1,20 +1,15 @@
 import init, {
   ProjectState as WasmState,
 } from "./generated/mindgrab-state/mindgrab_state";
-import { DEFAULT_QUICK_COLORS } from "./generated/mindgrab-state/model";
 import type {
-  ColorPreferences,
   Command,
   CommandResult,
-  LinkStyle,
+  LegacyPreferences,
   ProjectView as RustView,
-  SavingPreferences,
 } from "./generated/mindgrab-state/model";
-import { DEFAULT_LINK_STYLE } from "./mind-map";
 import type { MindMapNode, NodePosition } from "./mind-map";
 import type { NodeColor } from "./node-colors";
 import { isGeneratedProjectName } from "./project-names";
-import { z } from "zod";
 
 // WASM is loaded before any editor or repository can create a document.
 const bun = (
@@ -56,15 +51,6 @@ export const ORIGIN = {
 // untouched seed still counts as untouched.
 export const DEFAULT_NODE_COLOR: NodeColor = "slate";
 const EARLIER_DEFAULT_NODE_COLOR: NodeColor = "blue";
-export type { SavingPreferences };
-export const SavingPreferencesSchema = z.strictObject({
-  local: z.boolean(),
-  cloud: z.boolean(),
-});
-export const DEFAULT_SAVING_PREFERENCES: SavingPreferences = {
-  local: true,
-  cloud: true,
-};
 export const isProjectId = (id: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
     id,
@@ -239,43 +225,15 @@ export function readProject(doc: ProjectDocument): ProjectState {
 export function projectName(doc: ProjectDocument) {
   return doc.ready ? doc.view().name : undefined;
 }
-export function savingPreferences(doc: ProjectDocument): SavingPreferences {
-  return doc.ready ? doc.view().saving : { ...DEFAULT_SAVING_PREFERENCES };
-}
-export type { ColorPreferences, LinkStyle };
-export const DEFAULT_COLOR_PREFERENCES: ColorPreferences = {
-  quick: [...DEFAULT_QUICK_COLORS],
-  newIdeas: "slate",
-};
-export function colorPreferences(doc: ProjectDocument): ColorPreferences {
-  return doc.ready ? doc.view().colors : DEFAULT_COLOR_PREFERENCES;
-}
-export const sameColorPreferences = (
-  a: ColorPreferences,
-  b: ColorPreferences,
-) =>
-  a.newIdeas === b.newIdeas &&
-  a.quick.length === b.quick.length &&
-  a.quick.every((color, index) => color === b.quick[index]);
-// Quick colors and the new-idea color: preferences, so not undoable.
-export function setColorPreferences(
+// Preferences an older map keeps in its document, until they become its own
+// preferences and are forgotten.
+export function legacyPreferences(
   doc: ProjectDocument,
-  value: ColorPreferences,
-) {
-  return doc.dispatch({ type: "setColors", ...value }).changed;
+): LegacyPreferences | undefined {
+  return doc.ready ? doc.view().legacy : undefined;
 }
-// How the map draws lines to children: a preference, so not undoable.
-export function linkStyle(doc: ProjectDocument): LinkStyle {
-  return doc.ready ? doc.view().links : DEFAULT_LINK_STYLE;
-}
-export function setLinkStyle(doc: ProjectDocument, style: LinkStyle) {
-  return doc.dispatch({ type: "setLinks", style }).changed;
-}
-export function setSavingPreferences(
-  doc: ProjectDocument,
-  value: SavingPreferences,
-) {
-  doc.dispatch({ type: "setSaving", ...value });
+export function forgetLegacyPreferences(doc: ProjectDocument) {
+  return doc.dispatch({ type: "forgetLegacyPreferences" }).changed;
 }
 export function projectMindMap(view: DocumentView): MindMapNode[] {
   const entries = new Map<string, MindMapNode>();
@@ -305,16 +263,15 @@ export function projectForest(content: DocumentView): ForestNode[] {
 }
 // The untouched seed every new map starts from: one "New idea" root with no
 // content and a generated name. A rename is work, so it counts as an edit,
-// and so does choosing the map's colors or connection style.
+// and so does choosing the map's own colors or connection style, which the
+// caller passes as `ownPreferences`.
 export function isPristineSeed(
   forest: ForestNode[],
   name: string,
-  colors: ColorPreferences = DEFAULT_COLOR_PREFERENCES,
-  links: LinkStyle = DEFAULT_LINK_STYLE,
+  ownPreferences = false,
 ) {
   if (forest.length !== 1 || !isGeneratedProjectName(name)) return false;
-  if (!sameColorPreferences(colors, DEFAULT_COLOR_PREFERENCES)) return false;
-  if (links !== DEFAULT_LINK_STYLE) return false;
+  if (ownPreferences) return false;
   const [root] = forest;
   return (
     root.text === "New idea" &&
@@ -483,10 +440,6 @@ export function importProjectDocument(id: string, view: DocumentView) {
       );
     }
     if (ids.size !== nodes.size) throw new Error("Invalid project hierarchy.");
-    setSavingPreferences(doc, view.saving);
-    if (!sameColorPreferences(view.colors, DEFAULT_COLOR_PREFERENCES))
-      setColorPreferences(doc, view.colors);
-    if (view.links !== DEFAULT_LINK_STYLE) setLinkStyle(doc, view.links);
     doc.importedIds = ids;
     doc.clearHistory();
     return doc;

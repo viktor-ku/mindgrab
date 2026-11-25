@@ -133,7 +133,9 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/deleteProject.php` | Delete the cloud snapshot |
 | `/api/getShareLink.php` | The owner's `{projectId, token}`; `token` is null while private |
 | `/api/setShareLink.php` | Owner turns the view-only link on (keeps an existing token) or off (revokes it) |
-| `/api/getSharedProject.php` | Anyone with `{token}`: the current map without its edit history, revision and name; no session |
+| `/api/getSharedProject.php` | Anyone with `{token}`: the current map without its edit history, revision, name and the owner's `linkStyle` for it; no session |
+| `/api/listPreferences.php` | Every preference the account has set, as `{scope, projectId, name, value}` rows |
+| `/api/setPreferences.php` | `{set, clear}`: sets and clears preferences in one transaction, after checking each value |
 
 GET `/api/auth/callback.php` completes login. GET `/ws/project/<uuid>?ownerId=<id>`
 upgrades to a read-only notification socket. Notifications contain committed
@@ -166,7 +168,8 @@ use `{error: {code}}`; snapshots are capped at 10 MiB.
 A request body is read only after the session check, so a request without a
 session is refused before any of its body is held in memory. Each method then
 reads up to its own limit and answers 413 `payload_too_large` beyond it: 10 MiB
-for `mergeProject`, 2 MiB for `commandProject`, and 16 KiB for everything else,
+for `mergeProject`, 2 MiB for `commandProject`, 512 KiB for `setPreferences`,
+and 16 KiB for everything else,
 including `getSharedProject`, which has no session. `getHealth`, `getMe`,
 `startLogin` and `logout` read no body at all. The analytics proxy and the
 phpMyAdmin decoy keep their own limits.
@@ -176,6 +179,18 @@ it sends the changes the cloud copy lacks. It reads the cloud copy before every
 upload, so a save whose acknowledgement was lost is not sent again. Changes that build
 on history the cloud copy does not hold are refused with 422
 `missing_dependencies`, and the webapp then sends the complete snapshot once.
+
+Preferences say how an account's maps look and where they are saved, for all of
+them (`global`) or for one (`map`), and give the account's answer about
+analytics (global only). They live in `mindgrab_loro.preferences`, not in the
+documents. A map preference names its map by id without referring to
+`projects`: a map saved only in the browser has no row there, and its
+preferences still follow the account. `mindgrab_state::Preference` types each
+value by its name, and anything else is refused. An account keeps at most
+50,000 of them. Uploads of a map whose `saveInCloud` resolves to false (its own
+value, else the account's for all maps) are refused with 422 `cloud_disabled`;
+the webapp retries them, since the preference may not have reached the cloud
+yet.
 
 Pool connections set `lock_timeout` (5 s), `statement_timeout` and
 `idle_in_transaction_session_timeout` (15 s each). No request computes or calls

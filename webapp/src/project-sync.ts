@@ -3,11 +3,7 @@ import type { QueryClient } from "@tanstack/solid-query";
 import { backendEndpoint } from "./backend";
 import { LoroApi, decodeBase64, SyncError } from "./loro-api";
 import type { CloudSnapshot } from "./loro-api";
-import {
-  ORIGIN,
-  openProjectDocument,
-  savingPreferences,
-} from "./project-document";
+import { ORIGIN, openProjectDocument } from "./project-document";
 import type { ProjectDocument } from "./project-document";
 import type { ProjectHandle, ProjectRepository } from "./project-repository";
 import { saveRetryDelay } from "./query-client";
@@ -124,6 +120,7 @@ export class ProjectSync {
   #paused = false;
   #authPaused = false;
   #status: CloudStatus = { status: "saving" };
+  readonly #stopSaving: () => void;
   constructor(
     handle: ProjectHandle,
     repository: ProjectRepository,
@@ -153,6 +150,7 @@ export class ProjectSync {
       if (fetchStatus === "paused") this.#offline();
     });
     handle.doc.on("snapshot", this.#onSnapshot);
+    this.#stopSaving = handle.onSaving(this.#onSaving);
   }
   get status() {
     return this.#status;
@@ -184,8 +182,7 @@ export class ProjectSync {
   }
   #alive(signal: AbortSignal) {
     signal.throwIfAborted();
-    if (this.#paused || !savingPreferences(this.handle.doc).cloud)
-      throw fenced();
+    if (this.#paused || !this.handle.saving.cloud) throw fenced();
   }
   #setStatus(status: CloudStatus) {
     if (!this.destroyed) {
@@ -201,7 +198,16 @@ export class ProjectSync {
     this.#observer.setOptions(this.#queryOptions());
   }
   #onSnapshot = (_bytes: Uint8Array, origin: unknown) => {
-    if (!savingPreferences(this.handle.doc).cloud) {
+    if (!this.handle.saving.cloud) return;
+    if (origin === ORIGIN.remote || origin === this.#provider || this.#paused)
+      return;
+    this.#setStatus({ status: "saving" });
+    this.#trigger(false);
+  };
+  // Turned off, the next run deletes the cloud copy; turned on again after
+  // that, the map registers and uploads as a new one.
+  #onSaving = () => {
+    if (!this.handle.saving.cloud) {
       this.#provider?.destroy();
       this.#provider = undefined;
       this.#trigger(true);
@@ -212,15 +218,14 @@ export class ProjectSync {
       this.#registered = false;
       this.#committed = undefined;
     }
-    if (origin === ORIGIN.remote || origin === this.#provider || this.#paused)
-      return;
+    if (this.#paused) return;
     this.#setStatus({ status: "saving" });
     this.#trigger(false);
   };
   #offline() {
     this.#provider?.disconnect();
     this.#setStatus(
-      savingPreferences(this.handle.doc).cloud
+      this.handle.saving.cloud
         ? { status: "offline" }
         : this.#deleted
           ? { status: "disabled" }
@@ -257,7 +262,7 @@ export class ProjectSync {
       if (signal.aborted || this.#paused) throw error;
       // Opting out fenced this run; the next one deletes the cloud copy.
       if (
-        !savingPreferences(this.handle.doc).cloud &&
+        !this.handle.saving.cloud &&
         error instanceof DOMException &&
         error.name === "AbortError"
       )
@@ -272,7 +277,7 @@ export class ProjectSync {
       }
       this.#setStatus({
         status: "retrying",
-        message: !savingPreferences(this.handle.doc).cloud
+        message: !this.handle.saving.cloud
           ? "Cloud deletion pending. Reconnect to finish deleting the cloud copy."
           : failure.message,
       });
@@ -281,7 +286,7 @@ export class ProjectSync {
     return null;
   }
   async #sync(signal: AbortSignal) {
-    if (!savingPreferences(this.handle.doc).cloud) {
+    if (!this.handle.saving.cloud) {
       if (
         !this.#deleted &&
         (this.#registrationStarted ||
@@ -389,6 +394,7 @@ export class ProjectSync {
     if (this.destroyed) return;
     this.#abort.abort();
     this.handle.doc.off("snapshot", this.#onSnapshot);
+    this.#stopSaving();
     this.#provider?.destroy();
     this.#observer.destroy();
     this.api.queryClient.removeQueries({

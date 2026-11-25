@@ -5,8 +5,8 @@ import { ChevronDownIcon, CloseIcon, PlusIcon } from "./icons";
 import type { NodeColor } from "./node-colors";
 import { colorLabel, lineLook, nodeLook } from "./node-colors";
 import { press } from "./press";
-import type { ColorPreferences } from "./project-document";
-import { DEFAULT_COLOR_PREFERENCES } from "./project-document";
+import { DEFAULT_COLOR_PREFERENCES } from "./preferences";
+import type { ColorPreferences, PreferenceScope } from "./preferences";
 import { transientLayer } from "./transient-layer";
 
 const moved = (list: readonly NodeColor[], from: number, to: number) => {
@@ -30,7 +30,7 @@ function Chip(props: { color: NodeColor; class: string }) {
   );
 }
 
-// The map's colors, in project preferences: the whole tab is the map, edited
+// The map's colors, in preferences: the whole tab is the map, edited
 // in place. The style panel's color row is there to drag into order, prune
 // and add to; under it, a new idea in the color new ideas start with. Every
 // color opens beside them only when asked for, to add quick colors or to
@@ -39,6 +39,8 @@ function Chip(props: { color: NodeColor; class: string }) {
 export function ColorSettings(props: {
   colors: ColorPreferences;
   onChange: (value: ColorPreferences) => void;
+  // This map's colors, or those of every map without its own.
+  scope: PreferenceScope;
 }) {
   // Which choice every color is open for.
   const [picking, setPicking] = createSignal<"quick" | "new">();
@@ -186,7 +188,9 @@ export function ColorSettings(props: {
   return (
     <div class="color-settings">
       <p class="color-settings-intro">
-        What this map's style panel offers, for everyone who opens it.
+        {props.scope === "map"
+          ? "What this map's style panel offers."
+          : "What the style panel offers in every map without colors of its own."}
       </p>
       <div ref={map} class="color-map">
         <div class="color-group">

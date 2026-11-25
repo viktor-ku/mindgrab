@@ -1,29 +1,18 @@
 import { batch, createSignal, onCleanup } from "solid-js";
 import type { Accessor, Setter } from "solid-js";
-import { DEFAULT_LINK_STYLE, type MindMapNode } from "./mind-map";
+import type { MindMapNode } from "./mind-map";
+import type { LegacyPreferences } from "./generated/mindgrab-state/model";
 import {
-  colorPreferences,
-  DEFAULT_COLOR_PREFERENCES,
-  DEFAULT_SAVING_PREFERENCES,
-  linkStyle,
+  legacyPreferences,
   projectMindMap,
-  sameColorPreferences,
   readProject,
-  savingPreferences,
 } from "./project-document";
-import type {
-  ColorPreferences,
-  LinkStyle,
-  ProjectDocument,
-  ProjectState,
-  SavingPreferences,
-} from "./project-document";
+import type { ProjectDocument, ProjectState } from "./project-document";
 export interface ProjectView {
   status: Accessor<ProjectState["status"]>;
   name: Accessor<string>;
-  saving: Accessor<SavingPreferences>;
-  colors: Accessor<ColorPreferences>;
-  links: Accessor<LinkStyle>;
+  // Colors and a connection style an older map still keeps in its document.
+  legacy: Accessor<LegacyPreferences | undefined>;
   forest: Accessor<MindMapNode[]>;
   text(id: string): string;
   note(id: string): string;
@@ -40,15 +29,9 @@ export function createReplaceableProjectView(first?: ProjectDocument) {
   let doc = first;
   const [status, setStatus] = createSignal<ProjectState["status"]>("loading");
   const [name, setName] = createSignal("");
-  const [saving, setSaving] = createSignal(
-    doc ? savingPreferences(doc) : { ...DEFAULT_SAVING_PREFERENCES },
-  );
-  const [colors, setColors] = createSignal(
-    doc ? colorPreferences(doc) : DEFAULT_COLOR_PREFERENCES,
-    { equals: sameColorPreferences },
-  );
-  const [links, setLinks] = createSignal(
-    doc ? linkStyle(doc) : DEFAULT_LINK_STYLE,
+  const [legacy, setLegacy] = createSignal(
+    doc ? legacyPreferences(doc) : undefined,
+    { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
   );
   const [forest, setForest] = createSignal<MindMapNode[]>([]);
   const texts = new Map<string, [Accessor<string>, Setter<string>]>();
@@ -77,9 +60,7 @@ export function createReplaceableProjectView(first?: ProjectDocument) {
     const state = readProject(current);
     batch(() => {
       setStatus(state.status);
-      setSaving(savingPreferences(current));
-      setColors(colorPreferences(current));
-      setLinks(linkStyle(current));
+      setLegacy(legacyPreferences(current));
       if (state.status !== "ready") {
         // The empty forest has no structure, so the next map shows in full.
         structure = "";
@@ -114,9 +95,7 @@ export function createReplaceableProjectView(first?: ProjectDocument) {
   const view: ProjectView = {
     status,
     name,
-    saving,
-    colors,
-    links,
+    legacy,
     forest,
     text: (id) => textSignal(id)[0](),
     note: (id) => noteSignal(id)[0](),

@@ -4,8 +4,8 @@ import {
   createProjectDocument,
   editNodeText,
   openProjectDocument,
-  setSavingPreferences,
 } from "../src/project-document";
+import type { SavingPreferences } from "../src/preferences";
 import type { ProjectDocument } from "../src/project-document";
 import type {
   ProjectHandle,
@@ -88,12 +88,23 @@ class Server extends LoroApi {
 function attach(doc: ProjectDocument, server: Server) {
   let attempted = false;
   let registered = false;
+  // Where the map is kept comes from its preferences, outside the document.
+  const listeners = new Set<(saving: SavingPreferences) => void>();
   const handle = {
     id: doc.id,
     doc,
+    saving: { local: true, cloud: true },
+    onSaving(listener: (saving: SavingPreferences) => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     flush: async () => {},
     refreshMetadata: async () => {},
-  } as ProjectHandle;
+  };
+  const setSaving = (saving: SavingPreferences) => {
+    handle.saving = saving;
+    for (const listener of listeners) listener(saving);
+  };
   const repo = {
     scope: { namespace: "account-1" },
     names: { catalog: `test/${doc.id}` },
@@ -110,7 +121,7 @@ function attach(doc: ProjectDocument, server: Server) {
       registered = false;
     },
   } as unknown as ProjectRepository;
-  const sync = new ProjectSync(handle, repo, {
+  const sync = new ProjectSync(handle as unknown as ProjectHandle, repo, {
     api: server,
     manual: true,
     provider: () => ({
@@ -121,7 +132,7 @@ function attach(doc: ProjectDocument, server: Server) {
     }),
   });
   controllers.push(sync);
-  return { sync };
+  return { sync, setSaving };
 }
 function fixture() {
   const doc = keep(
@@ -211,8 +222,8 @@ test("saves after the first send only new changes, and the whole map again if th
   expect(server.doc.view()).toEqual(doc.view());
 });
 test("private projects never register or upload, including manual retry", async () => {
-  const { doc, root, server, sync } = fixture();
-  setSavingPreferences(doc, { local: false, cloud: false });
+  const { doc, root, server, sync, setSaving } = fixture();
+  setSaving({ local: false, cloud: false });
   await sync.syncNow();
   editNodeText(doc, root, 0, 0, "Private ");
   sync.retry();

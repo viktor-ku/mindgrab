@@ -8,6 +8,8 @@ import { App } from "../webapp/src/App";
 import { claimAnonymousProjects } from "../webapp/src/anonymous-claims";
 import { ProjectRepository } from "../webapp/src/project-repository";
 import * as project from "../webapp/src/project-document";
+import { levelRows } from "../webapp/src/preferences";
+import type { SavingPreferences } from "../webapp/src/preferences";
 import "../webapp/src/index.css";
 
 let current: ProjectDocument;
@@ -83,10 +85,20 @@ async function repository(namespace: string) {
 }
 const accountHarness = {
   id: () => current.id,
-  // Signed out, the preferences lock cloud saving; older maps may still have
-  // it off.
-  setSaving(saving: project.SavingPreferences) {
-    project.setSavingPreferences(current, saving);
+  // Signed out, the preferences lock cloud saving; a map may still have set
+  // it off for itself. The app's repository hears of it from this one.
+  async setSaving(saving: SavingPreferences, namespace = "anonymous") {
+    const repo = await repository(namespace);
+    try {
+      await repo.preferences.change({
+        set: levelRows("map", current.id, {
+          saveLocally: saving.local,
+          saveInCloud: saving.cloud,
+        }),
+      });
+    } finally {
+      await repo.close();
+    }
   },
   sockets: () => [...sockets].map((socket) => socket.url),
   messages() {

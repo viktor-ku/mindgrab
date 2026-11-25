@@ -1,11 +1,10 @@
 import { expect, test } from "bun:test";
 import {
-  DEFAULT_COLOR_PREFERENCES,
   projectForest,
   importProjectDocument,
   deleteSubtree,
 } from "../src/project-document";
-import type { ColorPreferences } from "../src/project-document";
+import type { ColorPreferences } from "../src/preferences";
 import type {
   ProjectFile,
   ProjectFileNode,
@@ -83,7 +82,7 @@ test("export contains canonical live content and omits history and stale prefere
     expect(json).not.toContain(`"${forbidden}"`);
 });
 
-test("a backup round-trips notes and the map's colors", () => {
+test("a backup round-trips notes and how the map looks", () => {
   const colors = {
     quick: ["sky-400", "slate", "mauve-950"],
     newIdeas: "lime-200",
@@ -100,15 +99,20 @@ test("a backup round-trips notes and the map's colors", () => {
     ]),
     preferences: { colors, links: "square" },
   } satisfies ProjectFile;
-  const { content } = prepareProjectImport(
+  const { content, preferences } = prepareProjectImport(
     parseProjectFile(JSON.stringify(input)),
   );
+  // The colors and connection style become the new map's preferences, not
+  // part of its document.
+  expect(preferences?.colors).toEqual(colors);
+  expect(preferences?.links).toBe("square");
   const doc = importProjectDocument(crypto.randomUUID(), content);
   try {
-    expect(doc.view().colors).toEqual(colors);
-    expect(doc.view().links).toBe("square");
+    expect(doc.view().legacy).toBeUndefined();
     expect(doc.view().nodes[0].color).toBe("sky-400");
-    const exported = parseProjectFile(serializeProjectFile(doc.view()));
+    const exported = parseProjectFile(
+      serializeProjectFile(doc.view(), { colors, links: "square" }),
+    );
     expect(exported.version).toBe(PROJECT_FILE_VERSION);
     expect(exported.preferences?.colors).toEqual(colors);
     expect(exported.preferences?.links).toBe("square");
@@ -128,8 +132,27 @@ test("version 3 and 4 files still import and export as the current version", () 
     expect(parsed.version).toBe(PROJECT_FILE_VERSION);
     const { content } = prepareProjectImport(parsed);
     expect(content.nodes[0].note).toBe("");
-    expect(content.colors).toEqual(DEFAULT_COLOR_PREFERENCES);
-    expect(content.links).toBe("rounded");
+    expect(content.legacy).toBeUndefined();
     expect(projectFileFromContent(content).version).toBe(PROJECT_FILE_VERSION);
   }
+});
+
+test("an older map's colors from its document reach its backup", () => {
+  const colors = {
+    quick: ["sky-400"],
+    newIdeas: "lime-200",
+  } satisfies ColorPreferences;
+  const { content } = prepareProjectImport(file([leaf("root")]));
+  const exported = projectFileFromContent({
+    ...content,
+    legacy: { colors, links: "freeform" },
+  });
+  expect(exported.preferences?.colors).toEqual(colors);
+  expect(exported.preferences?.links).toBe("freeform");
+  // What the map uses now wins over what its document still keeps.
+  const current = projectFileFromContent(
+    { ...content, legacy: { colors, links: "freeform" } },
+    { links: "square" },
+  );
+  expect(current.preferences?.links).toBe("square");
 });

@@ -6,6 +6,8 @@ import {
 } from "./query-client";
 import { z } from "zod";
 import { backendEndpoint } from "./backend";
+import { parsePreferenceRow } from "./preferences";
+import type { PreferenceChanges } from "./preferences";
 
 const sequence = z.string().regex(/^(0|[1-9][0-9]*)$/);
 const projectId = z.string().uuid();
@@ -155,6 +157,21 @@ export class LoroApi {
     ).token;
   }
 
+  // Every preference the account has set, each checked against its name.
+  async preferences(signal: AbortSignal) {
+    const { preferences } = z
+      .object({ preferences: z.array(z.unknown()) })
+      .parse(await this.#json("listPreferences.php", {}, signal));
+    return preferences.flatMap((value) => {
+      const row = parsePreferenceRow(value);
+      return row ? [row] : [];
+    });
+  }
+
+  async setPreferences(changes: PreferenceChanges, signal: AbortSignal) {
+    await this.#json("setPreferences.php", changes, signal);
+  }
+
   merge(id: string, bytes: Uint8Array, signal: AbortSignal) {
     return executeMutation(
       this.queryClient,
@@ -206,6 +223,10 @@ export class LoroApi {
           "auth",
           code,
         );
+      // The cloud reads where a map is kept from the account's preferences;
+      // one just turned on here may not have reached it yet.
+      if (code === "cloud_disabled")
+        throw new SyncError("Cloud saving is unavailable. Retrying…");
       if ([400, 403, 404, 409, 413, 422].includes(response.status))
         throw new SyncError(
           response.status === 413

@@ -4,8 +4,8 @@ import {
   ORIGIN,
   projectForest,
   readProject,
-  savingPreferences,
 } from "./project-document";
+import { copyMapPreferences } from "./preferences";
 import { accountNamespace, ANONYMOUS_NAMESPACE } from "./project-repository";
 import type {
   CatalogEntry,
@@ -32,6 +32,7 @@ export interface OpenClaim extends OpenCandidate {
 // A map that cannot be read is not known to be empty, so it stays a candidate.
 async function pristine(source: ProjectRepository, id: string) {
   try {
+    const own = (await source.preferences.levels(id)).map;
     const handle = await source.open(id, { remember: false });
     try {
       const state = readProject(handle.doc);
@@ -40,8 +41,7 @@ async function pristine(source: ProjectRepository, id: string) {
         isPristineSeed(
           projectForest(state.view),
           state.view.name,
-          state.view.colors,
-          state.view.links,
+          Object.keys(own).length > 0 || !!state.view.legacy,
         )
       );
     } finally {
@@ -209,14 +209,21 @@ export async function claimAnonymousProjects(
           if (view !== undefined)
             await destination.setPreference(`project/${targetId}/view`, view);
           signal.throwIfAborted();
-          // A cloud-off map migrates locally only: the copied snapshot keeps
-          // cloud saving off, so sync never uploads it. A cloud-on map is
+          // The copy belongs to the account, so what the map set for itself,
+          // such as its colors or staying out of the cloud, becomes the
+          // account's for it.
+          await copyMapPreferences(
+            source.preferences,
+            entry.id,
+            destination.preferences,
+            targetId,
+          );
+          signal.throwIfAborted();
+          // A cloud-off map migrates locally only: the copy keeps cloud saving
+          // off, so sync never uploads it. A cloud-on map is
           // registered before release, so a UUID owned elsewhere is rerouted
           // before the copy can appear in Load.
-          if (
-            savingPreferences(original.doc).cloud &&
-            savingPreferences(target.doc).cloud
-          ) {
+          if (original.saving.cloud && target.saving.cloud) {
             try {
               await destination.markCloudAttempted(targetId);
               await api.register(targetId, signal);

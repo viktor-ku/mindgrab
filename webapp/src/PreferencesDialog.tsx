@@ -3,28 +3,39 @@ import { analyticsEnabled, consent, setConsent } from "./analytics";
 import type { PreferenceTab } from "./app-search";
 import { ColorSettings } from "./ColorSettings";
 import { Dialog } from "./Dialog";
-import { LockIcon } from "./icons";
+import { LockIcon, UndoIcon } from "./icons";
 import { connectionPath } from "./mind-map";
 import { press } from "./press";
 import type {
   ColorPreferences,
   LinkStyle,
+  PreferenceLevel,
+  PreferenceName,
+  PreferenceScope,
   SavingPreferences,
-} from "./project-document";
+} from "./preferences";
 import type { CloudStatus } from "./project-sync";
 
-export function ProjectPreferences(props: {
+export function PreferencesDialog(props: {
   open: boolean;
   onClose: () => void;
   // The section shown, from the address; saving when absent.
   section?: PreferenceTab;
   onSection: (section: PreferenceTab) => void;
+  // Where maps are kept, for the scope.
   saving: SavingPreferences;
   onChange: (value: SavingPreferences) => void;
+  // Which maps Saving, Colors and Connections edit: this one, or all of them.
+  scope: PreferenceScope;
+  onScope: (scope: PreferenceScope) => void;
+  // The values for that scope.
   colors: ColorPreferences;
   onColors: (value: ColorPreferences) => void;
   links: LinkStyle;
   onLinks: (value: LinkStyle) => void;
+  // What this map sets for itself, and a way to stop setting it.
+  own: PreferenceLevel;
+  onReset: (names: PreferenceName[]) => void;
   busy: boolean;
   error: string;
   cloudStatus?: CloudStatus;
@@ -52,8 +63,8 @@ export function ProjectPreferences(props: {
     <Dialog
       open={props.open}
       onClose={props.onClose}
-      title="Project preferences"
-      closeLabel="Close project preferences"
+      title="Preferences"
+      closeLabel="Close preferences"
       variant="center"
       size="large"
     >
@@ -77,14 +88,26 @@ export function ProjectPreferences(props: {
         </nav>
         <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pt-5 pb-8">
           <div class="preferences-body">
+            <Show when={SCOPED[current()]}>
+              {(section) => (
+                <ScopeRow
+                  scope={props.scope}
+                  onScope={props.onScope}
+                  own={props.own}
+                  onReset={props.onReset}
+                  names={section().names}
+                  what={section().what}
+                />
+              )}
+            </Show>
             <h3 class="mb-2 text-base font-semibold text-stone-900">
               {sections().find((item) => item.id === current())?.label}
             </h3>
             <Show when={current() === "saving"}>
               <p class="mb-6 text-sm leading-6 text-stone-600">
-                Choose where this map is saved. Turning a switch off deletes its
-                existing copy from that location. Your open map stays available
-                in this tab.
+                {props.scope === "map"
+                  ? "Choose where this map is saved. Turning a switch off deletes its existing copy from that location. Your open map stays available in this tab."
+                  : "Choose where your maps are saved, unless a map chooses for itself. Turning a switch off deletes a map's copy from that location the next time the map opens."}
               </p>
               <div class="flex max-w-2xl flex-col gap-6">
                 <For
@@ -177,6 +200,24 @@ export function ProjectPreferences(props: {
               {/* Without an account cloud saving cannot run, so local off means memory only. */}
               <Show
                 when={
+                  props.scope === "global" &&
+                  !props.saving.local &&
+                  (!props.saving.cloud || !props.signedIn)
+                }
+              >
+                <div class="mt-8 max-w-2xl rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-950">
+                  <p class="font-semibold">
+                    Maps that follow these switches live only in memory.
+                  </p>
+                  <p>
+                    Export a backup of each one before closing or reloading its
+                    tab.
+                  </p>
+                </div>
+              </Show>
+              <Show
+                when={
+                  props.scope === "map" &&
                   !props.saving.local &&
                   (!props.saving.cloud || !props.signedIn)
                 }
@@ -198,7 +239,10 @@ export function ProjectPreferences(props: {
               </Show>
               <Show
                 when={
-                  !props.saving.local && props.saving.cloud && props.signedIn
+                  props.scope === "map" &&
+                  !props.saving.local &&
+                  props.saving.cloud &&
+                  props.signedIn
                 }
               >
                 <p class="mt-8 text-sm leading-6 text-stone-600">
@@ -246,11 +290,17 @@ export function ProjectPreferences(props: {
               </Show>
             </Show>
             <Show when={current() === "colors"}>
-              <ColorSettings colors={props.colors} onChange={props.onColors} />
+              <ColorSettings
+                colors={props.colors}
+                onChange={props.onColors}
+                scope={props.scope}
+              />
             </Show>
             <Show when={current() === "connections"}>
               <p class="mb-6 max-w-2xl text-sm leading-6 text-stone-600">
-                Choose how lines run from an idea to its children.
+                {props.scope === "map"
+                  ? "Choose how lines run from an idea to its children in this map."
+                  : "Choose how lines run from an idea to its children in every map without a connection style of its own."}
               </p>
               <fieldset class="grid max-w-2xl gap-2 sm:grid-cols-3">
                 <legend class="sr-only">Connection style</legend>
@@ -323,6 +373,11 @@ export function ProjectPreferences(props: {
                   </button>
                 </div>
               </fieldset>
+              <p class="mt-4 max-w-2xl text-sm leading-6 text-stone-500">
+                {props.signedIn
+                  ? "Your answer applies to your account, on every device you sign in on."
+                  : "Your answer applies to this browser, and to your account once you sign in."}
+              </p>
               <p role="status" class="mt-3 text-sm text-stone-500">
                 {consent() === "granted"
                   ? "You accepted analytics."
@@ -337,6 +392,71 @@ export function ProjectPreferences(props: {
     </Dialog>
   );
 }
+
+// Which maps the section's settings apply to, and whether this map sets
+// them itself. A map that does can go back to the settings for all maps.
+function ScopeRow(props: {
+  scope: PreferenceScope;
+  onScope: (scope: PreferenceScope) => void;
+  own: PreferenceLevel;
+  onReset: (names: PreferenceName[]) => void;
+  names: PreferenceName[];
+  what: string;
+}) {
+  const own = () => props.names.some((name) => props.own[name] !== undefined);
+  return (
+    <div class="preferences-scope">
+      <div class="flex flex-wrap items-center gap-2">
+        <label for="preference-scope" class="text-sm text-stone-600">
+          Applying settings for
+        </label>
+        <select
+          id="preference-scope"
+          class="scope-select"
+          value={props.scope}
+          onChange={(e) =>
+            props.onScope(e.currentTarget.value as PreferenceScope)
+          }
+        >
+          <option value="map">This map</option>
+          <option value="global">All maps</option>
+        </select>
+      </div>
+      <Show when={props.scope === "map"}>
+        <div class="mt-2 flex flex-wrap items-center gap-x-2 text-sm text-stone-500">
+          <Show
+            when={own()}
+            fallback={
+              <p>
+                This map uses your {props.what} for all maps until you change it
+                here.
+              </p>
+            }
+          >
+            <p>This map has its own {props.what}.</p>
+            <button
+              type="button"
+              class="scope-reset"
+              {...press(() => props.onReset(props.names))}
+            >
+              <UndoIcon class="size-3.5" />
+              Use the {props.what} for all maps
+            </button>
+          </Show>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+// The sections whose settings apply to this map or to all maps.
+const SCOPED: Partial<
+  Record<PreferenceTab, { names: PreferenceName[]; what: string }>
+> = {
+  saving: { names: ["saveLocally", "saveInCloud"], what: "saving" },
+  colors: { names: ["quickColors", "newIdeaColor"], what: "colors" },
+  connections: { names: ["linkStyle"], what: "connection style" },
+};
 
 const LINK_STYLES: { style: LinkStyle; label: string; description: string }[] =
   [

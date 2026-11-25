@@ -26,8 +26,8 @@ let view = other_replica.view()?;
 ```
 
 Commands cover naming, node and sibling creation, ordered moves, subtree
-deletion, text replacement and UTF-16 edits, branch coloring, subtree positioning,
-saving preferences and undo/redo. Preferences are excluded from edit undo.
+deletion, text replacement and UTF-16 edits, branch coloring, subtree positioning
+and undo/redo.
 Typing can group into one undo step; structural commands form independent steps.
 Undo is local and transformed over remote edits, with a 100-step history bound.
 
@@ -43,16 +43,23 @@ the eight named colors from before shades (`NAMED_COLORS`), which keep their own
 look. Any other text makes the document invalid, so clients older than a new
 color reject maps that use it.
 
-`SetColors { quick, new_ideas }` stores a map's color choices: the quick colors
-its style panel offers, in order, and the color new ideas start with. Both take
-white (`slate`) or shades, each once; maps without them use
-`ColorPreferences::default()` (`DEFAULT_QUICK_COLORS`, white for new ideas). Like
-saving preferences, they are excluded from undo.
+How a map looks and where it is saved are not part of its document.
+`Preference` types each of an account's preferences by name: `quickColors` (the
+colors the style panel offers, in order), `newIdeaColor` (the color new ideas
+start with), `linkStyle` (how lines run to children: `freeform` curves, or a tree
+with `rounded` or `square` corners), `saveLocally` and `saveInCloud` (whether the
+browser and the account keep a copy) and `analyticsConsent` (`granted` or
+`denied`). Colors are white (`slate`) or shades, and quick colors appear once
+each. A `PreferenceRow` sets one for all of an account's maps (`global`) or for
+one map (`map`, with its project id); a map's own value wins. Consent is only
+ever global. The backend stores them in Postgres, and the webapp keeps them in
+the browser too.
 
-`SetLinks { style }` stores how the map draws the lines to children:
-`freeform` curves, or a tree with `rounded` or `square` corners. Maps without
-it draw a rounded tree. It is a preference too, excluded from undo. Clients
-older than it reject maps that set it.
+Older maps kept colors, a connection style and where they were saved in the
+document's metadata (`colors`, `links` and `saving`). The view reports any of
+them as `legacy`, so the webapp can make the colors and connection style the
+map's own preferences; where a map was saved is not carried over. Then
+`ForgetLegacyPreferences` removes all three. It is excluded from undo.
 
 Deleting an idea never moves another one. `DeleteNode { id, gap }` takes the
 layout space the branch took (the client measures it) and keeps it empty with

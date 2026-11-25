@@ -1,6 +1,7 @@
 use mindgrab_state::{
-    COLOR_FAMILIES, COLOR_SHADES, ColorPreferences, Command, CommandResult, DEFAULT_QUICK_COLORS,
-    LinkStyle, NAMED_COLORS, Node, Position, ProjectView, SavingPreferences,
+    AnalyticsConsent, COLOR_FAMILIES, COLOR_SHADES, ColorPreferences, Command, CommandResult,
+    DEFAULT_QUICK_COLORS, LegacyPreferences, LinkStyle, NAMED_COLORS, Node, Position, Preference,
+    PreferenceName, PreferenceRow, PreferenceScope, PreferenceTarget, ProjectView,
 };
 use ts_rs::{Config, TS};
 
@@ -40,9 +41,15 @@ fn main() {
     );
     for declaration in [
         Position::decl(&config),
-        SavingPreferences::decl(&config),
         ColorPreferences::decl(&config),
         LinkStyle::decl(&config),
+        LegacyPreferences::decl(&config),
+        PreferenceScope::decl(&config),
+        AnalyticsConsent::decl(&config),
+        PreferenceName::decl(&config),
+        Preference::decl(&config),
+        PreferenceTarget::decl(&config),
+        PreferenceRow::decl(&config),
         Node::decl(&config),
         ProjectView::decl(&config),
         Command::decl(&config),

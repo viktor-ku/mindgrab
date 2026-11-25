@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use mindgrab_state::{LinkStyle, PreferenceName};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::FromRow;
@@ -122,6 +123,9 @@ fn body_limit(method: &str) -> usize {
         "mergeProject" => mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
         // One command can carry a position for every idea on a full map.
         "commandProject" => 2 * 1024 * 1024,
+        // A browser sends at most a hundred preferences at once, each at most
+        // every color.
+        "setPreferences" => 512 * 1024,
         _ => 16 * 1024,
     }
 }
@@ -160,10 +164,10 @@ pub async fn rpc(
             let body = read(method, &headers, body).await?;
             return shared(&app, &headers, &body).await;
         }
-        "createProject" | "deleteProject" | "mergeProject" | "commandProject" | "setShareLink" => {
-            app.config.same_origin(&headers)?
-        }
-        "listProjects" | "getProjectSnapshot" | "getProjectState" | "getShareLink" => {}
+        "createProject" | "deleteProject" | "mergeProject" | "commandProject" | "setShareLink"
+        | "setPreferences" => app.config.same_origin(&headers)?,
+        "listProjects" | "getProjectSnapshot" | "getProjectState" | "getShareLink"
+        | "listPreferences" => {}
         _ => unreachable!(),
     }
     let user = app.auth.identify(&headers).await?;
@@ -232,6 +236,18 @@ pub async fn rpc(
                 stored(&app, &user, args.project_id).await?,
             ))
             .into_response())
+        }
+        "listPreferences" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {}
+            let _: Args = parse(&headers, &body)?;
+            Ok(Json(crate::preferences::list(&app.pool, &user).await?).into_response())
+        }
+        "setPreferences" => {
+            let changes: crate::preferences::Changes = parse(&headers, &body)?;
+            crate::preferences::change(&app.pool, &user, changes).await?;
+            Ok(Json(json!({"saved":true})).into_response())
         }
         "getShareLink" => {
             let args: ProjectId = parse(&headers, &body)?;
@@ -302,12 +318,6 @@ pub async fn rpc(
             }
             let args: Args = parse(&headers, &body)?;
             // Native commands operate on the same core used by browser editing.
-            if matches!(
-                args.command,
-                mindgrab_state::Command::SetSaving { cloud: false, .. }
-            ) {
-                return Err(ApiError::invalid());
-            }
             Ok(Json(baseline(
                 args.project_id,
                 merge(
@@ -351,6 +361,16 @@ async fn merge(
     bytes: Bytes,
     command: Option<mindgrab_state::Command>,
 ) -> Result<Stored> {
+    // A map kept out of the cloud is not stored there.
+    if !crate::preferences::resolve(&app.pool, user.id, id, PreferenceName::SaveInCloud)
+        .await?
+        .unwrap_or(true)
+    {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "cloud_disabled",
+        ));
+    }
     let permit = app.compute.acquire(user.id).await?;
     for _ in 0..MERGE_ATTEMPTS {
         let current = stored(app, user, id).await?;
@@ -369,12 +389,6 @@ async fn merge(
                 project.apply(command)?;
             }
             let view = project.view()?;
-            if !view.saving.cloud {
-                return Err(ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "cloud_disabled",
-                ));
-            }
             let changed = prior.is_none() || before != project.version();
             let snapshot = match prior {
                 Some(prior) if !changed => prior,
@@ -591,6 +605,14 @@ async fn shared(app: &Arc<Backend>, headers: &HeaderMap, body: &Bytes) -> Result
         },
     );
     value["name"] = json!(project.name);
+    let style: Option<LinkStyle> = crate::preferences::resolve(
+        &app.pool,
+        project.owner_id,
+        project.id,
+        PreferenceName::LinkStyle,
+    )
+    .await?;
+    value["linkStyle"] = json!(style.unwrap_or_default());
     Ok(Json(value).into_response())
 }
 /// Read-only revision notifications for a shared project. The link itself is
