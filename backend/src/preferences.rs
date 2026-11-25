@@ -107,6 +107,12 @@ pub async fn change(pool: &PgPool, user: &User, changes: Changes) -> Result<()> 
         clear.push((target, project(target)?));
     }
     let mut tx = pool.begin().await?;
+    // One change per account at a time, so two cannot each count only their
+    // own new rows and together pass the limit.
+    sqlx::query("SELECT 1 FROM mindgrab_loro.users WHERE id=$1 FOR UPDATE")
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
     for (target, project_id) in clear {
         sqlx::query("DELETE FROM mindgrab_loro.preferences WHERE user_id=$1 AND scope=$2 AND project_id IS NOT DISTINCT FROM $3 AND name=$4")
             .bind(user.id)
