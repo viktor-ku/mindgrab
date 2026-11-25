@@ -15,6 +15,7 @@ import type {
   SavingPreferences,
 } from "./preferences";
 import type { CloudStatus } from "./project-sync";
+import { ShortcutsSettings } from "./ShortcutsSettings";
 
 export function PreferencesDialog(props: {
   open: boolean;
@@ -43,6 +44,9 @@ export function PreferencesDialog(props: {
   onExport: () => void;
   // Starts sign-in; absent while signed in or while the account is checked.
   onSignIn?: () => void;
+  // What a scroll wheel does on the canvas, on this device.
+  wheelMode: "pan" | "zoom";
+  onWheelMode: (mode: "pan" | "zoom") => void;
 }) {
   let firstSwitch: HTMLButtonElement | undefined;
   const sections = () => [
@@ -50,6 +54,7 @@ export function PreferencesDialog(props: {
     { id: "colors" as const, label: "Colors" },
     { id: "connections" as const, label: "Connections" },
     { id: "backup" as const, label: "Backup" },
+    { id: "shortcuts" as const, label: "Shortcuts" },
     // Only in builds that collect analytics.
     ...(analyticsEnabled ? [{ id: "privacy" as const, label: "Privacy" }] : []),
   ];
@@ -86,7 +91,9 @@ export function PreferencesDialog(props: {
             )}
           </For>
         </nav>
-        <div class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pt-5 pb-8">
+        {/* Positioned so sr-only legends, such as the one in Shortcuts, stay
+            inside this scroller rather than overflowing the dialog. */}
+        <div class="relative flex min-h-0 flex-1 flex-col overflow-y-auto px-6 pt-5 pb-8">
           <div class="preferences-body">
             <Show when={SCOPED[current()]}>
               {(section) => (
@@ -99,6 +106,9 @@ export function PreferencesDialog(props: {
                   what={section().what}
                 />
               )}
+            </Show>
+            <Show when={current() === "shortcuts"}>
+              <GlobalScopeRow what="Shortcuts are the same in every map." />
             </Show>
             <h3 class="mb-2 text-base font-semibold text-stone-900">
               {sections().find((item) => item.id === current())?.label}
@@ -342,6 +352,12 @@ export function PreferencesDialog(props: {
                 Export backup
               </button>
             </Show>
+            <Show when={current() === "shortcuts"}>
+              <ShortcutsSettings
+                wheelMode={props.wheelMode}
+                onWheelMode={props.onWheelMode}
+              />
+            </Show>
             <Show when={current() === "privacy"}>
               <p class="mb-6 max-w-2xl text-sm leading-6 text-stone-600">
                 With your permission, we use cookies to learn how Mindgrab is
@@ -445,6 +461,31 @@ function ScopeRow(props: {
           </Show>
         </div>
       </Show>
+    </div>
+  );
+}
+
+// The scope row of a section that only has settings for all maps, such as
+// Shortcuts: the same control, held at all maps.
+function GlobalScopeRow(props: { what: string }) {
+  return (
+    <div class="preferences-scope">
+      <div class="flex flex-wrap items-center gap-2">
+        <label for="preference-scope" class="text-sm text-stone-600">
+          Applying settings for
+        </label>
+        <select
+          id="preference-scope"
+          class="scope-select"
+          disabled
+          aria-describedby="preference-scope-fixed"
+        >
+          <option value="global">All maps</option>
+        </select>
+      </div>
+      <p id="preference-scope-fixed" class="mt-2 text-sm text-stone-500">
+        {props.what}
+      </p>
     </div>
   );
 }

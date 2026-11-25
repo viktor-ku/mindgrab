@@ -412,6 +412,42 @@ test("search finds an idea inside a folded branch and Enter keeps it", async () 
   expect(await activeLabel()).toBe("Mind map canvas");
 });
 
+test("? opens the shortcuts in the preferences, held at all maps", async () => {
+  // The list moved out of a toolbar button into the preferences.
+  expect(
+    await page
+      .getByRole("button", { name: "Shortcuts and navigation" })
+      .count(),
+  ).toBe(0);
+  await node(await rootId()).click();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("?");
+  const dialog = page.getByRole("dialog", { name: "Preferences" });
+  await dialog.waitFor();
+  expect(
+    await dialog
+      .getByRole("button", { name: "Shortcuts", exact: true })
+      .getAttribute("aria-current"),
+  ).toBe("true");
+  expect(await dialog.getByText("Select all ideas to color").count()).toBe(1);
+  const scope = dialog.getByLabel("Applying settings for");
+  expect(await scope.isDisabled()).toBe(true);
+  expect(await scope.inputValue()).toBe("global");
+  // The long list scrolls inside the section, not the dialog's frame.
+  expect(
+    await dialog.evaluate((el) => el.scrollHeight <= el.clientHeight),
+  ).toBe(true);
+  // What scrolling does is still a choice, kept on this device.
+  await dialog.getByText("Scroll zooms").click();
+  expect(
+    await page.evaluate(() => localStorage.getItem("mindgrab:wheel-mode")),
+  ).toBe("zoom");
+  // Other sections still choose between this map and all maps.
+  await dialog.getByRole("button", { name: "Colors", exact: true }).click();
+  expect(await scope.isDisabled()).toBe(false);
+  expect(await scope.inputValue()).toBe("map");
+});
+
 test("folded branches survive reopening the project", async () => {
   const root = await rootId();
   const a = await addChild(root, "Alpha");

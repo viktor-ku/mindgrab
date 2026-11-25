@@ -7,7 +7,7 @@ import { createEffect, on, Show } from "solid-js";
 import { Dialog } from "./Dialog";
 import { LoroApi, SyncError } from "./loro-api";
 import { shareUrl } from "./shared-project";
-import { MOD_LABEL } from "./ShortcutsDialog";
+import { MOD_LABEL } from "./ShortcutsSettings";
 import { press } from "./press";
 
 // One view-only link per project. The link only exists in Mindgrab Cloud, so

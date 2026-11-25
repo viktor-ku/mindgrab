@@ -7,6 +7,7 @@ export const PREFERENCE_TABS = [
   "colors",
   "connections",
   "backup",
+  "shortcuts",
   "privacy",
 ] as const;
 export type PreferenceTab = (typeof PREFERENCE_TABS)[number];

@@ -123,8 +123,7 @@ import {
   DELETE_LABEL,
   MOD_LABEL,
   SHIFT_LABEL,
-  ShortcutsDialog,
-} from "./ShortcutsDialog";
+} from "./ShortcutsSettings";
 import { Outline } from "./Outline";
 import { NotesPanel } from "./NotesPanel";
 import {
@@ -146,7 +145,6 @@ import {
   FitMapIcon,
   FocusIcon,
   FoldIcon,
-  HelpIcon,
   MinusIcon,
   MoreIcon,
   NoteIcon,
@@ -2142,7 +2140,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     showPreferences() ||
     showShare() ||
     showImage() ||
-    showHelp() ||
     saveErrorOpen() ||
     (isPhone() && menuOpen());
   const savingMutation = createMutation(() => ({
@@ -3390,12 +3387,14 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       )?.focus();
   }
 
-  const [showHelp, setShowHelp] = createSignal(false);
   // Feature discovery: count each opening, however it happened.
   for (const [opened, event] of [
     [outlineOpen, "outline_opened"],
     [notesOpen, "notes_opened"],
-    [showHelp, "shortcuts_opened"],
+    [
+      () => showPreferences() && preferencesTab() === "shortcuts",
+      "shortcuts_opened",
+    ],
     [() => Boolean(focusId()), "branch_focused"],
   ] as const)
     createEffect(on(opened, (open) => open && track(event), { defer: true }));
@@ -4550,7 +4549,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         !e.altKey
       ) {
         e.preventDefault();
-        setShowHelp((open) => !open);
+        openPreferences("shortcuts");
         return;
       }
       // Letter commands use Option/Alt so plain typing always edits the idea.
@@ -5191,6 +5190,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         signedIn={account().status === "authenticated"}
         onExport={exportCurrentProject}
         onSignIn={signInFrom(setShowPreferences)}
+        wheelMode={wheelMode()}
+        onWheelMode={setWheelMode}
       />
       <ExportImageDialog
         open={showImage()}
@@ -6534,17 +6535,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               <FitMapIcon />
             </button>
           </fieldset>
-          <span class="toolbar-divider" />
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Shortcuts and navigation"
-            title="Shortcuts and navigation (? with nothing selected)"
-            aria-haspopup="dialog"
-            {...press(() => setShowHelp(true))}
-          >
-            <HelpIcon />
-          </button>
         </section>
       </Show>
       <Show when={isPhone()}>
@@ -6704,14 +6694,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             >
               Preferences…
             </button>
-            <button
-              type="button"
-              class="menu-item"
-              aria-haspopup="dialog"
-              {...press(fromPanel(() => setShowHelp(true)))}
-            >
-              Help
-            </button>
           </fieldset>
           <AccountControls
             inline
@@ -6743,15 +6725,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           localSave.message() || recoveryPending() ? retryLocal : undefined
         }
         onRetryCloud={cloudProblem() ? retryCloud : undefined}
-      />
-      <ShortcutsDialog
-        open={showHelp()}
-        onClose={() => {
-          setShowHelp(false);
-          canvas.focus({ preventScroll: true });
-        }}
-        wheelMode={wheelMode()}
-        onWheelMode={setWheelMode}
       />
     </section>
   );
