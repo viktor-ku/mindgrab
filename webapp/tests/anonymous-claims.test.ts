@@ -3,12 +3,10 @@ import {
   createChild,
   createProjectDocument,
   createRoot,
-  DEFAULT_COLOR_PREFERENCES,
   editNodeText,
   isPristineSeed,
   projectForest,
   renameProject,
-  setColorPreferences,
   setNodeColor,
   setNodeNote,
 } from "../src/project-document";
@@ -32,9 +30,9 @@ const seed = () => {
   docs.push(doc);
   return doc;
 };
-const pristine = (doc: ProjectDocument) => {
+const pristine = (doc: ProjectDocument, ownPreferences = false) => {
   const view = doc.view();
-  return isPristineSeed(projectForest(view), view.name, view.colors);
+  return isPristineSeed(projectForest(view), view.name, ownPreferences);
 };
 const root = (doc: ProjectDocument) => doc.view().roots[0];
 
@@ -45,11 +43,8 @@ test("only an untouched seed is pristine; any edit keeps the map", () => {
   expect(untouched.view().nodes[0].color).toBe("slate");
   expect(pristine(untouched)).toBe(true);
 
-  const colors = seed();
-  setColorPreferences(colors, { quick: ["sky-400"], newIdeas: "slate" });
-  expect(pristine(colors)).toBe(false);
-  setColorPreferences(colors, DEFAULT_COLOR_PREFERENCES);
-  expect(pristine(colors)).toBe(true);
+  // A map that sets its own colors or connection style is not untouched.
+  expect(pristine(seed(), true)).toBe(false);
 
   const renamed = seed();
   renameProject(renamed, "Podcast plan");

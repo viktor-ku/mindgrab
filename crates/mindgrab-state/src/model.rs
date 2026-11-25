@@ -73,8 +73,8 @@ impl Color {
 pub const DEFAULT_QUICK_COLORS: [&str; 5] =
     ["slate", "red-200", "green-200", "blue-200", "yellow-200"];
 
-/// A map's color choices: the quick colors in their order, and the color new
-/// ideas start with. Maps that never set them use the defaults.
+/// The color choices older maps kept in their documents: the quick colors in
+/// their order, and the color new ideas start with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -171,14 +171,6 @@ pub enum LinkStyle {
     Square,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
-#[serde(deny_unknown_fields)]
-pub struct SavingPreferences {
-    pub local: bool,
-    pub cloud: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
@@ -213,9 +205,11 @@ pub struct ProjectView {
     #[cfg_attr(feature = "bindings", ts(type = "number"))]
     pub schema_version: i64,
     pub name: String,
-    pub saving: SavingPreferences,
-    pub colors: ColorPreferences,
-    pub links: LinkStyle,
+    /// Set only for a map that still keeps preferences in its document, from
+    /// before they were the account's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub legacy: Option<crate::LegacyPreferences>,
     pub roots: Vec<String>,
     pub nodes: Vec<Node>,
 }
@@ -314,21 +308,9 @@ pub enum Command {
         gap: Option<f64>,
         end_gap: Option<f64>,
     },
-    /// Not an edit: excluded from undo, like saving preferences.
-    SetColors {
-        #[cfg_attr(feature = "bindings", ts(type = "Array<Color>"))]
-        quick: Vec<Color>,
-        #[cfg_attr(feature = "bindings", ts(type = "Color"))]
-        new_ideas: Color,
-    },
-    SetSaving {
-        local: bool,
-        cloud: bool,
-    },
-    /// Not an edit either: the map's connection style.
-    SetLinks {
-        style: LinkStyle,
-    },
+    /// Drops the preferences an older map kept in its document, once they are
+    /// its preferences. Not an edit: excluded from undo.
+    ForgetLegacyPreferences,
     Undo,
     Redo,
 }

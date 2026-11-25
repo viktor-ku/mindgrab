@@ -16,6 +16,11 @@ import type { ProjectDocument } from "../webapp/src/project-document";
 import type { User } from "../webapp/src/auth-session";
 import { openProjectDocument } from "../webapp/src/project-document";
 import type { AccountHarness } from "./accounts-harness";
+import { preferenceKey } from "../webapp/src/preferences";
+import type {
+  PreferenceRow,
+  PreferenceTarget,
+} from "../webapp/src/preferences";
 
 setDefaultTimeout(30_000);
 const harnessPath = `/@fs/${import.meta.dir}/accounts-harness.html`;
@@ -57,6 +62,13 @@ class Backend {
   // Commit times are strictly increasing, like the server's updated_at.
   clock = Date.parse("2026-01-01T00:00:00Z");
   registrations: string[] = [];
+  // Each account's preferences, by scope, map and name.
+  preferences = new Map<number, Map<string, PreferenceRow>>();
+  preferencesOf(ownerId: number) {
+    const rows = this.preferences.get(ownerId) ?? new Map();
+    this.preferences.set(ownerId, rows);
+    return rows;
+  }
   async route(route: Route) {
     const request = route.request();
     const url = new URL(request.url());
@@ -89,6 +101,20 @@ class Backend {
     const expected = request.headers()["x-mindgrab-account"];
     if (!owner) return error(401, "unauthenticated");
     if (expected !== String(owner.id)) return error(409, "account_changed");
+    if (url.pathname === "/api/listPreferences.php")
+      return route.fulfill({
+        json: { preferences: [...this.preferencesOf(owner.id).values()] },
+      });
+    if (url.pathname === "/api/setPreferences.php") {
+      const { set = [], clear = [] } = request.postDataJSON() as {
+        set?: PreferenceRow[];
+        clear?: PreferenceTarget[];
+      };
+      const rows = this.preferencesOf(owner.id);
+      for (const target of clear) rows.delete(preferenceKey(target));
+      for (const row of set) rows.set(preferenceKey(row), row);
+      return route.fulfill({ json: { saved: true } });
+    }
     if (url.pathname === "/api/createProject.php") {
       const { projectId } = request.postDataJSON();
       let record = this.projects.get(projectId);
@@ -664,4 +690,136 @@ test("text typed right before a reload reaches the account copy after it", async
     (entry) => entry.id === waiting,
   );
   expect(entry?.claim?.stale).toBeUndefined();
+});
+
+async function connectionStyle(name: string) {
+  await page.getByRole("radio", { name: new RegExp(`^${name}`) }).check();
+}
+const cloudPreferences = () => [...backend.preferencesOf(A.id).values()];
+
+test("a map's own connection style follows it into the account, beside the account's style for all maps", async () => {
+  await rename("Styled map");
+  const id = await call("id");
+  await projectMenu("Preferences…");
+  await page
+    .getByRole("navigation", { name: "Preference sections" })
+    .getByRole("button", { name: "Connections" })
+    .click();
+  await expect(
+    page.getByLabel("Applying settings for").inputValue(),
+  ).resolves.toBe("map");
+  await page.getByText("This map uses your connection style").waitFor();
+  await connectionStyle("Square");
+  await page.getByText("This map has its own connection style.").waitFor();
+  await page.keyboard.press("Escape");
+
+  await login();
+  await claimed(id);
+  await cloudSaved();
+  // Signed in, the copy's own style reaches the account in the cloud.
+  await eventually(
+    async () =>
+      cloudPreferences().some(
+        (row) =>
+          row.scope === "map" &&
+          row.projectId === id &&
+          row.name === "linkStyle" &&
+          row.value === "square",
+      ),
+    "the map's connection style to reach the cloud",
+  );
+
+  await projectMenu("Preferences…");
+  await page
+    .getByRole("navigation", { name: "Preference sections" })
+    .getByRole("button", { name: "Connections" })
+    .click();
+  await page.getByText("This map has its own connection style.").waitFor();
+  expect(await page.getByRole("radio", { name: /^Square/ }).isChecked()).toBe(
+    true,
+  );
+  // All maps get freeform lines; this one keeps its own until it lets go.
+  await page.getByLabel("Applying settings for").selectOption("global");
+  await connectionStyle("Freeform");
+  await page.getByLabel("Applying settings for").selectOption("map");
+  expect(await page.getByRole("radio", { name: /^Square/ }).isChecked()).toBe(
+    true,
+  );
+  await page
+    .getByRole("button", { name: "Use the connection style for all maps" })
+    .click();
+  await page.getByText("This map uses your connection style").waitFor();
+  expect(await page.getByRole("radio", { name: /^Freeform/ }).isChecked()).toBe(
+    true,
+  );
+  await eventually(
+    async () =>
+      JSON.stringify(cloudPreferences()) ===
+      JSON.stringify([
+        {
+          scope: "global",
+          projectId: null,
+          name: "linkStyle",
+          value: "freeform",
+        },
+      ]),
+    "only the style for all maps to stay in the cloud",
+  );
+  await expectSilence();
+});
+
+async function openPreferences(section: string) {
+  await projectMenu("Preferences…");
+  await page
+    .getByRole("navigation", { name: "Preference sections" })
+    .getByRole("button", { name: section })
+    .click();
+}
+
+test("cloud saving off for all maps applies to a map without its own, until the map keeps itself there", async () => {
+  await rename("Kept where told");
+  const id = await call("id");
+  await login();
+  await claimed(id);
+  await cloudSaved();
+  expect(backend.projects.has(id)).toBe(true);
+
+  await openPreferences("Saving");
+  await page.getByLabel("Applying settings for").selectOption("global");
+  await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
+  // The open map follows: its cloud copy goes, and it stays in this browser.
+  await page
+    .getByText("Saved locally · cloud saving off", { exact: true })
+    .waitFor();
+  await eventually(
+    async () => !backend.projects.has(id),
+    "the cloud copy to be deleted",
+  );
+  expect(cloudPreferences()).toEqual([
+    { scope: "global", projectId: null, name: "saveInCloud", value: false },
+  ]);
+
+  await page.getByLabel("Applying settings for").selectOption("map");
+  await page.getByText("This map uses your saving for all maps").waitFor();
+  expect(
+    await page
+      .getByRole("switch", { name: "Save in Mindgrab Cloud" })
+      .getAttribute("aria-checked"),
+  ).toBe("false");
+  await page.getByRole("switch", { name: "Save in Mindgrab Cloud" }).click();
+  await page.getByText("This map has its own saving.").waitFor();
+  await cloudSaved();
+  expect(backend.projects.has(id)).toBe(true);
+  await eventually(
+    async () =>
+      cloudPreferences().some(
+        (row) =>
+          row.scope === "map" &&
+          row.projectId === id &&
+          row.name === "saveInCloud" &&
+          row.value === true,
+      ),
+    "the map's own cloud saving to reach the cloud",
+  );
+  await expectSilence();
 });

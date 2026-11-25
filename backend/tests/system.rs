@@ -863,3 +863,200 @@ async fn a_body_is_read_only_after_the_session_and_up_to_its_methods_limit() {
     assert_eq!(oversized.status(), 413);
     f.close().await;
 }
+
+async fn preferences(f: &Fixture, browser: &str) -> Value {
+    let response = f.rpc("listPreferences", browser, json!({})).await;
+    assert_eq!(response.status(), 200);
+    response.json::<Value>().await.unwrap()["preferences"].clone()
+}
+
+#[tokio::test]
+async fn preferences_belong_to_their_account_and_reach_shared_maps() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let bob = f.credential("bob").await;
+    let id = Uuid::new_v4();
+    // A map preference needs no cloud copy of its map.
+    let local = Uuid::new_v4();
+    assert_eq!(preferences(&f, &alice).await, json!([]));
+    let saved = f
+        .rpc(
+            "setPreferences",
+            &alice,
+            json!({"set":[
+                {"scope":"global","projectId":null,"name":"linkStyle","value":"square"},
+                {"scope":"global","projectId":null,"name":"quickColors","value":["slate","sky-400"]},
+                {"scope":"map","projectId":id,"name":"linkStyle","value":"freeform"},
+                {"scope":"map","projectId":local,"name":"newIdeaColor","value":"lime-200"},
+            ]}),
+        )
+        .await;
+    assert_eq!(saved.status(), 200);
+    assert_eq!(
+        preferences(&f, &alice).await,
+        json!([
+            {"scope":"global","projectId":null,"name":"linkStyle","value":"square"},
+            {"scope":"global","projectId":null,"name":"quickColors","value":["slate","sky-400"]},
+            {"scope":"map","projectId":id.to_string(),"name":"linkStyle","value":"freeform"},
+            {"scope":"map","projectId":local.to_string(),"name":"newIdeaColor","value":"lime-200"},
+        ])
+    );
+    // Setting again replaces the value; clearing removes the row.
+    assert_eq!(
+        f.rpc(
+            "setPreferences",
+            &alice,
+            json!({
+                "set":[{"scope":"global","projectId":null,"name":"linkStyle","value":"rounded"}],
+                "clear":[{"scope":"map","projectId":local,"name":"newIdeaColor"}],
+            }),
+        )
+        .await
+        .status(),
+        200
+    );
+    let listed = preferences(&f, &alice).await;
+    assert_eq!(listed.as_array().unwrap().len(), 3);
+    assert_eq!(listed[0]["value"], "rounded");
+    // Another account sees none of them.
+    assert_eq!(preferences(&f, &bob).await, json!([]));
+
+    // Bad values, names, scopes and maps are refused, and nothing of a
+    // refused request is kept.
+    for set in [
+        json!({"scope":"global","projectId":null,"name":"linkStyle","value":"zigzag"}),
+        json!({"scope":"global","projectId":null,"name":"quickColors","value":["slate","slate"]}),
+        json!({"scope":"global","projectId":null,"name":"newIdeaColor","value":"teal"}),
+        json!({"scope":"global","projectId":null,"name":"fontSize","value":12}),
+        json!({"scope":"folder","projectId":null,"name":"linkStyle","value":"square"}),
+        json!({"scope":"global","projectId":id,"name":"linkStyle","value":"square"}),
+        json!({"scope":"map","projectId":null,"name":"linkStyle","value":"square"}),
+        json!({"scope":"map","projectId":"not-a-uuid","name":"linkStyle","value":"square"}),
+    ] {
+        let response = f
+            .rpc(
+                "setPreferences",
+                &alice,
+                json!({"set":[
+                    {"scope":"global","projectId":null,"name":"linkStyle","value":"freeform"},
+                    set,
+                ]}),
+            )
+            .await;
+        assert_eq!(response.status(), 400, "{set}");
+    }
+    assert_eq!(preferences(&f, &alice).await, listed);
+    // Only a session may read them, and only the app's origin may change them.
+    assert_eq!(f.rpc("listPreferences", "", json!({})).await.status(), 401);
+    assert_eq!(
+        f.post("setPreferences", &alice)
+            .header("origin", "https://evil.example")
+            .json(&json!({"set":[]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+
+    // A shared map draws its lines as its owner chose for it.
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let project = Project::new("Shared look").unwrap();
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    let token = share(&f, &alice, id, true).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let style =
+        async || shared(&f, &token).await.json::<Value>().await.unwrap()["linkStyle"].clone();
+    assert_eq!(style().await, "freeform");
+    // Without a value of its own, the map follows the owner's global one.
+    f.rpc(
+        "setPreferences",
+        &alice,
+        json!({"clear":[{"scope":"map","projectId":id,"name":"linkStyle"}]}),
+    )
+    .await;
+    assert_eq!(style().await, "rounded");
+    f.rpc(
+        "setPreferences",
+        &alice,
+        json!({"set":[{"scope":"global","projectId":null,"name":"linkStyle","value":"square"}]}),
+    )
+    .await;
+    assert_eq!(style().await, "square");
+    // Another account's choices never reach it.
+    f.rpc(
+        "setPreferences",
+        &bob,
+        json!({"set":[{"scope":"map","projectId":id,"name":"linkStyle","value":"freeform"}]}),
+    )
+    .await;
+    assert_eq!(style().await, "square");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn maps_kept_out_of_the_cloud_are_not_stored_there() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let id = Uuid::new_v4();
+    assert_eq!(
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1})
+        )
+        .await
+        .status(),
+        200
+    );
+    let project = Project::new("Kept here").unwrap();
+    let set = async |rows: Value| {
+        assert_eq!(
+            f.rpc("setPreferences", &alice, json!({ "set": rows }))
+                .await
+                .status(),
+            200
+        );
+    };
+    // Off for all maps: no map without a value of its own is stored.
+    set(json!([{"scope":"global","projectId":null,"name":"saveInCloud","value":false}])).await;
+    let refused = upload(&f, &alice, id, &project).await;
+    assert_eq!(refused.status(), 422);
+    assert_eq!(
+        refused.json::<Value>().await.unwrap()["error"]["code"],
+        "cloud_disabled"
+    );
+    // A map that keeps itself in the cloud is.
+    set(json!([{"scope":"map","projectId":id,"name":"saveInCloud","value":true}])).await;
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
+    // And one turned off itself is not, whatever all maps do.
+    set(json!([
+        {"scope":"global","projectId":null,"name":"saveInCloud","value":true},
+        {"scope":"map","projectId":id,"name":"saveInCloud","value":false},
+    ]))
+    .await;
+    assert_eq!(upload(&f, &alice, id, &project).await.status(), 422);
+    // Consent is the person's, never one map's.
+    assert_eq!(
+        f.rpc(
+            "setPreferences",
+            &alice,
+            json!({"set":[{"scope":"map","projectId":id,"name":"analyticsConsent","value":"granted"}]}),
+        )
+        .await
+        .status(),
+        400
+    );
+    f.close().await;
+}

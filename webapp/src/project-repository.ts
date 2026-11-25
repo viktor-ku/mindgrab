@@ -8,15 +8,16 @@ import {
   openProjectDocument,
   projectName,
   readProject,
-  savingPreferences,
-  setSavingPreferences,
 } from "./project-document";
-import type {
-  NewNode,
-  DocumentView,
-  ProjectState,
-  SavingPreferences,
-} from "./project-document";
+import type { NewNode, DocumentView, ProjectState } from "./project-document";
+import {
+  levelRows,
+  PreferenceStore,
+  resolvePreferences,
+  sameSaving,
+  savingOf,
+} from "./preferences";
+import type { SavingPreferences } from "./preferences";
 
 // Fresh Loro storage. Bump to start over in new IndexedDB databases.
 export const STORAGE_GENERATION = 2;
@@ -237,12 +238,7 @@ async function readStoredName(name: string, id: string, timeoutMs: number) {
     const doc = openProjectDocument(id, updates);
     const state = readProject(doc);
     doc.destroy();
-    return state.status === "ready"
-      ? {
-          name: state.view.name,
-          saving: state.view.saving,
-        }
-      : undefined;
+    return state.status === "ready" ? { name: state.view.name } : undefined;
   } catch {
     return;
   } finally {
@@ -363,6 +359,34 @@ class Catalog {
     await committed(store.transaction);
   }
 
+  // Like `update`, for one preference: `change` runs inside the transaction,
+  // returning its argument skips the write and undefined deletes the key.
+  async updatePreference(key: string, change: (value: unknown) => unknown) {
+    const store = await this.#transaction(PREFERENCES, "readwrite");
+    const done = committed(store.transaction);
+    let result: unknown;
+    const read = store.get(key);
+    read.onsuccess = () => {
+      result = change(read.result);
+      if (result === read.result) return;
+      if (result === undefined) store.delete(key);
+      else store.put(result, key);
+    };
+    await done;
+    return result;
+  }
+
+  // Every preference whose key starts with `prefix`.
+  async preferences(prefix: string): Promise<[string, unknown][]> {
+    const store = await this.#transaction(PREFERENCES, "readonly");
+    const range = IDBKeyRange.bound(prefix, `${prefix}\uffff`);
+    const [keys, values] = await Promise.all([
+      request(store.getAllKeys(range)),
+      request(store.getAll(range)),
+    ]);
+    return keys.map((key, index) => [String(key), values[index]]);
+  }
+
   async remove(id: string) {
     const db = await (this.#connection ?? this.#open());
     const tx = db.transaction([PROJECTS, PREFERENCES], "readwrite");
@@ -414,7 +438,11 @@ class ProjectSession {
   readonly dbName: string;
   readonly timeoutMs: number;
   readonly onChange: (session: ProjectSession) => void;
+  readonly resolveSaving: () => Promise<SavingPreferences>;
   readonly doc: ProjectDocument;
+  // Where the map is kept, from the preferences; see setSaving.
+  saving: SavingPreferences = { local: true, cloud: true };
+  #savingListeners = new Set<(saving: SavingPreferences) => void>();
   metadata: Promise<void> = Promise.resolve();
   catalogName?: string;
   registered = false;
@@ -439,17 +467,21 @@ class ProjectSession {
     dbName: string,
     timeoutMs: number,
     onChange: (session: ProjectSession) => void,
+    resolveSaving: () => Promise<SavingPreferences>,
   ) {
     this.id = id;
     this.dbName = dbName;
     this.timeoutMs = timeoutMs;
     this.onChange = onChange;
+    this.resolveSaving = resolveSaving;
     this.doc = openProjectDocument(id);
   }
 
   async hydrate(initialSnapshot?: Uint8Array) {
     try {
-      // Inspect persisted and remote preferences before opening a writable database.
+      // Where the map is kept decides whether a writable database opens.
+      this.saving = await this.resolveSaving();
+      this.#local = this.saving.local;
       const db = await openDatabase(this.dbName, this.timeoutMs);
       if (db) {
         try {
@@ -465,16 +497,12 @@ class ProjectSession {
         }
       }
       if (initialSnapshot) this.doc.merge(initialSnapshot, ORIGIN.remote);
-      this.#local = savingPreferences(this.doc).local;
-      if (this.#local) await this.#connect();
-      this.#local = savingPreferences(this.doc).local;
       if (!this.#local) {
-        await this.#persistence?.destroy();
-        this.#persistence = undefined;
         if (db) await deleteDatabase(this.dbName, this.timeoutMs);
-      } else if (initialSnapshot) {
+      } else {
+        await this.#connect();
         // A remote baseline is not durable until our full-state write commits.
-        await this.#writeFull();
+        if (initialSnapshot) await this.#writeFull();
       }
     } catch (error) {
       await this.#persistence?.destroy().catch(() => {});
@@ -528,12 +556,27 @@ class ProjectSession {
     }
   }
 
-  #onSnapshot = (update: Uint8Array, origin: unknown) => {
-    const local = savingPreferences(this.doc).local;
-    if (local !== this.#local) {
-      this.#local = local;
+  // A change of where the map is kept: turning local saving on writes the
+  // whole map, and turning it off deletes this browser's copy.
+  setSaving(saving: SavingPreferences) {
+    if (sameSaving(saving, this.saving)) return;
+    this.saving = saving;
+    if (saving.local !== this.#local) {
+      this.#local = saving.local;
       this.#changeStorage();
     }
+    for (const listener of this.#savingListeners) listener(saving);
+    this.onChange(this);
+  }
+
+  onSaving(listener: (saving: SavingPreferences) => void) {
+    this.#savingListeners.add(listener);
+    return () => {
+      this.#savingListeners.delete(listener);
+    };
+  }
+
+  #onSnapshot = (update: Uint8Array, origin: unknown) => {
     if (origin !== this.#persistence) {
       if (origin !== this.#channel)
         this.#channel?.postMessage({ type: "snapshot", snapshot: update });
@@ -774,6 +817,9 @@ export interface ProjectHandle {
   importedIds?: ReadonlyMap<string, string>;
   // Hydrated; edit it with the project-document commands.
   readonly doc: ProjectDocument;
+  // Where the map is kept, from the preferences.
+  readonly saving: SavingPreferences;
+  onSaving(listener: (saving: SavingPreferences) => void): () => void;
   // "loading" after hydration means no content has arrived for this UUID yet.
   state(): ProjectState;
   durability(): Durability;
@@ -809,6 +855,10 @@ class Handle implements ProjectHandle {
     return this.session.doc;
   }
 
+  get saving() {
+    return this.session.saving;
+  }
+
   #assertOpen() {
     if (this.#closed) throw new Error("This project handle is closed.");
   }
@@ -824,6 +874,17 @@ class Handle implements ProjectHandle {
   onDurability(listener: (durability: Durability) => void) {
     this.#assertOpen();
     const unsubscribe = this.session.subscribe(listener);
+    const remove = () => {
+      unsubscribe();
+      this.#subscriptions.delete(remove);
+    };
+    this.#subscriptions.add(remove);
+    return remove;
+  }
+
+  onSaving(listener: (saving: SavingPreferences) => void) {
+    this.#assertOpen();
+    const unsubscribe = this.session.onSaving(listener);
     const remove = () => {
       unsubscribe();
       this.#subscriptions.delete(remove);
@@ -859,6 +920,7 @@ export interface NewProject {
   id?: string;
   name: string;
   root?: NewNode;
+  // This map's own saving switches; otherwise it follows those for all maps.
   saving?: SavingPreferences;
 }
 
@@ -879,6 +941,10 @@ interface SessionRecord {
 export class ProjectRepository {
   readonly names: ReturnType<typeof storageNames>;
   readonly scope: RepositoryScope;
+  // How this repository's maps look and where they are kept. An account's
+  // sync with the cloud; see preferences.ts.
+  readonly preferences: PreferenceStore;
+  readonly #preferenceListeners = new Set<() => void>();
   readonly #timeoutMs: number;
   readonly #catalog: Catalog;
   readonly #sessions = new Map<string, SessionRecord>();
@@ -900,16 +966,86 @@ export class ProjectRepository {
     this.names = storageNames(options);
     this.#timeoutMs = options.openTimeoutMs ?? DEFAULT_OPEN_TIMEOUT_MS;
     this.#catalog = new Catalog(this.names.catalog, this.#timeoutMs);
+    this.preferences = new PreferenceStore(
+      {
+        read: (key) => {
+          this.#assertOpen();
+          return this.#catalog.preference(`local/${key}`);
+        },
+        update: (key, change) => {
+          this.#assertOpen();
+          return this.#catalog.updatePreference(`local/${key}`, change);
+        },
+        list: async (prefix) => {
+          this.#assertOpen();
+          return (await this.#catalog.preferences(`local/${prefix}`)).map(
+            ([key, value]) => [key.slice("local/".length), value],
+          );
+        },
+      },
+      {
+        synced: options.namespace !== ANONYMOUS_NAMESPACE,
+        lock: `${this.names.catalog}/preferences`,
+        onChange: async () => {
+          this.#channel?.postMessage("preferences");
+          await this.#applyPreferences();
+        },
+      },
+    );
     if (typeof BroadcastChannel !== "undefined") {
       this.#channel = new BroadcastChannel(this.names.catalog);
-      this.#channel.onmessage = () => this.#emit();
+      this.#channel.onmessage = ({ data }) => {
+        if (data === "preferences") void this.#applyPreferences();
+        else this.#emit();
+      };
     }
+  }
+
+  async #saving(id: string) {
+    return savingOf(resolvePreferences(await this.preferences.levels(id)));
+  }
+
+  // Every open map takes up where it is now kept, and the catalog and anyone
+  // listening learn of the change.
+  async #applyPreferences() {
+    if (this.#closed) return;
+    for (const [id, record] of this.#sessions) {
+      const session = await record.session.catch(() => undefined);
+      if (!session || this.#sessions.get(id) !== record) continue;
+      const saving = await this.#saving(id);
+      const restored = saving.local && !session.saving.local;
+      session.setSaving(saving);
+      // Values kept in memory while the map was too are stored again.
+      if (restored)
+        for (const [key, value] of this.#memoryPreferences)
+          if (key.startsWith(`project/${id}/`))
+            await this.setPreference(key, value);
+    }
+    this.#emit();
+    for (const listener of this.#preferenceListeners) listener();
+  }
+
+  // Fires for preference changes made in this or another tab, or synced in.
+  onPreferenceChange(listener: () => void) {
+    this.#preferenceListeners.add(listener);
+    return () => {
+      this.#preferenceListeners.delete(listener);
+    };
   }
 
   // Seeds only an explicitly new UUID, and registers it after the seed commits.
   async create({ id = crypto.randomUUID(), name, root, saving }: NewProject) {
+    // Checked before the new map's saving is stored, so a rejected create
+    // leaves an existing map's preferences alone.
+    if (saving && (await this.#exists(id))) throw new ProjectExistsError(id);
+    if (saving)
+      await this.preferences.change({
+        set: levelRows("map", id, {
+          saveLocally: saving.local,
+          saveInCloud: saving.cloud,
+        }),
+      });
     const seed = createProjectDocument(id, name, root);
-    if (saving) setSavingPreferences(seed, saving);
     return this.#createFromSeed(id, seed);
   }
 
@@ -922,18 +1058,21 @@ export class ProjectRepository {
     });
   }
 
+  // Whether a map with this id is open here or stored in this browser.
+  async #exists(id: string) {
+    if (this.#sessions.has(id)) return true;
+    const existing = await openDatabase(
+      this.names.project(id),
+      this.#timeoutMs,
+    );
+    existing?.close();
+    return !!existing;
+  }
+
   async #createFromSeed(id: string, seed: ProjectDocument, importing = false) {
-    if (!savingPreferences(seed).local) {
+    if (!(await this.#saving(id)).local) {
       try {
-        if (this.#sessions.has(id)) throw new ProjectExistsError(id);
-        const existing = await openDatabase(
-          this.names.project(id),
-          this.#timeoutMs,
-        );
-        if (existing) {
-          existing.close();
-          throw new ProjectExistsError(id);
-        }
+        if (await this.#exists(id)) throw new ProjectExistsError(id);
         const handle = await this.#acquire(id, seed.snapshot());
         await handle.refreshMetadata();
         this.#latest = id;
@@ -1002,7 +1141,7 @@ export class ProjectRepository {
     }: { remember?: boolean; initialSnapshot?: Uint8Array } = {},
   ) {
     const handle = await this.#acquire(id, initialSnapshot);
-    if (initialSnapshot && savingPreferences(handle.doc).cloud)
+    if (initialSnapshot && handle.saving.cloud)
       handle.doc.merge(initialSnapshot, ORIGIN.remote);
     if (remember) await this.setLatestProject(id).catch(() => {});
     return handle;
@@ -1021,7 +1160,10 @@ export class ProjectRepository {
         if (entry) entries.set(id, entry);
       }
     for (const [id, entry] of this.#memoryEntries) entries.set(id, entry);
+    // Where each map is kept follows the preferences, also for closed maps.
+    const resolve = await this.preferences.resolver();
     return [...entries.values()]
+      .map((entry) => ({ ...entry, saving: savingOf(resolve(entry.id)) }))
       .filter(
         (entry) =>
           this.#memoryEntries.has(entry.id) ||
@@ -1105,18 +1247,6 @@ export class ProjectRepository {
         ? { ...entry, registration: "pending", cloudAttempted: false }
         : entry,
     );
-  }
-
-  async updateSaving(handle: ProjectHandle, preferences: SavingPreferences) {
-    this.#assertOpen();
-    setSavingPreferences(handle.doc, preferences);
-    await handle.flush();
-    await handle.refreshMetadata();
-    if (preferences.local) {
-      for (const [key, value] of this.#memoryPreferences)
-        if (key.startsWith(`project/${handle.id}/`))
-          await this.setPreference(key, value);
-    }
   }
 
   async markRegistered(id: string) {
@@ -1272,6 +1402,7 @@ export class ProjectRepository {
         this.names.project(id),
         this.#timeoutMs,
         (changed) => this.#metadataChanged(changed),
+        () => this.#saving(id),
       );
       const created: SessionRecord = {
         refs: 0,
@@ -1298,14 +1429,13 @@ export class ProjectRepository {
   }
 
   async #release(id: string, record: SessionRecord, session: ProjectSession) {
-    if (--record.refs > 0 || !savingPreferences(session.doc).local)
-      return session.durability();
+    if (--record.refs > 0 || !session.saving.local) return session.durability();
     if (this.#sessions.get(id) === record) this.#sessions.delete(id);
     return session.close();
   }
 
   #metadataChanged(session: ProjectSession) {
-    if (!savingPreferences(session.doc).local) this.#volatile.add(session.id);
+    if (!session.saving.local) this.#volatile.add(session.id);
     else this.#volatile.delete(session.id);
     if (this.#pendingImports.has(session.id)) return;
     const name = projectName(session.doc);
@@ -1326,7 +1456,7 @@ export class ProjectRepository {
     if (session.durability().status === "unsaved") return;
     const name = projectName(session.doc);
     if (name === undefined) return;
-    const saving = savingPreferences(session.doc);
+    const saving = session.saving;
     if (!saving.local) {
       const previous = await this.#catalog.get(session.id);
       if (previous?.registration === "registered")
@@ -1411,7 +1541,8 @@ export class ProjectRepository {
       this.#timeoutMs,
     );
     if (stored === undefined) return;
-    const { name, saving } = stored;
+    const { name } = stored;
+    const saving = await this.#saving(id);
     const { entry, written } = await this.#catalog.update(
       id,
       (entry) =>

@@ -1,17 +1,20 @@
 import { z } from "zod";
-import { DEFAULT_LINK_STYLE } from "./mind-map";
-import {
-  DEFAULT_COLOR_PREFERENCES,
-  LIMITS,
-  SavingPreferencesSchema,
-  DEFAULT_SAVING_PREFERENCES,
-  projectForest,
-  SCHEMA_VERSION,
-} from "./project-document";
+import { LIMITS, projectForest, SCHEMA_VERSION } from "./project-document";
 import type { ProjectDocument, DocumentView } from "./project-document";
 import { escapeLine } from "./outline-text";
-import { isNodeColor, isPickable } from "./node-colors";
+import { isNodeColor } from "./node-colors";
 import type { NodeColor } from "./node-colors";
+import {
+  LinkStyleSchema,
+  PickableColorSchema,
+  QuickColorsSchema,
+  SavingPreferencesSchema,
+} from "./preferences";
+import type {
+  ColorPreferences,
+  LinkStyle,
+  SavingPreferences,
+} from "./preferences";
 
 export const PROJECT_FILE_FORMAT = "mindgrab-project";
 // 5 added Tailwind shade colors and the map's color choices, 6 the space kept
@@ -47,9 +50,11 @@ export interface ProjectFile {
   version: typeof PROJECT_FILE_VERSION;
   project: { name: string; nodes: ProjectFileNode[] };
   preferences?: {
-    saving?: import("./project-document").SavingPreferences;
-    colors?: import("./project-document").ColorPreferences;
-    links?: import("./project-document").LinkStyle;
+    // Older backups say where the map was kept; maps now follow preferences.
+    saving?: SavingPreferences;
+    // How the map looked: its own preferences, or those for all maps.
+    colors?: ColorPreferences;
+    links?: LinkStyle;
     viewport?: { left: number; top: number; zoom: number };
     anchor?: { id: string; centerY: number };
   };
@@ -73,21 +78,10 @@ const ViewportSchema = z.strictObject({
   // The editor zooms out to 10% to fit large maps; backups keep that view.
   zoom: z.number().finite().min(0.1).max(2.5),
 });
-// White or a shade, each once, as the document requires.
-const PickableColor = z.custom<NodeColor>(
-  (value) => isNodeColor(value) && isPickable(value),
-  "Invalid color choice.",
-);
 const ColorsSchema = z.strictObject({
-  quick: z
-    .array(PickableColor)
-    .refine(
-      (quick) => new Set(quick).size === quick.length,
-      "Quick colors must be unique.",
-    ),
-  newIdeas: PickableColor,
+  quick: QuickColorsSchema,
+  newIdeas: PickableColorSchema,
 });
-const LinksSchema = z.enum(["freeform", "rounded", "square"]);
 const AnchorSchema = z.strictObject({
   id: z.string().min(1),
   centerY: z.number().finite(),
@@ -144,7 +138,7 @@ const PortableProjectSchema = z
       .strictObject({
         saving: SavingPreferencesSchema.optional(),
         colors: ColorsSchema.optional(),
-        links: LinksSchema.optional(),
+        links: LinkStyleSchema.optional(),
         viewport: ViewportSchema.optional(),
         anchor: AnchorSchema.optional(),
       })
@@ -208,9 +202,9 @@ export function projectFileFromContent(
 ): ProjectFile {
   const anchor = preferences?.anchor;
   const localPreferences = {
-    saving: content.saving,
-    colors: content.colors,
-    links: content.links,
+    // An older map that has not been opened since keeps them in its document.
+    ...(content.legacy?.colors && { colors: content.legacy.colors }),
+    ...(content.legacy?.links && { links: content.legacy.links }),
     ...preferences,
     // A deleted layout anchor is only a stale local preference.
     anchor:
@@ -306,9 +300,6 @@ export function prepareProjectImport(input: ProjectFile) {
     format: "mindgrab-loro-v1",
     schemaVersion: SCHEMA_VERSION,
     name: file.project.name,
-    saving: file.preferences?.saving ?? { ...DEFAULT_SAVING_PREFERENCES },
-    colors: file.preferences?.colors ?? DEFAULT_COLOR_PREFERENCES,
-    links: file.preferences?.links ?? DEFAULT_LINK_STYLE,
     roots: file.project.nodes.map((node) => ids.get(node.id)!),
     nodes,
   };

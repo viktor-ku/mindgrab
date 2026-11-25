@@ -28,7 +28,7 @@ export interface AnalyticsEvents {
   };
   project_imported: { idea_count: number; file_kb: number };
   project_list_opened: { project_count: number };
-  saving_changed: { local: boolean; cloud: boolean };
+  saving_changed: { local: boolean; cloud: boolean; scope: "map" | "global" };
   share_link_changed: { enabled: boolean };
   shared_project_viewed: Record<string, never>;
   idea_added: { kind: IdeaKind; depth: number; idea_count: number };

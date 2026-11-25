@@ -5,6 +5,7 @@ pub mod config;
 mod disguise;
 pub mod error;
 mod phpmyadmin;
+mod preferences;
 mod projects;
 
 use crate::{analytics::Analytics, auth::Auth, compute::Compute, config::Config, error::Result};
@@ -96,6 +97,8 @@ impl Backend {
             .route("/api/getProjectSnapshot.php", rpc("getProjectSnapshot"))
             .route("/api/getProjectState.php", rpc("getProjectState"))
             .route("/api/getShareLink.php", rpc("getShareLink"))
+            .route("/api/listPreferences.php", rpc("listPreferences"))
+            .route("/api/setPreferences.php", rpc("setPreferences"))
             .route(
                 "/ingest.php/{*path}",
                 get(analytics::ingest).post(analytics::ingest),

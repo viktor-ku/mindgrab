@@ -2,6 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 mod model;
+mod preferences;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -11,6 +12,7 @@ use loro::{
 };
 use loro_internal::cursor::{Cursor, Side};
 pub use model::*;
+pub use preferences::*;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -47,7 +49,6 @@ impl Project {
         meta.insert("format", FORMAT)?;
         meta.insert("schemaVersion", SCHEMA_VERSION)?;
         meta.insert("name", name)?;
-        meta.insert("saving", loro::loro_value!({"local": true, "cloud": true}))?;
         doc.commit();
         Self::bind(doc)
     }
@@ -90,26 +91,15 @@ impl Project {
         let doc = LoroDoc::new();
         let meta = doc.get_map("project");
         // Written from the validated view, so no earlier value or stray
-        // container comes along. Preferences a map never set stay unset.
+        // container comes along. Preferences are the owner's, not the map's:
+        // viewers get its connection style beside the snapshot. An older map
+        // that has not moved its own style into preferences yet still lends
+        // it, so viewers see the lines its owner chose.
         meta.insert("format", FORMAT)?;
         meta.insert("schemaVersion", SCHEMA_VERSION)?;
         meta.insert("name", view.name.as_str())?;
-        meta.insert(
-            "saving",
-            loro::loro_value!({"local": view.saving.local, "cloud": view.saving.cloud}),
-        )?;
-        let current = self.doc.get_map("project");
-        if current.get("colors").is_some() {
-            meta.insert(
-                "colors",
-                loro::LoroValue::from(serde_json::to_value(&view.colors)?),
-            )?;
-        }
-        if current.get("links").is_some() {
-            meta.insert(
-                "links",
-                loro::LoroValue::from(serde_json::to_value(view.links)?),
-            )?;
+        if let Some(links) = view.legacy.as_ref().and_then(|legacy| legacy.links) {
+            meta.insert("links", loro::LoroValue::from(serde_json::to_value(links)?))?;
         }
         let tree = doc.get_tree("nodes");
         tree.enable_fractional_index(8);
@@ -551,30 +541,13 @@ impl Project {
                 self.set_gap(node, GAP, gap.unwrap_or(0.0))?;
                 self.set_gap(node, END_GAP, end_gap.unwrap_or(0.0))?;
             }
-            Command::SetColors { quick, new_ideas } => {
-                origin = "preferences";
-                let next = ColorPreferences { quick, new_ideas };
-                validate_colors(&next)?;
-                let meta = self.doc.get_map("project");
-                let json = serde_json::to_value(&next)?;
-                if meta.get_deep_value().to_json_value()["colors"] != json {
-                    meta.insert("colors", loro::LoroValue::from(json))?;
-                }
-            }
-            Command::SetSaving { local, cloud } => {
+            Command::ForgetLegacyPreferences => {
                 origin = "preferences";
                 let meta = self.doc.get_map("project");
-                let next = loro::loro_value!({"local": local, "cloud": cloud});
-                if meta.get_deep_value().to_json_value()["saving"] != next.to_json_value() {
-                    meta.insert("saving", next)?;
-                }
-            }
-            Command::SetLinks { style } => {
-                origin = "preferences";
-                let meta = self.doc.get_map("project");
-                let json = serde_json::to_value(style)?;
-                if meta.get_deep_value().to_json_value()["links"] != json {
-                    meta.insert("links", loro::LoroValue::from(json))?;
+                for key in LEGACY_PREFERENCES {
+                    if meta.get(key).is_some() {
+                        meta.delete(key)?;
+                    }
                 }
             }
             Command::Undo => {
@@ -621,8 +594,8 @@ impl Project {
         let fields = meta
             .as_object()
             .ok_or_else(|| StateError::Invalid("Expected metadata".into()))?;
-        let required = ["format", "schemaVersion", "name", "saving"];
-        const OPTIONAL: [&str; 2] = ["colors", "links"];
+        let required = ["format", "schemaVersion", "name"];
+        const OPTIONAL: [&str; 3] = LEGACY_PREFERENCES;
         if required.iter().any(|key| !fields.contains_key(*key))
             || fields
                 .keys()
@@ -637,19 +610,28 @@ impl Project {
             .as_str()
             .ok_or_else(|| StateError::Invalid("Expected project name".into()))?;
         validate_name(name)?;
-        let saving: SavingPreferences = serde_json::from_value(meta["saving"].clone())?;
+        // Where a map was saved is a preference now; what older maps say is
+        // left unread.
+        if fields.contains_key("saving") {
+            serde_json::from_value::<LegacySaving>(meta["saving"].clone())?;
+        }
         let colors = match fields.get("colors") {
             Some(value) => {
                 let colors: ColorPreferences = serde_json::from_value(value.clone())?;
                 validate_colors(&colors)?;
-                colors
+                Some(colors)
             }
-            None => ColorPreferences::default(),
+            None => None,
         };
-        let links: LinkStyle = match fields.get("links") {
-            Some(value) => serde_json::from_value(value.clone())?,
-            None => LinkStyle::default(),
+        let links: Option<LinkStyle> = match fields.get("links") {
+            Some(value) => Some(serde_json::from_value(value.clone())?),
+            None => None,
         };
+        // Any of them, saving included, is still to be forgotten.
+        let legacy = LEGACY_PREFERENCES
+            .iter()
+            .any(|key| fields.contains_key(*key))
+            .then_some(LegacyPreferences { colors, links });
         let tree = self.tree();
         if live_nodes(&tree).len() > MAX_NODES {
             return Err(StateError::ResourceLimit);
@@ -726,9 +708,7 @@ impl Project {
             format: FORMAT.into(),
             schema_version: SCHEMA_VERSION,
             name: name.into(),
-            saving,
-            colors,
-            links,
+            legacy,
             roots,
             nodes,
         })
@@ -1112,16 +1092,21 @@ fn text_diff(old: &str, new: &str, caret: Option<usize>) -> (usize, usize, Strin
     )
 }
 
+/// The project metadata keys where older maps kept their colors, connection
+/// style and where they were saved.
+const LEGACY_PREFERENCES: [&str; 3] = ["colors", "links", "saving"];
+
+/// Where an older map was saved, still checked so a damaged one is refused.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct LegacySaving {
+    local: bool,
+    cloud: bool,
+}
+
 /// Quick colors and the new-idea color are white or shades, each once.
 fn validate_colors(colors: &ColorPreferences) -> Result<()> {
-    let mut seen = std::collections::HashSet::new();
-    if !colors.new_ideas.is_pickable()
-        || colors
-            .quick
-            .iter()
-            .any(|color| !color.is_pickable() || !seen.insert(*color))
-    {
-        return invalid("Invalid color preferences");
-    }
-    Ok(())
+    Preference::QuickColors(colors.quick.clone()).validate()?;
+    Preference::NewIdeaColor(colors.new_ideas).validate()
 }

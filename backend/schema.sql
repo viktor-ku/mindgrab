@@ -38,3 +38,23 @@ ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS share_token TEXT UNI
 -- history, which keeps deleted ideas and notes. Built when first viewed.
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_snapshot BYTEA;
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_revision BIGINT;
+-- How each account wants Mindgrab to work: how its maps look, where they are
+-- saved, and its answer about analytics. A preference is set for all of the
+-- account's maps (global) or for one map, whose own value wins. Scopes and
+-- names are plain text: Rust knows every one, checks each value against its
+-- name and the scopes it allows before it is stored, and skips a row it
+-- cannot read, so a new preference or scope needs no change here.
+CREATE TABLE IF NOT EXISTS mindgrab_loro.preferences (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),
+    scope TEXT NOT NULL,
+    -- The map a map preference is for. Not a reference to projects: a map
+    -- saved only in the browser has no row there, and its preferences still
+    -- follow the account.
+    project_id UUID,
+    name TEXT NOT NULL,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((scope = 'map') = (project_id IS NOT NULL)),
+    UNIQUE NULLS NOT DISTINCT (user_id, scope, project_id, name)
+);

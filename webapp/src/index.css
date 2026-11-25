@@ -259,6 +259,8 @@
 .quick-remove:focus-visible,
 .color-new-idea:focus-visible,
 .choice-card:has(:focus-visible),
+.scope-select:focus-visible,
+.scope-reset:focus-visible,
 .save-state:focus-visible,
 .saving-switch:focus-visible {
   outline: 2px solid var(--accent);
@@ -788,7 +790,7 @@ kbd {
   background: #e4dcff;
 }
 
-/* The Colors tab in project preferences: the whole tab is the map, with the
+/* The Colors tab in preferences: the whole tab is the map, with the
    style panel's color row and a new idea on it. Every color opens beside
    them only when asked for, and they stay where they are when it does: their
    place is worked out as if it were open. Too narrow for both side by side,
@@ -1294,7 +1296,7 @@ kbd {
 .dialog-center[data-size="small"] {
   width: min(26rem, calc(100vw - 2rem));
 }
-/* Project preferences: most of the window, with the map still showing
+/* Preferences: most of the window, with the map still showing
    around it. */
 .dialog-center[data-size="large"] {
   width: min(76rem, calc(100vw - 3rem));
@@ -1305,6 +1307,42 @@ kbd {
    that reads comfortably. */
 .preferences-body p {
   max-width: 42rem;
+}
+/* Which maps Colors and Connections apply to, above their heading. */
+.preferences-scope {
+  margin-bottom: 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--color-stone-100);
+}
+.scope-select {
+  height: 2rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--color-stone-200);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+.scope-select:hover {
+  border-color: var(--color-stone-300);
+}
+.scope-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.375rem;
+  color: var(--accent-deep);
+  font-weight: 500;
+  cursor: pointer;
+}
+.scope-reset:hover {
+  background: var(--accent-soft);
+}
+.scope-reset:active {
+  background: var(--pressed);
 }
 .preferences-nav .menu-item {
   font-size: 0.875rem;

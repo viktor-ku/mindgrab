@@ -4,7 +4,7 @@ import { press } from "./press";
 
 // "Accept all" has focus when the banner opens, so one click or Enter accepts.
 // "Decline" has the same size and style, as EU consent guidance requires.
-// The first visit is a forced choice between those two. Project preferences
+// The first visit is a forced choice between those two. Preferences
 // show the choice afterwards and change it.
 export function AnalyticsConsent() {
   let accept: HTMLButtonElement | undefined;

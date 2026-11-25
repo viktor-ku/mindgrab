@@ -26,7 +26,7 @@ fn text(project: &Project, id: &str) -> String {
 }
 
 #[test]
-fn commands_own_order_colors_positions_and_preferences() {
+fn commands_own_order_colors_and_positions() {
     let mut project = Project::new("Mindgrab").unwrap();
     let root = create(&mut project, None, "root");
     let first = create(&mut project, Some(&root), "first");
@@ -50,30 +50,11 @@ fn commands_own_order_colors_positions_and_preferences() {
             position: Some(Position { x: 12.5, y: -4.0 }),
         })
         .unwrap();
-    project
-        .apply(Command::SetSaving {
-            local: false,
-            cloud: true,
-        })
-        .unwrap();
-    assert_eq!(project.view().unwrap().links, LinkStyle::Rounded);
-    project
-        .apply(Command::SetLinks {
-            style: LinkStyle::Square,
-        })
-        .unwrap();
     let view = project.view().unwrap();
-    assert_eq!(view.links, LinkStyle::Square);
+    assert_eq!(view.legacy, None);
     assert_eq!(view.nodes[0].children, [second, first.clone()]);
     assert_eq!(view.nodes[2].color, Color::TEAL);
     assert_eq!(view.nodes[2].depth, 1);
-    assert_eq!(
-        view.saving,
-        SavingPreferences {
-            local: false,
-            cloud: true
-        }
-    );
     project
         .apply(Command::SetPosition {
             id: first,
@@ -180,7 +161,7 @@ fn delete_hides_subtree_and_undo_restores_it() {
 }
 
 #[test]
-fn undo_keeps_remote_edits_and_privacy_preferences() {
+fn undo_keeps_remote_edits() {
     let mut seed = Project::new("Undo").unwrap();
     let id = create(&mut seed, None, "middle");
     let snapshot = seed.snapshot().unwrap();
@@ -191,11 +172,6 @@ fn undo_keeps_remote_edits_and_privacy_preferences() {
         index: 0,
         delete_count: 0,
         insert: "local ".into(),
-    })
-    .unwrap();
-    left.apply(Command::SetSaving {
-        local: false,
-        cloud: false,
     })
     .unwrap();
     right
@@ -209,13 +185,6 @@ fn undo_keeps_remote_edits_and_privacy_preferences() {
     left.merge(&right.snapshot().unwrap()).unwrap();
     left.apply(Command::Undo).unwrap();
     assert_eq!(text(&left, &id), "middle remote");
-    assert_eq!(
-        left.view().unwrap().saving,
-        SavingPreferences {
-            local: false,
-            cloud: false
-        }
-    );
 }
 
 #[test]
@@ -518,17 +487,6 @@ fn share_snapshots_hold_only_the_current_map() {
         })
         .unwrap();
     project
-        .apply(Command::SetLinks {
-            style: LinkStyle::Square,
-        })
-        .unwrap();
-    project
-        .apply(Command::SetColors {
-            quick: vec![Color::shade("sky", 400).unwrap()],
-            new_ideas: Color::shade("rose", 200).unwrap(),
-        })
-        .unwrap();
-    project
         .apply(Command::Rename {
             name: "Plan".into(),
         })
@@ -544,4 +502,168 @@ fn share_snapshots_hold_only_the_current_map() {
         Project::from_snapshot(&shared).unwrap().view().unwrap(),
         project.view().unwrap()
     );
+}
+
+#[test]
+fn older_maps_report_their_colors_and_links_until_forgotten() {
+    let mut project = Project::new("Older").unwrap();
+    create(&mut project, None, "root");
+    let older = LoroDoc::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    let meta = older.get_map("project");
+    meta.insert(
+        "colors",
+        loro::LoroValue::from(
+            serde_json::json!({"quick": ["sky-400", "slate"], "newIdeas": "lime-200"}),
+        ),
+    )
+    .unwrap();
+    meta.insert("links", "square").unwrap();
+    meta.insert(
+        "saving",
+        loro::LoroValue::from(serde_json::json!({"local": false, "cloud": true})),
+    )
+    .unwrap();
+    older.commit();
+    let mut project = Project::from_snapshot(&older.export(ExportMode::Snapshot).unwrap()).unwrap();
+    // Viewers of a share link see the lines the owner chose, and nothing else
+    // the map kept.
+    let shared = Project::from_snapshot(&project.share_snapshot().unwrap()).unwrap();
+    assert_eq!(
+        shared.view().unwrap().legacy,
+        Some(LegacyPreferences {
+            colors: None,
+            links: Some(LinkStyle::Square),
+        })
+    );
+    assert_eq!(
+        project.view().unwrap().legacy,
+        Some(LegacyPreferences {
+            colors: Some(ColorPreferences {
+                quick: vec![Color::shade("sky", 400).unwrap(), Color::SLATE],
+                new_ideas: Color::shade("lime", 200).unwrap(),
+            }),
+            links: Some(LinkStyle::Square),
+        })
+    );
+    let forgotten = project.apply(Command::ForgetLegacyPreferences).unwrap();
+    assert!(forgotten.changed);
+    assert_eq!(project.view().unwrap().legacy, None);
+    let shared = Project::from_snapshot(&project.share_snapshot().unwrap()).unwrap();
+    assert_eq!(shared.view().unwrap().legacy, None);
+    // Forgetting is not an edit, so undo has nothing to bring back.
+    assert!(!project.can_undo());
+    assert!(
+        !project
+            .apply(Command::ForgetLegacyPreferences)
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn preferences_are_typed_by_name_and_checked() {
+    let row: PreferenceRow = serde_json::from_value(serde_json::json!({
+        "scope": "map",
+        "projectId": "6f1c2a1e-3b0a-4c55-9a6e-2f2c3c0f9b11",
+        "name": "linkStyle",
+        "value": "freeform",
+    }))
+    .unwrap();
+    assert_eq!(row.preference, Preference::LinkStyle(LinkStyle::Freeform));
+    assert!(row.validate().is_ok());
+    assert_eq!(
+        serde_json::to_value(&row).unwrap()["value"],
+        serde_json::json!("freeform")
+    );
+    // A value of the wrong type for its name does not parse.
+    assert!(
+        serde_json::from_value::<Preference>(serde_json::json!({
+            "name": "linkStyle",
+            "value": ["slate"],
+        }))
+        .is_err()
+    );
+    // Only white and shades are offered, each once.
+    let repeated = Preference::QuickColors(vec![Color::SLATE, Color::SLATE]);
+    assert!(repeated.validate().is_err());
+    assert!(Preference::NewIdeaColor(Color::TEAL).validate().is_err());
+    // A global preference names no map, and a map preference names its map.
+    let global = PreferenceTarget {
+        scope: PreferenceScope::Global,
+        project_id: Some("map".into()),
+        name: PreferenceName::LinkStyle,
+    };
+    assert!(global.validate().is_err());
+    let map = PreferenceTarget {
+        scope: PreferenceScope::Map,
+        project_id: None,
+        name: PreferenceName::LinkStyle,
+    };
+    assert!(map.validate().is_err());
+}
+
+#[test]
+fn where_older_maps_were_saved_is_only_forgotten() {
+    let project = Project::new("Older").unwrap();
+    let older = LoroDoc::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    older
+        .get_map("project")
+        .insert(
+            "saving",
+            loro::LoroValue::from(serde_json::json!({"local": true, "cloud": true})),
+        )
+        .unwrap();
+    older.commit();
+    let mut project = Project::from_snapshot(&older.export(ExportMode::Snapshot).unwrap()).unwrap();
+    // Nothing to adopt, but still something to forget.
+    assert_eq!(
+        project.view().unwrap().legacy,
+        Some(LegacyPreferences {
+            colors: None,
+            links: None
+        })
+    );
+    assert!(
+        project
+            .apply(Command::ForgetLegacyPreferences)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(project.view().unwrap().legacy, None);
+    // A damaged one is still refused.
+    let damaged = LoroDoc::from_snapshot(&project.snapshot().unwrap()).unwrap();
+    damaged
+        .get_map("project")
+        .insert("saving", "everywhere")
+        .unwrap();
+    damaged.commit();
+    assert!(Project::from_snapshot(&damaged.export(ExportMode::Snapshot).unwrap()).is_err());
+}
+
+#[test]
+fn consent_is_set_for_all_maps_only() {
+    let row: PreferenceRow = serde_json::from_value(serde_json::json!({
+        "scope": "map",
+        "projectId": "6f1c2a1e-3b0a-4c55-9a6e-2f2c3c0f9b11",
+        "name": "analyticsConsent",
+        "value": "granted",
+    }))
+    .unwrap();
+    assert!(row.validate().is_err());
+    let global = PreferenceRow {
+        scope: PreferenceScope::Global,
+        project_id: None,
+        ..row
+    };
+    assert!(global.validate().is_ok());
+    for (name, value) in [("saveLocally", false), ("saveInCloud", true)] {
+        let row: PreferenceRow = serde_json::from_value(serde_json::json!({
+            "scope": "map",
+            "projectId": "6f1c2a1e-3b0a-4c55-9a6e-2f2c3c0f9b11",
+            "name": name,
+            "value": value,
+        }))
+        .unwrap();
+        assert!(row.validate().is_ok());
+    }
 }

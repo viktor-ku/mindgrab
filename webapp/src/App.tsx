@@ -2,7 +2,7 @@ import { makeEventListener } from "@solid-primitives/event-listener";
 import { useKeyDownEvent } from "@solid-primitives/keyboard";
 import { debounce } from "@solid-primitives/scheduled";
 import { Dialog } from "./Dialog";
-import { ProjectPreferences } from "./ProjectPreferences";
+import { PreferencesDialog } from "./PreferencesDialog";
 import { ShareDialog } from "./ShareDialog";
 import { ExportImageDialog } from "./ExportImageDialog";
 import type { MapImageScope } from "./ExportImageDialog";
@@ -28,11 +28,7 @@ import {
   Show,
   untrack,
 } from "solid-js";
-import type {
-  ColorPreferences,
-  LinkStyle,
-  ProjectDocument,
-} from "./project-document";
+import type { ProjectDocument } from "./project-document";
 import { EditHistory } from "./undo-history";
 import {
   branchIds,
@@ -57,20 +53,41 @@ import {
   createSibling,
   DEFAULT_NODE_COLOR,
   deleteSubtree,
+  forgetLegacyPreferences,
   isPristineSeed,
   LIMITS,
   moveNode,
   ORIGIN,
   setNodeNote,
   renameProject,
-  setSavingPreferences,
   reorderNode,
-  setColorPreferences,
-  setLinkStyle,
   setNodeColor,
   translateSubtree,
 } from "./project-document";
 import { createProjectView } from "./project-view";
+import {
+  adoptLegacyPreferences,
+  applyPreferenceChanges,
+  colorPreferences,
+  levelRows,
+  NO_PREFERENCES,
+  preferenceRow,
+  resolvePreferences,
+  sameQuickColors,
+  savingOf,
+  syncAccountPreferences,
+} from "./preferences";
+import type {
+  ColorPreferences,
+  LegacyPreferences,
+  LinkStyle,
+  PreferenceChanges,
+  PreferenceLevel,
+  PreferenceLevels,
+  PreferenceName,
+  PreferenceScope,
+  SavingPreferences,
+} from "./preferences";
 import { bindTextarea, composing } from "./text-binding";
 import {
   ProjectRepository,
@@ -144,7 +161,14 @@ import {
 } from "./icons";
 import { searchNodes } from "./search";
 import { AccountControls } from "./AccountControls";
-import { consentOpen, identify, track } from "./analytics";
+import {
+  analyticsEnabled,
+  consent,
+  consentOpen,
+  identify,
+  setConsent,
+  track,
+} from "./analytics";
 import { AnalyticsConsent } from "./AnalyticsConsent";
 import { AuthSession } from "./auth-session";
 import type { SessionState } from "./auth-session";
@@ -585,8 +609,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   // is off or cannot run without an account. An anonymous map kept open under
   // an account never attaches to that account's cloud.
   const memoryOnly = () =>
-    !view().saving().local &&
-    (!view().saving().cloud ||
+    !saving().local &&
+    (!saving().cloud ||
       account().status !== "authenticated" ||
       activeOwner() !== workspace());
   let handleRepository = repository;
@@ -1400,7 +1424,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [storageMessage, setStorageMessage] = createSignal("");
   const saveDot = () =>
     saveIndicator({
-      local: view().saving().local && storageReady(),
+      local: saving().local && storageReady(),
       localStatus: localSave.status(),
       cloud: cloudStatus(),
       recovering: recoveryPending(),
@@ -1427,7 +1451,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     on(
       localSave.status,
       (status) => {
-        if (status === "done" && view().saving().local) setStorageMessage("");
+        if (status === "done" && saving().local) setStorageMessage("");
       },
       { defer: true },
     ),
@@ -1509,6 +1533,226 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const view = () => session().view;
   const forest = () => view().forest();
 
+  // How the open map looks and where it is kept: what it sets for itself,
+  // else what is set for all maps. They belong to the repository that owns
+  // the map, and an account's also sync with the cloud. See preferences.ts.
+  const preferencesKey = (owner: ProjectRepository) =>
+    ["preferences", owner.names.catalog] as const;
+  const preferencesSyncKey = (owner: ProjectRepository) =>
+    ["preferences-sync", owner.names.catalog] as const;
+  const preferenceQuery = createQuery(() => {
+    const owner = activeOwner();
+    const id = doc().id;
+    return {
+      queryKey: [...preferencesKey(owner), id],
+      queryFn: () => owner.preferences.levels(id),
+      // The previous values stand in while these load, so the canvas is
+      // never suspended (see keepList).
+      placeholderData: (previous?: PreferenceLevels) =>
+        previous ?? NO_PREFERENCES,
+    };
+  });
+  // Changes from other tabs, and from the cloud, come through the repository.
+  createEffect(() => {
+    const owner = activeOwner();
+    onCleanup(
+      owner.onPreferenceChange(
+        () =>
+          void queryClient.invalidateQueries({
+            queryKey: preferencesKey(owner),
+          }),
+      ),
+    );
+  });
+  const preferenceLevels = () => preferenceQuery.data ?? NO_PREFERENCES;
+  const preferences = createMemo(() => resolvePreferences(preferenceLevels()));
+  const saving = () => savingOf(preferences());
+  // The signed-in account's own repository sends what changed here and takes
+  // what changed elsewhere; again on focus and when back online.
+  const syncedAccount = (owner: ProjectRepository) => {
+    const state = account();
+    const userId =
+      state.status === "authenticated" ? state.user?.id : undefined;
+    return userId !== undefined &&
+      owner.scope.namespace === accountNamespace(userId)
+      ? userId
+      : undefined;
+  };
+  createQuery(() => {
+    const owner = activeOwner();
+    const userId = syncedAccount(owner);
+    return {
+      queryKey: [...preferencesSyncKey(owner), userId ?? null],
+      queryFn: async ({ signal }: { signal: AbortSignal }) => {
+        if (userId === undefined) return false;
+        await syncAccountPreferences(
+          owner.preferences,
+          new LoroApi(undefined, undefined, userId, queryClient),
+          signal,
+          analyticsEnabled ? untrack(consent) : "pending",
+        );
+        return true;
+      },
+      enabled: userId !== undefined,
+      // Quick retries, then focus and reconnect take over.
+      retry: (count, error) =>
+        count < QUICK_RETRIES &&
+        !(error instanceof SyncError && error.kind === "auth"),
+      retryDelay: saveRetryDelay,
+      refetchOnWindowFocus: true,
+      refetchOnReconnect: true,
+    };
+  });
+  const refreshPreferences = (owner: ProjectRepository) =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: preferencesKey(owner) }),
+      queryClient.invalidateQueries({ queryKey: preferencesSyncKey(owner) }),
+    ]);
+  // Shows changes at once, before they are stored.
+  async function showPreferenceChanges(
+    owner: ProjectRepository,
+    projectId: string,
+    changes: PreferenceChanges,
+  ) {
+    const queryKey = [...preferencesKey(owner), projectId];
+    await queryClient.cancelQueries({ queryKey });
+    queryClient.setQueryData<PreferenceLevels>(queryKey, (levels) =>
+      applyPreferenceChanges(levels ?? NO_PREFERENCES, projectId, changes),
+    );
+  }
+  const preferenceMutation = createMutation(() => ({
+    mutationKey: ["preferences", "change"],
+    scope: { id: "preferences" },
+    mutationFn: ({
+      owner,
+      changes,
+    }: {
+      owner: ProjectRepository;
+      projectId: string;
+      changes: PreferenceChanges;
+    }) => owner.preferences.change(changes),
+    onMutate: ({ owner, projectId, changes }) =>
+      showPreferenceChanges(owner, projectId, changes),
+    onError: () =>
+      setStorageMessage(
+        "Could not save this preference. Free up browser storage and retry.",
+      ),
+    onSettled: (_data, _error, { owner }) => refreshPreferences(owner),
+  }));
+  function changePreferences(changes: PreferenceChanges) {
+    preferenceMutation.mutate({
+      owner: activeOwner(),
+      projectId: doc().id,
+      changes,
+    });
+  }
+  // An older map keeps preferences in its document; they become its own the
+  // first time it opens.
+  const legacyMutation = createMutation(() => ({
+    mutationKey: ["preferences", "legacy"],
+    scope: { id: "preferences" },
+    mutationFn: ({
+      owner,
+      current,
+      legacy,
+    }: {
+      owner: ProjectRepository;
+      current: ProjectDocument;
+      legacy: LegacyPreferences;
+    }) =>
+      adoptLegacyPreferences(owner.preferences, current.id, legacy, () => {
+        if (current.ready) forgetLegacyPreferences(current);
+      }),
+    onSettled: (_data, _error, { owner }) => refreshPreferences(owner),
+  }));
+  createEffect(
+    on(
+      () => [view().legacy(), activeOwner()] as const,
+      ([legacy, owner]) => {
+        if (legacy) legacyMutation.mutate({ owner, current: doc(), legacy });
+      },
+    ),
+  );
+  // The answer about analytics follows a signed-in account: one given on
+  // another device applies here, and one given here goes to the account.
+  // Signed out, the cookie keeps it.
+  createEffect(() => {
+    const owner = activeOwner();
+    if (!analyticsEnabled || preferenceQuery.isPlaceholderData) return;
+    if (syncedAccount(owner) === undefined) return;
+    const stored = preferenceLevels().global.analyticsConsent;
+    const chosen = untrack(consent);
+    // Where the account has no answer yet, the preference sync gives it the
+    // cookie's.
+    if (stored && stored !== chosen) setConsent(stored);
+  });
+  createEffect(
+    on(
+      consent,
+      (chosen) => {
+        const owner = untrack(activeOwner);
+        if (chosen === "pending" || syncedAccount(owner) === undefined) return;
+        if (untrack(preferenceLevels).global.analyticsConsent !== chosen)
+          changePreferences({
+            set: [preferenceRow("global", null, "analyticsConsent", chosen)],
+          });
+      },
+      { defer: true },
+    ),
+  );
+  // Which maps the preferences dialog's Saving, Colors and Connections edit,
+  // and the values it shows for them.
+  const [preferenceScope, setPreferenceScope] =
+    createSignal<PreferenceScope>("map");
+  const scopedPreferences = () =>
+    preferenceScope() === "map"
+      ? preferences()
+      : resolvePreferences({ global: preferenceLevels().global, map: {} });
+  function setScopedPreferences(level: PreferenceLevel) {
+    const scope = preferenceScope();
+    const set = levelRows(scope, scope === "map" ? doc().id : null, level);
+    if (set.length) changePreferences({ set });
+  }
+  // Only what changed is set, so a map can keep following the other one.
+  function setColors(value: ColorPreferences) {
+    const current = colorPreferences(scopedPreferences());
+    setScopedPreferences({
+      ...(!sameQuickColors(value.quick, current.quick) && {
+        quickColors: value.quick,
+      }),
+      ...(value.newIdeas !== current.newIdeas && {
+        newIdeaColor: value.newIdeas,
+      }),
+    });
+  }
+  function setLinks(style: LinkStyle) {
+    setScopedPreferences({ linkStyle: style });
+  }
+  // The map stops setting these itself and follows the settings for all maps.
+  function resetMapPreferences(names: PreferenceName[]) {
+    changePreferences({
+      clear: names.map((name) => ({
+        scope: "map",
+        projectId: doc().id,
+        name,
+      })),
+    });
+  }
+  // The style panel adds to the quick colors where the map's come from.
+  function addQuickColor(color: NodeColor) {
+    const own = preferenceLevels().map.quickColors !== undefined;
+    changePreferences({
+      set: [
+        preferenceRow(
+          own ? "map" : "global",
+          own ? doc().id : null,
+          "quickColors",
+          [...preferences().quickColors, color],
+        ),
+      ],
+    });
+  }
+
   // The map on screen while it is still the seed every map starts from. Node
   // edits change no catalog entry, so this memo on the live doc, not a catalog
   // event, is what re-evaluates the migration candidates.
@@ -1530,8 +1774,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         },
       ],
       view().name(),
-      view().colors(),
-      view().links(),
+      Object.keys(preferenceLevels().map).length > 0 || !!view().legacy(),
     );
   });
   // Set once the cloud lookup has said the account has no maps at all: the
@@ -1619,6 +1862,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       queryFn: async ({ signal }) => {
         if (!userId || !source) return 0;
         const api = new LoroApi(undefined, undefined, userId, queryClient);
+        // A copy takes the account's preferences for all maps where they
+        // match its own, so they must be the account's, not just this
+        // browser's: a later pull could otherwise move a map kept out of
+        // the cloud into it.
+        await destination.preferences.sync(api, signal);
         let total = 0;
         for (;;) {
           const open = untrack(() => {
@@ -1813,7 +2061,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const [projectNameDraft, setProjectNameDraft] = createSignal<string>();
   const [showLoad, setShowLoad] = createSignal(false);
   const [showExport, setShowExport] = createSignal(false);
-  // Project preferences live in the address, `?preferences=true&tab=colors`,
+  // Preferences live in the address, `?preferences=true&tab=colors`,
   // so a reload or a link opens them again and Back closes them. The editor
   // route's search is typed by its schema (see app-search.ts).
   const router = useRouter();
@@ -1878,7 +2126,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       (open) => {
         if (open || !returnToShare) return;
         returnToShare = false;
-        if (view().saving().cloud) setShowShare(true);
+        if (saving().cloud) setShowShare(true);
       },
       { defer: true },
     ),
@@ -1905,31 +2153,44 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     savingMutation.error
       ? `Could not finish updating storage: ${savingMutation.error.message || "Please retry."} Existing copies may remain.`
       : "";
-  async function performChangeSaving(
-    value: import("./project-document").SavingPreferences,
-  ) {
-    const handle = activeHandle;
-    const owner = handleRepository;
-    // On the placeholder a switch is an edit like any other: the placeholder
-    // becomes the map, and the map that was opening stays in the list, its
-    // own switches untouched.
-    if (!handle) {
-      setSavingPreferences(doc(), value);
-      return;
-    }
+  // The Saving section's switches, for this map or for all maps. Only what
+  // changed is set, so a map can keep following the other switch.
+  async function performChangeSaving(value: SavingPreferences) {
+    const owner = activeOwner();
+    const projectId = doc().id;
+    const scope = preferenceScope();
+    const current = savingOf(scopedPreferences());
+    const changes = {
+      set: levelRows(scope, scope === "map" ? projectId : null, {
+        ...(value.local !== current.local && { saveLocally: value.local }),
+        ...(value.cloud !== current.cloud && { saveInCloud: value.cloud }),
+      }),
+    };
+    await showPreferenceChanges(owner, projectId, changes);
     try {
-      await owner.updateSaving(handle, value);
-      track("saving_changed", { local: value.local, cloud: value.cloud });
-      if (!value.cloud && !cloud && (await owner.cloudAttempted(handle.id)))
-        setCloudStatus({
-          status: "auth",
-          message:
-            "Cloud deletion pending. Sign in again and reconnect to delete the existing cloud copy. Keep this tab open.",
-        });
-      cloud?.retry();
-    } catch (error) {
-      if (handle === activeHandle) throw error;
+      // Stored, every open map takes up where it is now kept.
+      await owner.preferences.change(changes);
+    } finally {
+      await refreshPreferences(owner);
     }
+    const handle = activeHandle;
+    if (!handle || handleRepository !== owner) return;
+    track("saving_changed", {
+      local: handle.saving.local,
+      cloud: handle.saving.cloud,
+      scope,
+    });
+    if (
+      !handle.saving.cloud &&
+      !cloud &&
+      (await owner.cloudAttempted(handle.id))
+    )
+      setCloudStatus({
+        status: "auth",
+        message:
+          "Cloud deletion pending. Sign in again and reconnect to delete the existing cloud copy. Keep this tab open.",
+      });
+    cloud?.retry();
   }
   const fileBusy = () => importMutation.isPending || exportMutation.isPending;
 
@@ -2637,13 +2898,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
             )
       }
       scope={colorScope()}
-      quick={view().colors().quick}
-      onAddQuick={(color) =>
-        setColors({
-          ...view().colors(),
-          quick: [...view().colors().quick, color],
-        })
-      }
+      quick={preferences().quickColors}
+      onAddQuick={addQuickColor}
       onManage={() => openPreferences("colors")}
       onScope={(scope, e) => {
         setColorScope(scope);
@@ -2734,7 +2990,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const imageSignature = createMemo(() => {
     if (!showImage()) return "";
     const text = JSON.stringify([
-      view().links() ?? null,
+      preferences().linkStyle,
       imageHead() ?? null,
       imageIds().map((id) => {
         const node = positionedNodes().get(id);
@@ -2877,7 +3133,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
   const stylePanelHeight = () =>
     118 +
     Math.min(
-      38 * Math.ceil((view().colors().quick.length + 1) / 6),
+      38 * Math.ceil((preferences().quickColors.length + 1) / 6),
       0.3 * canvasSize().height,
     );
   // Every color opens beside the style panel while there is room for it
@@ -3026,7 +3282,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               if (entry.text.length > LIMITS.text) shortened = true;
               const init = {
                 text: entry.text.slice(0, LIMITS.text),
-                color: entry.color ?? view().colors().newIdeas,
+                color: entry.color ?? preferences().newIdeaColor,
               };
               const id = under
                 ? createChild(doc, under, init)
@@ -3305,10 +3561,11 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         queryFn: () => target.list(),
       });
       const name = generateProjectName(projects.map((project) => project.name));
+      // A new map keeps itself where maps are kept: it follows the
+      // preferences for all maps.
       const handle = await target.create({
         name,
         root: { text: "New idea" },
-        saving: view().saving(),
       });
       if (!(await activateCreated(handle, target))) return;
       if (target !== repository || disposed) return;
@@ -3350,8 +3607,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       await localSave.save();
       if (handleRepository !== owner || activeHandle !== handle || disposed)
         return;
-      track("project_saved", { local: view().saving().local });
-      if (view().saving().local) {
+      track("project_saved", { local: saving().local });
+      if (saving().local) {
         setStorageMessage("");
         showNotice({ message: "Saved locally" });
       } else
@@ -3475,6 +3732,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     try {
       const name = view().name();
       const json = exportProjectDocument(session().doc, {
+        colors: colorPreferences(preferences()),
+        links: preferences().linkStyle,
         viewport: { left: left(), top: top(), zoom: zoom() },
         ...(mapAnchor() && { anchor: mapAnchor() }),
       });
@@ -3510,14 +3769,21 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         await adoptDraft(owner);
         if (owner !== repository || disposed) return;
       }
-      const handle = await owner.importContent({
-        ...content,
-        saving: preferences?.saving ?? view().saving(),
-      });
+      const handle = await owner.importContent(content);
       if (owner !== repository || disposed) {
         await handle.close();
         return;
       }
+      // The backup's colors and connection style become the new map's own.
+      const look = levelRows("map", handle.id, {
+        ...(preferences?.colors && {
+          quickColors: preferences.colors.quick,
+          newIdeaColor: preferences.colors.newIdeas,
+        }),
+        ...(preferences?.links && { linkStyle: preferences.links }),
+      });
+      if (look.length)
+        await owner.preferences.change({ set: look }).catch(() => {});
       if (preferences)
         await owner
           .setPreference(`project/${handle.id}/view`, {
@@ -3748,7 +4014,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
           : undefined;
     const init = {
       text: "New idea",
-      color: view().colors().newIdeas,
+      color: preferences().newIdeaColor,
       ...(position && { position }),
       ...(siblings && { fill: newIdeaSpace(siblings.length + 1) }),
     };
@@ -3997,16 +4263,6 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     canvas.focus({ preventScroll: true });
   }
 
-  // The map's quick colors and new-idea color: preferences, not undoable.
-  function setColors(value: ColorPreferences) {
-    command((doc) => setColorPreferences(doc, value));
-  }
-
-  // How the map draws lines to children: a preference, not undoable.
-  function setLinks(value: LinkStyle) {
-    command((doc) => setLinkStyle(doc, value));
-  }
-
   // Colors every selected idea, or every selected branch, as one undo step.
   function colorSelectedNode(color: NodeColor) {
     if (!selectedRoots().length || writing()) return;
@@ -4214,8 +4470,8 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       if (
         repository.hasMemoryOnlyProjects() ||
         anonymousRepo()?.hasMemoryOnlyProjects() ||
-        (!view().saving().local &&
-          (!view().saving().cloud || cloudStatus()?.status !== "saved"))
+        (!saving().local &&
+          (!saving().cloud || cloudStatus()?.status !== "saved"))
       )
         return "A map with local saving off is not saved anywhere else yet.";
     };
@@ -4912,16 +5168,20 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       class="map-canvas overflow-clip w-screen h-screen text-stone-900 relative touch-none select-none outline-none"
       style={{ cursor: panning() || draggingId() ? "grabbing" : "grab" }}
     >
-      <ProjectPreferences
+      <PreferencesDialog
         open={showPreferences()}
         onClose={closePreferences}
         section={preferencesTab()}
         onSection={setPreferencesTab}
-        colors={view().colors()}
+        scope={preferenceScope()}
+        onScope={setPreferenceScope}
+        colors={colorPreferences(scopedPreferences())}
         onColors={setColors}
-        links={view().links()}
+        links={scopedPreferences().linkStyle}
         onLinks={setLinks}
-        saving={view().saving()}
+        own={preferenceLevels().map}
+        onReset={resetMapPreferences}
+        saving={savingOf(scopedPreferences())}
         onChange={(value) => {
           if (!savingMutation.isPending) savingMutation.mutate(value);
         }}
@@ -4958,7 +5218,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         ownerId={
           account().status === "authenticated" ? account().user?.id : undefined
         }
-        cloud={view().saving().cloud}
+        cloud={saving().cloud}
         onOpenPreferences={() => {
           returnToShare = true;
           setShowShare(false);
@@ -5168,7 +5428,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                   setShowPreferences(true);
                 })}
               >
-                Project preferences…
+                Preferences…
               </button>
             </fieldset>
           </div>
@@ -5836,7 +6096,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         <MapLinks
           ids={nodeIds()}
           connection={(id) => connections().get(id)}
-          style={view().links()}
+          style={preferences().linkStyle}
           color={(connection) =>
             shownColor(connection.to.id, connection.to.color)
           }
@@ -5923,7 +6183,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
               connection={(id) =>
                 id === imageHead() ? undefined : connections().get(id)
               }
-              style={view().links()}
+              style={preferences().linkStyle}
               color={(connection) =>
                 shownColor(connection.to.id, connection.to.color)
               }
@@ -6442,7 +6702,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
                 }),
               )}
             >
-              Project preferences…
+              Preferences…
             </button>
             <button
               type="button"
@@ -6471,7 +6731,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
         }}
         problems={saveProblems()}
         safeInBrowser={
-          view().saving().local &&
+          saving().local &&
           storageReady() &&
           !localSave.message() &&
           !recoveryPending()

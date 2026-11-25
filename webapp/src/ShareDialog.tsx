@@ -127,7 +127,7 @@ export function ShareDialog(props: {
                 class="map-control outlined mt-2"
                 {...press(props.onOpenPreferences)}
               >
-                Open project preferences
+                Open preferences
               </button>
             </Show>
           </div>

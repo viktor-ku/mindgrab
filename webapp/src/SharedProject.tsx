@@ -567,7 +567,7 @@ export function SharedProject(props: { token: string }) {
           <MapLinks
             ids={nodeIds()}
             connection={(id) => connections().get(id)}
-            style={view()?.links()}
+            style={snapshot.data?.linkStyle}
             color={(connection) => connection.to.color}
           />
           <For each={nodeIds()}>

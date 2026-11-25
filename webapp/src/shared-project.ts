@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { backendEndpoint } from "./backend";
+import { DEFAULT_LINK_STYLE } from "./mind-map";
+import { LinkStyleSchema } from "./preferences";
 
 // Anyone holding a project's share link may view it. These requests carry no
 // session or account, so viewing never touches the viewer's own projects.
@@ -10,6 +12,8 @@ const shared = z.object({
   revision: z.string().regex(/^(0|[1-9][0-9]*)$/),
   encoding: z.literal("loro-snapshot"),
   data: z.string(),
+  // How the owner chose to draw this map's lines.
+  linkStyle: LinkStyleSchema.catch(DEFAULT_LINK_STYLE),
 });
 export type SharedSnapshot = z.infer<typeof shared>;
 
