@@ -226,25 +226,38 @@ test("an older map's colors become its own, unless it already has them", async (
   });
 });
 
-test("a copied map takes its original's own preferences", async () => {
+test("a copied map keeps what it used, even from the preferences for all maps", async () => {
   const from = local();
   const cloud = new Cloud();
   const to = synced();
   await from.change({
     set: [
       preferenceRow("global", null, "linkStyle", "square"),
+      preferenceRow("global", null, "saveInCloud", false),
+      preferenceRow("global", null, "newIdeaColor", "sky-200"),
+      preferenceRow("global", null, "analyticsConsent", "granted"),
       preferenceRow("map", MAP, "quickColors", ["slate", "sky-400"]),
+      preferenceRow("map", MAP, "linkStyle", "rounded"),
     ],
   });
+  // Where it goes, new ideas already start sky-200.
+  await to.change({
+    set: [preferenceRow("global", null, "newIdeaColor", "sky-200")],
+  });
   await copyMapPreferences(from, MAP, to, "copy");
-  expect(await to.levels("copy")).toEqual({
-    global: {},
-    map: { quickColors: ["slate", "sky-400"] },
+  expect((await to.levels("copy")).map).toEqual({
+    quickColors: ["slate", "sky-400"],
+    linkStyle: "rounded",
+    saveInCloud: false,
+  });
+  expect(savingOf(resolvePreferences(await to.levels("copy")))).toEqual({
+    local: true,
+    cloud: false,
   });
   await to.sync(api(cloud), signal());
-  expect([...cloud.rows.values()]).toEqual([
-    preferenceRow("map", "copy", "quickColors", ["slate", "sky-400"]),
-  ]);
+  expect([...cloud.rows.values()]).toContainEqual(
+    preferenceRow("map", "copy", "saveInCloud", false),
+  );
 });
 
 test("where each map is kept resolves from one read, and consent is never a map's", async () => {

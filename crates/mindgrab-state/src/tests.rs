@@ -525,6 +525,16 @@ fn older_maps_report_their_colors_and_links_until_forgotten() {
     .unwrap();
     older.commit();
     let mut project = Project::from_snapshot(&older.export(ExportMode::Snapshot).unwrap()).unwrap();
+    // Viewers of a share link see the lines the owner chose, and nothing else
+    // the map kept.
+    let shared = Project::from_snapshot(&project.share_snapshot().unwrap()).unwrap();
+    assert_eq!(
+        shared.view().unwrap().legacy,
+        Some(LegacyPreferences {
+            colors: None,
+            links: Some(LinkStyle::Square),
+        })
+    );
     assert_eq!(
         project.view().unwrap().legacy,
         Some(LegacyPreferences {
@@ -538,6 +548,8 @@ fn older_maps_report_their_colors_and_links_until_forgotten() {
     let forgotten = project.apply(Command::ForgetLegacyPreferences).unwrap();
     assert!(forgotten.changed);
     assert_eq!(project.view().unwrap().legacy, None);
+    let shared = Project::from_snapshot(&project.share_snapshot().unwrap()).unwrap();
+    assert_eq!(shared.view().unwrap().legacy, None);
     // Forgetting is not an edit, so undo has nothing to bring back.
     assert!(!project.can_undo());
     assert!(

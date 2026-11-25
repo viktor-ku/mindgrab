@@ -985,6 +985,7 @@ export class ProjectRepository {
       },
       {
         synced: options.namespace !== ANONYMOUS_NAMESPACE,
+        lock: `${this.names.catalog}/preferences`,
         onChange: async () => {
           this.#channel?.postMessage("preferences");
           await this.#applyPreferences();
@@ -1034,6 +1035,9 @@ export class ProjectRepository {
 
   // Seeds only an explicitly new UUID, and registers it after the seed commits.
   async create({ id = crypto.randomUUID(), name, root, saving }: NewProject) {
+    // Checked before the new map's saving is stored, so a rejected create
+    // leaves an existing map's preferences alone.
+    if (saving && (await this.#exists(id))) throw new ProjectExistsError(id);
     if (saving)
       await this.preferences.change({
         set: levelRows("map", id, {
@@ -1054,18 +1058,21 @@ export class ProjectRepository {
     });
   }
 
+  // Whether a map with this id is open here or stored in this browser.
+  async #exists(id: string) {
+    if (this.#sessions.has(id)) return true;
+    const existing = await openDatabase(
+      this.names.project(id),
+      this.#timeoutMs,
+    );
+    existing?.close();
+    return !!existing;
+  }
+
   async #createFromSeed(id: string, seed: ProjectDocument, importing = false) {
     if (!(await this.#saving(id)).local) {
       try {
-        if (this.#sessions.has(id)) throw new ProjectExistsError(id);
-        const existing = await openDatabase(
-          this.names.project(id),
-          this.#timeoutMs,
-        );
-        if (existing) {
-          existing.close();
-          throw new ProjectExistsError(id);
-        }
+        if (await this.#exists(id)) throw new ProjectExistsError(id);
         const handle = await this.#acquire(id, seed.snapshot());
         await handle.refreshMetadata();
         this.#latest = id;

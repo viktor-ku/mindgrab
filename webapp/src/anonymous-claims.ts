@@ -32,10 +32,12 @@ export interface OpenClaim extends OpenCandidate {
 // A map that cannot be read is not known to be empty, so it stays a candidate.
 async function pristine(source: ProjectRepository, id: string) {
   try {
-    const own = (await source.preferences.levels(id)).map;
     const handle = await source.open(id, { remember: false });
     try {
       const state = readProject(handle.doc);
+      // Read after the document: adopting an older map's preferences in
+      // another tab stores them before the document forgets its own copy.
+      const own = (await source.preferences.levels(id)).map;
       return (
         state.status === "ready" &&
         isPristineSeed(
@@ -209,9 +211,9 @@ export async function claimAnonymousProjects(
           if (view !== undefined)
             await destination.setPreference(`project/${targetId}/view`, view);
           signal.throwIfAborted();
-          // The copy belongs to the account, so what the map set for itself,
-          // such as its colors or staying out of the cloud, becomes the
-          // account's for it.
+          // The copy belongs to the account, so what the map used, such as
+          // its colors or staying out of the cloud, becomes the account's for
+          // it, even where it came from the preferences for all maps here.
           await copyMapPreferences(
             source.preferences,
             entry.id,

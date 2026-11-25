@@ -148,14 +148,22 @@ pub async fn resolve<T: serde::de::DeserializeOwned>(
     owner: i64,
     project_id: Uuid,
     name: PreferenceName,
+    // What the map set for itself before preferences, kept in its document:
+    // it counts as the map's own value until a row replaces it.
+    legacy: Option<T>,
 ) -> Result<Option<T>> {
-    let value: Option<Value> = sqlx::query_scalar(
-        "SELECT value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3::text::mindgrab_loro.preference_name AND (scope='global' OR project_id=$2) ORDER BY scope DESC LIMIT 1",
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT scope::text, value FROM mindgrab_loro.preferences WHERE user_id=$1 AND name=$3::text::mindgrab_loro.preference_name AND (scope='global' OR project_id=$2) ORDER BY scope DESC",
     )
     .bind(owner)
     .bind(project_id)
     .bind(name_text(name))
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+    let value = |scope: &str| {
+        rows.iter()
+            .find(|(row, _)| row == scope)
+            .and_then(|(_, value)| serde_json::from_value(value.clone()).ok())
+    };
+    Ok(value("map").or(legacy).or_else(|| value("global")))
 }

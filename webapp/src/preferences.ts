@@ -274,17 +274,22 @@ export class PreferenceStore {
   // An account's store marks its changes until the cloud has them.
   readonly synced: boolean;
   readonly #onChange?: () => unknown;
+  // Names the browser lock that keeps tabs sharing this storage from syncing
+  // at once.
+  readonly #lock?: string;
 
   constructor(
     storage: PreferenceStorage,
     {
       synced = false,
       onChange,
-    }: { synced?: boolean; onChange?: () => unknown } = {},
+      lock,
+    }: { synced?: boolean; onChange?: () => unknown; lock?: string } = {},
   ) {
     this.storage = storage;
     this.synced = synced;
     this.#onChange = onChange;
+    this.#lock = lock;
   }
 
   async #read<Name extends PreferenceName>(target: PreferenceTarget) {
@@ -350,8 +355,16 @@ export class PreferenceStore {
 
   // Sends the changes the cloud has not saved, then takes the cloud's values
   // for everything this browser has not changed since.
+  // One tab syncs at a time: another's send could otherwise land after this
+  // one's newer value, and its pull replace it here.
   async sync(api: LoroApi, signal: AbortSignal) {
     if (!this.synced) return;
+    const locks = globalThis.navigator?.locks;
+    if (!this.#lock || !locks) return this.#sync(api, signal);
+    await locks.request(this.#lock, { signal }, () => this.#sync(api, signal));
+  }
+
+  async #sync(api: LoroApi, signal: AbortSignal) {
     const local = new Map<string, Stored & { target: PreferenceTarget }>();
     for (const [key, value] of await this.storage.list(PREFIX)) {
       const entry = stored(value);
@@ -410,14 +423,28 @@ export class PreferenceStore {
   }
 }
 
-// Gives a copied map the preferences its original set for itself.
+// Gives a copied map what its original used: what it set for itself, and
+// each value it took from the preferences for all maps there that the ones
+// where it goes would change. It keeps its look, and stays out of the cloud
+// when it was.
 export async function copyMapPreferences(
   from: PreferenceStore,
   fromId: string,
   to: PreferenceStore,
   toId: string,
 ) {
-  const set = levelRows("map", toId, (await from.levels(fromId)).map);
+  const source = await from.levels(fromId);
+  const used = resolvePreferences(source);
+  const there = resolvePreferences({ ...(await to.levels()), map: {} });
+  const own: PreferenceLevel = {};
+  for (const name of PREFERENCE_NAMES) {
+    // Consent is the person's, never a map's.
+    if (name === "analyticsConsent") continue;
+    const value = source.map[name] ?? used[name];
+    if (source.map[name] !== undefined || !sameValue(value, there[name]))
+      Object.assign(own, { [name]: value });
+  }
+  const set = levelRows("map", toId, own);
   if (set.length) await to.change({ set });
 }
 

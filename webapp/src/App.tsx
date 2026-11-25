@@ -1577,7 +1577,7 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
       ? userId
       : undefined;
   };
-  createQuery(() => {
+  const preferenceSync = createQuery(() => {
     const owner = activeOwner();
     const userId = syncedAccount(owner);
     return {
@@ -1675,7 +1675,17 @@ export function App(props: { onDocument?: (doc: ProjectDocument) => void }) {
     const stored = preferenceLevels().global.analyticsConsent;
     const chosen = untrack(consent);
     if (stored && stored !== chosen) setConsent(stored);
-    else if (!stored && chosen !== "pending")
+    // The cookie's answer becomes the account's only once the account's own
+    // is known to be missing: after its first pull here, and the read that
+    // follows it. Offline, or while that pull fails, the cookie keeps
+    // deciding for this browser and the account keeps what it has. An answer
+    // given meanwhile goes to the account at once (below).
+    else if (
+      !stored &&
+      chosen !== "pending" &&
+      preferenceSync.isSuccess &&
+      !preferenceQuery.isFetching
+    )
       changePreferences({
         set: [preferenceRow("global", null, "analyticsConsent", chosen)],
       });

@@ -92,10 +92,15 @@ impl Project {
         let meta = doc.get_map("project");
         // Written from the validated view, so no earlier value or stray
         // container comes along. Preferences are the owner's, not the map's:
-        // viewers get its connection style beside the snapshot.
+        // viewers get its connection style beside the snapshot. An older map
+        // that has not moved its own style into preferences yet still lends
+        // it, so viewers see the lines its owner chose.
         meta.insert("format", FORMAT)?;
         meta.insert("schemaVersion", SCHEMA_VERSION)?;
         meta.insert("name", view.name.as_str())?;
+        if let Some(links) = view.legacy.as_ref().and_then(|legacy| legacy.links) {
+            meta.insert("links", loro::LoroValue::from(serde_json::to_value(links)?))?;
+        }
         let tree = doc.get_tree("nodes");
         tree.enable_fractional_index(8);
         let mut created = std::collections::HashMap::new();
