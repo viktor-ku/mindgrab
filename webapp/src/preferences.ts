@@ -337,6 +337,22 @@ export class PreferenceStore {
       resolvePreferences({ global, map: maps.get(projectId) ?? {} });
   }
 
+  // Stores a value only where none is stored, checked and written as one
+  // storage update, so a value set meanwhile is kept. Says whether it stored.
+  async seed(row: PreferenceRow) {
+    let stored = false;
+    await this.storage.update(preferenceKey(row), (previous) => {
+      if (previous !== undefined) return previous;
+      stored = true;
+      return {
+        value: row.value,
+        ...(this.synced && { pending: crypto.randomUUID() }),
+      };
+    });
+    if (stored) await this.#onChange?.();
+    return stored;
+  }
+
   // Changes are stored at once, so they hold offline; a synced store marks
   // them for the cloud, which `sync` sends.
   async change({ set = [], clear = [] }: PreferenceChanges) {
@@ -434,12 +450,12 @@ export async function syncAccountPreferences(
   consent: AnalyticsConsent | "pending",
 ) {
   await store.sync(api, signal);
-  if (consent === "pending" || (await store.levels()).global.analyticsConsent)
-    return;
-  await store.change({
-    set: [preferenceRow("global", null, "analyticsConsent", consent)],
-  });
-  await store.sync(api, signal);
+  if (consent === "pending") return;
+  // An answer given here since the pull, or by another tab, is kept.
+  if (
+    await store.seed(preferenceRow("global", null, "analyticsConsent", consent))
+  )
+    await store.sync(api, signal);
 }
 
 // Gives a copied map what its original used: what it set for itself, and

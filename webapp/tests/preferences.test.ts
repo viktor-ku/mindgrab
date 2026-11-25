@@ -348,8 +348,43 @@ test("this browser's answer about analytics goes to the account only once a pull
   const fresh = synced();
   await syncAccountPreferences(fresh, api(cloud), signal(), "granted");
   expect(cloud.rows.get(preferenceKey(consent))?.value).toBe("granted");
+  // An answer given while the pull runs is kept.
+  cloud.rows.clear();
+  const answered = synced();
+  const originalPreferences = cloud.preferences.bind(cloud);
+  cloud.preferences = async () => {
+    const rows = await originalPreferences();
+    cloud.preferences = originalPreferences;
+    await answered.change({
+      set: [preferenceRow("global", null, "analyticsConsent", "denied")],
+    });
+    return rows;
+  };
+  await syncAccountPreferences(answered, api(cloud), signal(), "granted");
+  expect((await answered.levels()).global.analyticsConsent).toBe("denied");
   // Nothing is given before there is an answer here.
   cloud.rows.clear();
   await syncAccountPreferences(synced(), api(cloud), signal(), "pending");
   expect(cloud.rows.size).toBe(0);
+});
+
+test("a seed stores a value only where none is stored, in one update", async () => {
+  const storage = new Storage();
+  const store = synced(storage);
+  const row = preferenceRow("global", null, "analyticsConsent", "granted");
+  // Whatever the update finds is what it decides on: here, an answer stored
+  // just before it.
+  const update = storage.update.bind(storage);
+  storage.update = async (key, change) => {
+    storage.values.set(key, { value: "denied", pending: "elsewhere" });
+    return update(key, change);
+  };
+  expect(await store.seed(row)).toBe(false);
+  expect((await store.levels()).global.analyticsConsent).toBe("denied");
+  storage.update = update;
+  storage.values.clear();
+  expect(await store.seed(row)).toBe(true);
+  expect(storage.values.get(preferenceKey(row))).toMatchObject({
+    value: "granted",
+  });
 });
