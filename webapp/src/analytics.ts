@@ -1,6 +1,7 @@
 import type { PostHog } from "posthog-js";
 import { createSignal } from "solid-js";
 import { backendCookieDomain, backendEndpoint } from "./backend";
+import { INGEST_PATH, ingestUrl } from "./ingest-url";
 import { redactEvent } from "./redact-share-tokens";
 
 // Product analytics. Disabled unless VITE_POSTHOG_KEY is set at build time, so
@@ -130,7 +131,8 @@ async function load() {
       const { default: posthog } = await import("posthog-js");
       // Checked above; Bun's env typing (e2e) does not narrow across the closure.
       posthog.init(import.meta.env.VITE_POSTHOG_KEY as string, {
-        api_host: backendEndpoint("/ingest.php"),
+        api_host: backendEndpoint(INGEST_PATH),
+        rewriteRequestPath: ingestUrl,
         ui_host: "https://eu.posthog.com",
         defaults: "2026-08-30",
         cookieless_mode: "on_reject",

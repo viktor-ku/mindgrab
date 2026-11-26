@@ -271,10 +271,19 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
   `/index.php` answer every method.
 - **A path that continues past a script** (PATH_INFO, `/index.php/x`) runs the script
   in PHP. Here only the decoys accept it: `/index.php` and `/phpmyadmin/index.php`.
-  The `/api/*.php` endpoints answer 404, as Apache does with `AcceptPathInfo Off`,
-  so a rule written for an endpoint's exact path always covers it.
-- **`/ingest.php/<path>`** is PATH_INFO style, as in a PHP front controller. The
-  PostHog SDK appends its own paths, so the URL cannot end in `.php`.
+  The `/api/*.php` endpoints and `/ingest.php` answer 404, as Apache does with
+  `AcceptPathInfo Off`, so a rule written for an endpoint's exact path always
+  covers it.
+- **`/ingest.php?r=<path>`** is the analytics proxy, with the route in the query
+  as in a PHP front controller. The PostHog SDK appends its own paths to its host
+  (`/ingest.php/e/`), so the webapp moves each one into `r` with the SDK's
+  `rewriteRequestPath` option (`webapp/src/ingest-url.ts`). The proxy forwards a
+  closed list and answers 404 to the rest without contacting PostHog
+  (`upstream` in `src/analytics.rs`): `POST` to `/e/`, `/i/v0/e/`, `/s/` and
+  `/flags/`, and `GET` for the SDK's scripts under `/static/` and for the remote
+  config of the project in `POSTHOG_KEY`. Query parameters the SDK does not send
+  are dropped. A new PostHog feature that calls another path stays off until its
+  path is added there.
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
   `.php` rule. PHP behind Apache cannot hold a WebSocket, so real PHP stacks run a
   Ratchet daemon behind `mod_proxy_wstunnel` on a path such as `/ws`.
