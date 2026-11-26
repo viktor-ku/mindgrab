@@ -47,7 +47,9 @@ export function contentSecurityPolicy(backendUrl: string | undefined) {
       "https://*.authkit.app",
     ],
     ["frame-ancestors", "'none'"],
-    ["base-uri", "'none'"],
+    // Not 'none': the image export resolves the stylesheet's font URLs with a
+    // base element in a scratch document, which this policy also covers.
+    ["base-uri", "'self'"],
     ["object-src", "'none'"],
   ];
   return directives
