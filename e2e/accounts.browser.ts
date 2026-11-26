@@ -44,6 +44,8 @@ function deferred() {
   });
   return { promise, resolve };
 }
+// Speaks the API as it was before reads could ask for changes only, so these
+// tests keep the app working against a server older than it.
 class Backend {
   user?: User;
   nextUser = A;
@@ -61,6 +63,12 @@ class Backend {
   >();
   // Commit times are strictly increasing, like the server's updated_at.
   clock = Date.parse("2026-01-01T00:00:00Z");
+  // Counts each id's saves and deletions. Kept apart from the project, which
+  // a deletion removes, so a revision never names two contents.
+  revisions = new Map<string, number>();
+  advance(id: string) {
+    this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
+  }
   registrations: string[] = [];
   // Each account's preferences, by scope, map and name.
   preferences = new Map<number, Map<string, PreferenceRow>>();
@@ -165,11 +173,19 @@ class Backend {
     }
     if (url.pathname === "/api/deleteProject.php") {
       const { projectId } = request.postDataJSON();
-      if (this.projects.get(projectId)?.ownerId === owner.id)
+      if (this.projects.get(projectId)?.ownerId === owner.id) {
         this.projects.delete(projectId);
+        this.advance(projectId);
+      }
       return route.fulfill({ json: { deleted: true } });
     }
     const operation = url.pathname;
+    // This API knows no argument but the id, and refuses any other.
+    if (
+      operation === "/api/getProjectSnapshot.php" &&
+      Object.keys(request.postDataJSON()).some((key) => key !== "projectId")
+    )
+      return error(400, "invalid_request");
     const { projectId: id } =
       operation === "/api/mergeProject.php"
         ? Object.fromEntries(url.searchParams)
@@ -179,7 +195,7 @@ class Backend {
       return error(404, "project_not_found");
     const response = () => ({
       projectId: id,
-      revision: "1",
+      revision: String(this.revisions.get(id) ?? 0),
       encoding: "loro-snapshot",
       data: base64(record.doc.snapshot()),
       durable: true,
@@ -190,8 +206,10 @@ class Backend {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       const before = record.doc.version();
       record.doc.merge(bytes);
-      if (record.doc.version() !== before)
+      if (record.doc.version() !== before) {
         record.updatedAt = new Date(this.clock++).toISOString();
+        this.advance(id);
+      }
       return route.fulfill({ json: response() });
     }
     return error(404, "not_found");

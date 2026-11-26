@@ -8,11 +8,15 @@ import {
   test,
 } from "bun:test";
 import { createServer as createNetServer } from "node:net";
-import type { Browser, BrowserContext, Page } from "playwright";
+import type { Browser, BrowserContext, Page, Request } from "playwright";
 import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import type { ProjectView } from "../webapp/src/generated/mindgrab-state/model";
+import {
+  createChild,
+  createProjectDocument,
+} from "../webapp/src/project-document";
 
 // The real app, Rust API, Postgres, and WebSockets. Only the identity provider
 // is a local test fixture; it exercises the actual OAuth callback and JWT checks.
@@ -172,6 +176,96 @@ async function openNamed(page: Page, name: string) {
     .filter({ hasText: name })
     .click();
   await saved(page);
+}
+async function until(check: () => boolean, what: string) {
+  const deadline = Date.now() + 20_000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`Timed out: ${what}`);
+    await Bun.sleep(25);
+  }
+}
+interface Exchange {
+  method: string;
+  // The map a read or a save names.
+  id?: string;
+  sent: number;
+  received: number;
+}
+// Records the body sizes of every API request the page completes.
+function traffic(page: Page) {
+  const exchanges: Exchange[] = [];
+  const unread: string[] = [];
+  // A request already under way when this starts is not waited for.
+  const open = new Set<Request>();
+  let moved = Date.now();
+  const api = (request: Request) =>
+    new URL(request.url()).pathname.startsWith("/api/");
+  const settle = (request: Request) => {
+    open.delete(request);
+    moved = Date.now();
+  };
+  page.on("request", (request) => {
+    if (!api(request)) return;
+    open.add(request);
+    moved = Date.now();
+  });
+  page.on("requestfailed", (request) => {
+    if (api(request)) settle(request);
+  });
+  page.on("requestfinished", async (request) => {
+    if (!api(request)) return;
+    const url = new URL(request.url());
+    const method = url.pathname.slice("/api/".length, -".php".length);
+    try {
+      const response = await request.response();
+      if (!response) throw new Error("No response");
+      const body = request.postDataBuffer();
+      let id = url.searchParams.get("projectId") ?? undefined;
+      if (!id && body)
+        try {
+          id = JSON.parse(body.toString()).projectId;
+        } catch {}
+      exchanges.push({
+        method,
+        id,
+        sent: body?.length ?? 0,
+        received: (await response.body()).length,
+      });
+    } catch (error) {
+      unread.push(`${method}: ${error}`);
+    } finally {
+      settle(request);
+    }
+  });
+  return {
+    exchanges,
+    // Exchanges whose sizes could not be read, which would go uncounted.
+    unread,
+    count: (method: string) =>
+      exchanges.filter((exchange) => exchange.method === method).length,
+    // Resolves once no request has started or ended for half a second.
+    quiet: () =>
+      until(
+        () => !open.size && Date.now() - moved > 500,
+        "the API to go quiet",
+      ),
+  };
+}
+// A map whose snapshot is over 2 MiB. Its bulk is in notes, which the canvas
+// does not lay out.
+function largeMap(id: string, name: string) {
+  const doc = createProjectDocument(id, name, { text: "Library" });
+  try {
+    const [root] = doc.view().roots;
+    for (let n = 0; n < 48; n++)
+      createChild(doc, root, {
+        text: `Shelf ${n}`,
+        note: Array.from({ length: 6000 }, (_, i) => `${n}-${i} `).join(""),
+      });
+    return doc.snapshot();
+  } finally {
+    doc.destroy();
+  }
 }
 
 test("main app signs in, migrates anonymous work silently, reloads durable state, and accepts native Rust commands", async () => {
@@ -449,3 +543,153 @@ test("a share link follows the owner's edits live, read-only, without the delete
   expect(await row.getAttribute("data-kept")).toBe("");
   expect(writes).toEqual([]);
 });
+
+// Whatever a map weighs, checking on it and saving a keystroke move only a few
+// hundred bytes: the cloud is asked what changed, and answers a save with a
+// receipt.
+test("an idle workspace and a one-character save of a large map exchange only small bodies", async () => {
+  const KIB = 1024;
+  await login(page);
+  const id = crypto.randomUUID();
+  const snapshot = largeMap(id, "Large library");
+  expect(snapshot.length).toBeGreaterThan(2 * KIB * KIB);
+  const { exchanges, unread, count, quiet } = traffic(page);
+  await rpc(page, "createProject", { projectId: id, schemaVersion: 1 });
+  await page.evaluate(
+    async ([id, data]) => {
+      const response = await fetch(`/api/mergeProject.php?projectId=${id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          Accept: "application/vnd.mindgrab.receipt+json",
+        },
+        body: Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
+      });
+      if (!response.ok) throw new Error(`Upload: ${response.status}`);
+      await response.json();
+    },
+    [id, Buffer.from(snapshot).toString("base64")] as const,
+  );
+  // Waits for `check`, asking the workspace for another pass meanwhile.
+  const refreshed = async (check: () => boolean, what: string) => {
+    const deadline = Date.now() + 20_000;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error(`Timed out: ${what}`);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await Bun.sleep(250);
+    }
+  };
+  // A pass lists the account's maps once, and none starts before the last has
+  // ended, so a new listing means the pass before it is over.
+  const pass = () => {
+    const listings = count("listProjects");
+    return refreshed(
+      () => count("listProjects") > listings,
+      "a workspace pass to begin",
+    );
+  };
+
+  // The first pass to list the map downloads it, complete, this once.
+  await refreshed(
+    () =>
+      exchanges.some(
+        (exchange) =>
+          exchange.method === "getProjectSnapshot" &&
+          exchange.id === id &&
+          exchange.received > 2 * KIB * KIB,
+      ),
+    "the large map to be downloaded",
+  );
+  await quiet();
+
+  // Two whole passes with nothing changed, the large map not open: the
+  // listing vouches for it, so nothing is asked about it.
+  let from = exchanges.length;
+  await pass();
+  await pass();
+  await pass();
+  await quiet();
+  expect(
+    exchanges
+      .slice(from)
+      .filter(
+        (exchange) =>
+          exchange.method === "getProjectSnapshot" && exchange.id === id,
+      ),
+  ).toEqual([]);
+
+  await openNamed(page, "Large library");
+  await page.getByRole("button", { name: "Shelf 47", exact: true }).waitFor();
+  await saved(page);
+  await quiet();
+
+  // Two whole passes with nothing changed, the large map open.
+  from = exchanges.length;
+  await pass();
+  await pass();
+  await pass();
+  await quiet();
+  const idle = exchanges.slice(from);
+  expect(
+    idle.filter((exchange) => exchange.method === "listProjects").length,
+  ).toBeGreaterThanOrEqual(2);
+  for (const exchange of idle)
+    if (exchange.method === "getProjectSnapshot")
+      expect(exchange.received).toBeLessThanOrEqual(KIB);
+  // Only the open map is asked about; the listing vouches for the others.
+  expect(
+    idle.filter(
+      (exchange) =>
+        exchange.method === "getProjectSnapshot" && exchange.id !== id,
+    ),
+  ).toEqual([]);
+  expect(
+    idle.reduce((sum, { sent, received }) => sum + sent + received, 0),
+  ).toBeLessThan(16 * KIB);
+
+  // One typed character.
+  from = exchanges.length;
+  await page.getByRole("button", { name: "Library", exact: true }).dblclick();
+  await page.getByRole("textbox", { name: "Node text", exact: true }).waitFor();
+  await page.keyboard.press("End");
+  await page.keyboard.type("x");
+  await page.keyboard.press("Enter");
+  const ofMap = () =>
+    exchanges
+      .slice(from)
+      .filter(
+        (exchange) =>
+          exchange.id === id &&
+          ["mergeProject", "getProjectSnapshot"].includes(exchange.method),
+      );
+  await until(
+    () => ofMap().some((exchange) => exchange.method === "mergeProject"),
+    "the character to be uploaded",
+  );
+  await saved(page);
+  await quiet();
+  for (const exchange of ofMap()) {
+    // Zero would mean the request's size went unmeasured.
+    expect(exchange.sent).toBeGreaterThan(0);
+    expect(exchange.sent).toBeLessThan(4 * KIB);
+    expect(exchange.received).toBeLessThan(4 * KIB);
+  }
+  // The whole save, however many exchanges it took, stays small both ways.
+  expect(ofMap().reduce((sum, { sent }) => sum + sent, 0)).toBeLessThan(
+    4 * KIB,
+  );
+  expect(ofMap().reduce((sum, { received }) => sum + received, 0)).toBeLessThan(
+    4 * KIB,
+  );
+  expect(unread).toEqual([]);
+  const text = await page.evaluate(async (id) => {
+    const response = await fetch("/api/getProjectState.php", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: id }),
+    });
+    const view: ProjectView = await response.json();
+    return view.nodes.find((node) => node.id === view.roots[0])?.text;
+  }, id);
+  expect(text).toBe("Libraryx");
+}, 90_000);
