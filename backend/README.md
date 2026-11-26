@@ -127,9 +127,11 @@ the Railway service only, never next to `DATABASE_URL` in a shared place. WorkOS
 mode refuses to start without it. Local login uses a fixed key when it is unset,
 since its tokens are not secret.
 
-To rotate, put a new entry first and keep the old one until every session it
-sealed has been refreshed or has expired: refreshes reseal with the first key,
-and sessions last at most 30 days. A session whose tokens no key opens ends, and
+To rotate, do it in two deploys, so no instance seals with a key that another
+cannot open yet. First add the new entry after the current first one and let
+every instance restart. Then move the new entry first. Keep the old entry until
+every session it sealed has been refreshed or has expired: refreshes reseal
+with the first key, and sessions last at most 30 days. A session whose tokens no key opens ends, and
 its person signs in again. The sealed value is bound to its session and column,
 so tokens copied to another session do not open.
 
