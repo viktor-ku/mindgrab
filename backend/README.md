@@ -59,6 +59,14 @@ not a conversion of previous data. Sessions and login attempts expire. Project
 UUIDs are globally reserved for their owner; deleting a cloud copy removes its
 snapshot while retaining the UUID reservation. The same owner can re-enable it.
 
+Each account's cloud storage is capped (`Quota` in `src/config.rs`): 500 maps,
+2,000 project UUIDs including deleted reservations, and 1 GiB of snapshots,
+summed from each row's `snapshot_bytes`. A request that would pass a cap is
+refused with 422 `quota_exceeded` and stores nothing; the webapp then stops
+cloud saving and says how to make room, while local saving continues. A save
+that does not grow its map is always accepted. Requests that check the quota
+lock the account's `users` row first, so concurrent ones cannot pass it together.
+
 ## Authentication
 
 ### Local login for agents and worktrees

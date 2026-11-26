@@ -2,6 +2,7 @@ mod common;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::*;
 use mindgrab_backend::auth::{SESSION_COOKIE, hash};
+use mindgrab_backend::config::Quota;
 use mindgrab_state::{Color, Command, Project};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
@@ -1058,5 +1059,179 @@ async fn maps_kept_out_of_the_cloud_are_not_stored_there() {
         .status(),
         400
     );
+    f.close().await;
+}
+
+async fn create(f: &Fixture, browser: &str, id: Uuid) -> reqwest::Response {
+    f.rpc(
+        "createProject",
+        browser,
+        json!({"projectId":id,"schemaVersion":1}),
+    )
+    .await
+}
+async fn assert_over_quota(response: reqwest::Response) {
+    assert_eq!(response.status(), 422);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "quota_exceeded"
+    );
+}
+async fn rows(f: &Fixture, id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.projects WHERE id=$1")
+        .bind(id)
+        .fetch_one(&f.backend.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_account_keeps_at_most_its_quota_of_maps_and_ids() {
+    let f = Fixture::with_quota(
+        "http://localhost:5173",
+        Quota {
+            projects: 2,
+            ids: 3,
+            bytes: i64::MAX,
+        },
+    )
+    .await;
+    let alice = f.credential("alice").await;
+    let bob = f.credential("bob").await;
+    let [a, b, c, d] = std::array::from_fn(|_| Uuid::new_v4());
+    assert_eq!(create(&f, &alice, a).await.status(), 200);
+    assert_eq!(create(&f, &alice, b).await.status(), 200);
+    // A third map is refused, and nothing is kept of it.
+    assert_over_quota(create(&f, &alice, c).await).await;
+    assert_eq!(rows(&f, c).await, 0);
+    // Registering a map the account already stores is not a new one.
+    assert_eq!(create(&f, &alice, a).await.status(), 200);
+    // Each account has its own quota.
+    assert_eq!(create(&f, &bob, Uuid::new_v4()).await.status(), 200);
+    // Deleting a map makes room for another.
+    let delete = async |id: Uuid| {
+        assert_eq!(
+            f.rpc("deleteProject", &alice, json!({ "projectId": id }))
+                .await
+                .status(),
+            200
+        );
+    };
+    delete(a).await;
+    assert_eq!(create(&f, &alice, c).await.status(), 200);
+    // A deleted map keeps its ID reserved, and the reservation counts.
+    delete(b).await;
+    assert_over_quota(create(&f, &alice, d).await).await;
+    assert_eq!(rows(&f, d).await, 0);
+    // Restoring a deleted map takes no new ID, but it is a map again.
+    assert_eq!(create(&f, &alice, a).await.status(), 200);
+    assert_over_quota(create(&f, &alice, b).await).await;
+    let deleted: bool =
+        sqlx::query_scalar("SELECT deleted FROM mindgrab_loro.projects WHERE id=$1")
+            .bind(b)
+            .fetch_one(&f.backend.pool)
+            .await
+            .unwrap();
+    assert!(deleted);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn maps_created_together_cannot_pass_the_quota() {
+    let f = Fixture::with_quota(
+        "http://localhost:5173",
+        Quota {
+            projects: 1,
+            ..Quota::default()
+        },
+    )
+    .await;
+    let alice = f.credential("alice").await;
+    let statuses = futures_util::future::join_all(
+        (0..8).map(|_| async { create(&f, &alice, Uuid::new_v4()).await.status() }),
+    )
+    .await;
+    assert_eq!(statuses.iter().filter(|status| **status == 200).count(), 1);
+    assert_eq!(statuses.iter().filter(|status| **status == 422).count(), 7);
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.projects")
+        .fetch_one(&f.backend.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn an_account_stores_at_most_its_quota_of_bytes() {
+    let large = |name: &str| {
+        let mut project = Project::new(name).unwrap();
+        let text = (0..6_000).map(|i| format!("{name}-{i} ")).collect();
+        project
+            .apply(Command::CreateNode {
+                parent: None,
+                index: None,
+                text,
+                color: Color::BLUE,
+                fill: None,
+            })
+            .unwrap();
+        project
+    };
+    let (x, y) = (large("X"), large("Y"));
+    let size = x.snapshot().unwrap().len() as i64;
+    // Room for one of these maps, not two.
+    let f = Fixture::with_quota(
+        "http://localhost:5173",
+        Quota {
+            bytes: size * 3 / 2,
+            ..Quota::default()
+        },
+    )
+    .await;
+    let alice = f.credential("alice").await;
+    let (xid, yid) = (Uuid::new_v4(), Uuid::new_v4());
+    assert_eq!(create(&f, &alice, xid).await.status(), 200);
+    assert_eq!(create(&f, &alice, yid).await.status(), 200);
+    let measured = async |id: Uuid| -> (i64, Option<i32>, i64) {
+        sqlx::query_as("SELECT snapshot_bytes,octet_length(snapshot),revision FROM mindgrab_loro.projects WHERE id=$1").bind(id).fetch_one(&f.backend.pool).await.unwrap()
+    };
+    assert_eq!(upload(&f, &alice, xid, &x).await.status(), 200);
+    let (bytes, length, _) = measured(xid).await;
+    assert_eq!(Some(bytes as i32), length);
+    // The second map does not fit, and none of it is stored.
+    assert_over_quota(upload(&f, &alice, yid, &y).await).await;
+    assert_eq!(measured(yid).await, (0, None, 0));
+    // A small edit still fits beside the first map.
+    let (stored, _) = baseline(&f, &alice, xid).await;
+    let kept = stored.view().unwrap().nodes[0].id.clone();
+    let response = f
+        .rpc(
+            "commandProject",
+            &alice,
+            json!({"projectId":xid,"command":{"type":"setText","id":kept,"text":"Edited"}}),
+        )
+        .await;
+    assert_eq!(response.status(), 200);
+    // Deleting the first map frees its bytes.
+    assert_eq!(
+        f.rpc("deleteProject", &alice, json!({ "projectId": xid }))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(measured(xid).await.0, 0);
+    assert_eq!(upload(&f, &alice, yid, &y).await.status(), 200);
+    // Rows stored before sizes were kept are measured when the schema is installed.
+    sqlx::query("UPDATE mindgrab_loro.projects SET snapshot_bytes=0 WHERE id=$1")
+        .bind(yid)
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../schema.sql"))
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    let (bytes, length, _) = measured(yid).await;
+    assert_eq!(Some(bytes as i32), length);
     f.close().await;
 }

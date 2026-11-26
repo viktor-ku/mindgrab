@@ -31,6 +31,10 @@ impl ApiError {
     pub fn missing() -> Self {
         Self::new(StatusCode::NOT_FOUND, "project_not_found")
     }
+    /// The account would keep more in the cloud than its quota allows.
+    pub fn quota_exceeded() -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "quota_exceeded")
+    }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

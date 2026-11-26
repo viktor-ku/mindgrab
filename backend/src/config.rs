@@ -20,6 +20,28 @@ pub struct Config {
     pub secure_cookies: bool,
     /// Product analytics; unset sends nothing and disables the /ingest.php proxy.
     pub posthog: Option<PostHogConfig>,
+    pub quota: Quota,
+}
+/// The most one account keeps in the cloud. Without a cap, one free account
+/// could fill the database that every account writes to.
+#[derive(Clone, Copy, Debug)]
+pub struct Quota {
+    /// Maps stored in the cloud.
+    pub projects: i64,
+    /// Every project ID the account holds, deleted maps included: deleting a
+    /// cloud copy keeps its ID reserved for the account.
+    pub ids: i64,
+    /// Bytes of stored map snapshots.
+    pub bytes: i64,
+}
+impl Default for Quota {
+    fn default() -> Self {
+        Self {
+            projects: 500,
+            ids: 2_000,
+            bytes: 1024 * 1024 * 1024,
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct PostHogConfig {
@@ -150,6 +172,7 @@ impl Config {
             provider_url: "https://api.workos.com".into(),
             secure_cookies: app.scheme() == "https",
             posthog: PostHogConfig::from_values(get("POSTHOG_KEY"), get("POSTHOG_HOST"))?,
+            quota: Quota::default(),
         })
     }
     pub fn cookie_name(&self, base: &str) -> String {

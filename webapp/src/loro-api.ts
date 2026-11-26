@@ -227,11 +227,23 @@ export class LoroApi {
       // one just turned on here may not have reached it yet.
       if (code === "cloud_disabled")
         throw new SyncError("Cloud saving is unavailable. Retrying…");
-      if ([400, 403, 404, 409, 413, 422].includes(response.status))
+      // Retrying cannot help until the account stores less, so cloud saving
+      // waits for the person.
+      if (code === "quota_exceeded")
         throw new SyncError(
-          response.status === 413
-            ? "Cloud storage reached its limit. Your local work is retained."
-            : "Cloud saving needs attention. Your local work is retained.",
+          "Your account has used all of its cloud storage, so changes are no longer saved to the cloud. Delete maps you no longer need, or turn off cloud saving for them, to make room.",
+          "blocked",
+          code,
+        );
+      if (response.status === 413 || code === "resource_limit")
+        throw new SyncError(
+          "This map is too large to save to the cloud.",
+          "blocked",
+          code,
+        );
+      if ([400, 403, 404, 409, 422].includes(response.status))
+        throw new SyncError(
+          "Cloud saving needs attention. Your local work is retained.",
           "blocked",
           code,
         );

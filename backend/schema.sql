@@ -38,6 +38,14 @@ ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS share_token TEXT UNI
 -- history, which keeps deleted ideas and notes. Built when first viewed.
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_snapshot BYTEA;
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_revision BIGINT;
+-- The length of `snapshot`, kept beside it so an account's quota check sums a
+-- column instead of reading every snapshot. Rows stored before the column
+-- existed are measured once here.
+ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS snapshot_bytes BIGINT NOT NULL DEFAULT 0;
+UPDATE mindgrab_loro.projects SET snapshot_bytes=octet_length(snapshot) WHERE snapshot_bytes=0 AND snapshot IS NOT NULL;
+-- Everything an account's quota counts: its maps, every ID it holds, and the
+-- bytes they store.
+CREATE INDEX IF NOT EXISTS projects_usage ON mindgrab_loro.projects(owner_id) INCLUDE (deleted, snapshot_bytes);
 -- How each account wants Mindgrab to work: how its maps look, where they are
 -- saved, and its answer about analytics. A preference is set for all of the
 -- account's maps (global) or for one map, whose own value wins. Scopes and
