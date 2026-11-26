@@ -29,8 +29,8 @@ and CORS allow the app's origin.
 
 Set `HOST=::` and `PORT=8080` so the API is reachable on Railway's public and
 private networks. Keep `DATABASE_URL` pointing at the project's Postgres
-service. Configure the WorkOS credentials, `APP_URL` and `WORKOS_REDIRECT_URI`
-as described below. Release builds use WorkOS authentication.
+service. Configure the WorkOS credentials, `TOKEN_KEYS`, `APP_URL` and
+`WORKOS_REDIRECT_URI` as described below. Release builds use WorkOS authentication.
 
 The backend image contains the compiled native API and trusted HTTPS certificates.
 Postgres schema creation runs on startup. GET `/` is the healthcheck: Apache's "It works!" page
@@ -99,7 +99,8 @@ allow the exact `WORKOS_REDIRECT_URI` and `APP_URL` for that environment.
 login ignores it.
 
 WorkOS authorization uses one-use state and PKCE. The server stores an opaque,
-hashed browser credential and keeps access/refresh tokens in Postgres. Each
+hashed browser credential and keeps access/refresh tokens in Postgres, sealed
+with AES-256-GCM (see below). Each
 protected request validates a signed RS256 JWT against WorkOS JWKS, checking
 issuer, client ID, audience when present, session identity and token timing.
 Refresh rotation is serialized with a short lease on the session row, so no
@@ -114,6 +115,30 @@ Cloudflare. It does bound document work: as many merges and projections at once
 as there are cores, two per account. Requests over that wait up to 3 seconds and
 are then answered 429 `busy`. The webapp treats a 429 as a temporary cloud
 failure and keeps retrying.
+
+### Token keys
+
+`TOKEN_KEYS` holds the keys that seal each session's WorkOS tokens, so a copy
+of the database alone holds no usable token. It lists `<id>:<key>` entries,
+separated by commas or spaces, where each key is 32 random bytes in base64
+(`openssl rand -base64 32`). The first entry seals; any listed entry opens a
+token it sealed, which the stored value names by its id. Keep the variable on
+the Railway service only, never next to `DATABASE_URL` in a shared place. WorkOS
+mode refuses to start without it. Local login uses a fixed key when it is unset,
+since its tokens are not secret.
+
+To rotate, do it in two deploys, so no instance seals with a key that another
+cannot open yet. First add the new entry after the current first one and let
+every instance restart. Then move the new entry first. Keep the old entry until
+every session it sealed has been refreshed or has expired: refreshes reseal
+with the first key, and sessions last at most 30 days. A session whose tokens no key opens ends, and
+its person signs in again. The sealed value is bound to its session and column,
+so tokens copied to another session do not open.
+
+Sealed sessions live in `sealed_sessions`. The `sessions` table from before
+sealing stays so a deployment still serving it keeps working during a rollout
+or rollback, but it is emptied on startup and every hour, so its people sign in
+again. A later change can drop it.
 
 ## API
 
