@@ -7,8 +7,9 @@ mod preferences;
 mod wasm;
 
 use loro::{
-    CommitOptions, Container, ContainerID, ContainerTrait, ContainerType, ExportMode, LoroDoc,
-    LoroMap, LoroText, LoroTree, ToJson, TreeID, UndoManager, ValueOrContainer,
+    CommitOptions, Container, ContainerID, ContainerTrait, ContainerType, ExportMode, Frontiers,
+    ID, LoroDoc, LoroMap, LoroText, LoroTree, ToJson, TreeID, UndoManager, ValueOrContainer,
+    VersionVector,
 };
 use loro_internal::cursor::{Cursor, Side};
 pub use model::*;
@@ -162,13 +163,22 @@ impl Project {
     }
 
     pub fn version(&self) -> Vec<u8> {
-        let ordered: std::collections::BTreeMap<_, _> = self
-            .doc
-            .oplog_vv()
-            .iter()
-            .map(|(peer, counter)| (*peer, *counter))
-            .collect();
-        serde_json::to_vec(&ordered).expect("integer version vector")
+        encode_version(&self.doc.oplog_vv())
+    }
+
+    /// Names this document's version by its latest changes: `counter@peer`,
+    /// sorted by peer, comma-joined. None when that exceeds [`MAX_HEAD_BYTES`].
+    /// It stays a few bytes however many peers have edited the document,
+    /// where [`Project::version`] grows with every one of them.
+    pub fn head(&self) -> Option<String> {
+        head_of(&self.doc)
+    }
+
+    /// The version, encoded as [`Project::version`] encodes it, of the replica
+    /// whose [`Project::head`] this is. None unless this document holds every
+    /// change it names.
+    pub fn version_at(&self, head: &str) -> Option<Vec<u8>> {
+        version_at(&self.doc, head).map(|version| encode_version(&version))
     }
 
     /// The changes this document has beyond `version`, another replica's
@@ -933,6 +943,102 @@ impl Project {
     fn text(&self, value: &str) -> Result<LoroText> {
         shared_text(&self.tree().get_meta(self.node(value)?)?)
     }
+}
+
+/// What a stored snapshot sends a replica, from [`outgoing`].
+#[derive(Debug)]
+pub struct Outgoing {
+    /// The stored document's head; None when it cannot be named.
+    pub head: Option<String>,
+    /// Some(empty): the replica lacks nothing. Some(bytes): what it lacks.
+    /// None: send the complete snapshot.
+    pub updates: Option<Vec<u8>>,
+}
+
+/// What a stored snapshot sends a replica that holds `since`, a
+/// [`Project::head`]. The snapshot was validated when it was stored, so this
+/// reads its history only, without building the view or an undo history.
+pub fn outgoing(snapshot: &[u8], since: &str) -> Result<Outgoing> {
+    check_size(snapshot)?;
+    let doc = LoroDoc::new();
+    if doc.import(snapshot)?.pending.is_some() {
+        return Err(StateError::MissingDependencies);
+    }
+    let Some(head) = head_of(&doc) else {
+        return Ok(Outgoing {
+            head: None,
+            updates: None,
+        });
+    };
+    let updates = match version_at(&doc, since) {
+        None => None,
+        // Compared as versions: exporting nothing still takes a few bytes.
+        Some(version) if version == doc.oplog_vv() => Some(Vec::new()),
+        Some(version) => {
+            let bytes = doc.export(ExportMode::updates_owned(version))?;
+            // An early `since` in a long history can need more than the
+            // snapshot itself.
+            (bytes.len() < snapshot.len()).then_some(bytes)
+        }
+    };
+    Ok(Outgoing {
+        head: Some(head),
+        updates,
+    })
+}
+
+fn encode_version(version: &VersionVector) -> Vec<u8> {
+    let ordered: std::collections::BTreeMap<_, _> = version
+        .iter()
+        .map(|(peer, counter)| (*peer, *counter))
+        .collect();
+    serde_json::to_vec(&ordered).expect("integer version vector")
+}
+
+/// None for a document without changes too: an empty head means no document.
+fn head_of(doc: &LoroDoc) -> Option<String> {
+    let mut ids: Vec<ID> = doc.oplog_frontiers().iter().collect();
+    ids.sort_unstable_by_key(|id| id.peer);
+    let head = ids
+        .iter()
+        .map(|id| format!("{}@{}", id.counter, id.peer))
+        .collect::<Vec<_>>()
+        .join(",");
+    (!head.is_empty() && head.len() <= MAX_HEAD_BYTES).then_some(head)
+}
+
+fn version_at(doc: &LoroDoc, head: &str) -> Option<VersionVector> {
+    // The usual question is about the current head, which needs no walk
+    // through the history.
+    if head_of(doc).as_deref() == Some(head) {
+        return Some(doc.oplog_vv());
+    }
+    let ids = parse_head(head)?;
+    let held = doc.oplog_vv();
+    // Only ids the document holds go on to its history. Loro panics there on
+    // a negative counter and leaves the document unusable.
+    if !ids.iter().all(|id| held.includes_id(*id)) {
+        return None;
+    }
+    doc.frontiers_to_vv(&ids.into_iter().collect::<Frontiers>())
+}
+
+/// Reads only what [`head_of`] writes: digits around one `@`, joined by single
+/// commas. No signs or spaces, so no id can carry a negative counter.
+fn parse_head(head: &str) -> Option<Vec<ID>> {
+    if head.len() > MAX_HEAD_BYTES {
+        return None;
+    }
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    head.split(',')
+        .map(|id| {
+            let (counter, peer) = id.split_once('@')?;
+            if !digits(counter) || !digits(peer) {
+                return None;
+            }
+            Some(ID::new(peer.parse().ok()?, counter.parse().ok()?))
+        })
+        .collect()
 }
 
 /// Nodes that are not deleted. Loro keeps deleted nodes as tombstones, so

@@ -112,8 +112,10 @@ account fence (`x-mindgrab-account`) so a changed cookie cannot write into the
 previous workspace. The backend does not rate limit requests; that belongs in
 Cloudflare. It does bound document work: as many merges and projections at once
 as there are cores, two per account. Requests over that wait up to 3 seconds and
-are then answered 429 `busy`. The webapp treats a 429 as a temporary cloud
-failure and keeps retrying.
+are then answered 429 `busy`. A `getProjectSnapshot` that carries `revision` or
+`since` takes one of those seats when it has to read the snapshot; one that
+finds the revision unchanged, or no snapshot, does not. The webapp treats a 429
+as a temporary cloud failure and keeps retrying.
 
 ## API
 
@@ -125,11 +127,11 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/startLogin.php`, `/api/logout.php` | Login/logout navigation |
 | `/api/getMe.php` | Verified current account |
 | `/api/createProject.php` | Reserve `{projectId, schemaVersion: 1}` |
-| `/api/listProjects.php` | Cursor pagination of the current owner's initialized projects |
-| `/api/getProjectSnapshot.php` | Complete Loro history snapshot, base64 encoded |
+| `/api/listProjects.php` | Cursor pagination of the current owner's initialized projects, each with its `revision` |
+| `/api/getProjectSnapshot.php` | `{projectId}`: complete Loro history snapshot, base64 encoded. With `revision` or `since`: only what the client lacks |
 | `/api/getProjectState.php` | Read-only Rust projection for inspection |
-| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot, or only the changes the stored one lacks |
-| `/api/commandProject.php` | Apply `{projectId, command}` with the native shared core |
+| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot, or only the changes the stored one lacks. Answers the complete snapshot, or a receipt when asked |
+| `/api/commandProject.php` | Apply `{projectId, command}` with the native shared core. Answers like `mergeProject` |
 | `/api/deleteProject.php` | Delete the cloud snapshot |
 | `/api/getShareLink.php` | The owner's `{projectId, token}`; `token` is null while private |
 | `/api/setShareLink.php` | Owner turns the view-only link on (keeps an existing token) or off (revokes it) |
@@ -165,6 +167,48 @@ committed before acknowledging
 uploads are idempotent. Invalid bytes do not mutate accepted storage. Errors
 use `{error: {code}}`; snapshots are capped at 10 MiB.
 
+A client that keeps what it saved does not need it back. `mergeProject` and
+`commandProject` answer a receipt instead of the snapshot when the request's
+`Accept` names `application/vnd.mindgrab.receipt+json`:
+`{projectId, encoding: "loro-update", data: "", head, revision, durable: true}`.
+The header matches when one of its comma-separated items, in any `Accept` line,
+with everything from `;` dropped and whitespace trimmed, is that type in any
+letter case. `*/*`, `application/*` and no header do not match, so every other
+caller keeps getting the snapshot. A merge that changed nothing answers the
+revision it found.
+
+A head names a document version by its latest changes: `counter@peer` ids in
+decimal, sorted by peer and joined by commas, at most 4,096 bytes
+(`Project::head`). It stays a few bytes however many sessions have edited the
+map. A map with so many concurrent latest changes that its head would be longer
+has none: its receipts are complete snapshots, and its reads carry no `head`.
+
+`getProjectSnapshot` takes two optional fields, `revision` (the cloud revision
+the client last saw) and `since` (a head its document holds, `""` for none).
+Both must be JSON strings; any other type, `null` included, is 400
+`invalid_request`. A string never is, whatever it holds: a `revision` that is
+not the stored one is simply different, and a `since` that is malformed, too
+long or not held means the client gets everything. With either field the answer
+is the first of these that applies:
+
+| Case | Answer |
+| --- | --- |
+| `revision` is the stored one | `encoding: "loro-update"`, `data: ""`, no `head`: nothing changed |
+| The cloud holds no snapshot | `encoding: "loro-snapshot"`, `data: ""`, no `head` |
+| The stored document holds `since`, and what it has beyond it is smaller than the snapshot | `encoding: "loro-update"`, `data` with those changes (`""` when there are none), `head` |
+| Anything else | `encoding: "loro-snapshot"`, the complete `data`, `head` |
+
+Every answer also carries `projectId`, `revision` and `durable: true`, and
+`head` is the cloud copy's. Without either field the answer is the complete
+snapshot without `head`, as it always was.
+
+A revision must never name two contents of one project id. Clients remember
+`revision` with `head` and skip reading a map whose revision they already hold,
+so reusing one would hide a change from them until the next. That holds today:
+a revision only grows, a merge that changes nothing keeps it, deleting adds one,
+creating again keeps it, and rows are never removed. Keep it so in anything
+that restores or hard-deletes projects.
+
 A request body is read only after the session check, so a request without a
 session is refused before any of its body is held in memory. Each method then
 reads up to its own limit and answers 413 `payload_too_large` beyond it: 10 MiB
@@ -175,8 +219,13 @@ including `getSharedProject`, which has no session. `getHealth`, `getMe`,
 phpMyAdmin decoy keep their own limits.
 
 The webapp uploads a complete snapshot only while the cloud has none. After that
-it sends the changes the cloud copy lacks. It reads the cloud copy before every
-upload, so a save whose acknowledgement was lost is not sent again. Changes that build
+it sends the changes the cloud copy lacks, and asks for a receipt. Before an
+upload it asks what the cloud copy has beyond the revision and head it last
+saw, so a save whose acknowledgement was lost comes back once and is not sent
+again, and an unchanged map costs no document bytes. A background pass skips
+that question for a map whose listing just reported the revision it already
+holds; a save that commits after that listing can be sent once more, which
+changes nothing because uploads are idempotent. Changes that build
 on history the cloud copy does not hold are refused with 422
 `missing_dependencies`, and the webapp then sends the complete snapshot once.
 
