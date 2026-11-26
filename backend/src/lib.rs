@@ -7,6 +7,7 @@ pub mod error;
 mod phpmyadmin;
 mod preferences;
 mod projects;
+pub mod sealing;
 
 use crate::{analytics::Analytics, auth::Auth, compute::Compute, config::Config, error::Result};
 use axum::{

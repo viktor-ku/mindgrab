@@ -15,11 +15,26 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.sessions (
     browser_hash TEXT PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),
     provider_session TEXT NOT NULL,
-    access_token TEXT NOT NULL,
-    refresh_token TEXT NOT NULL,
+    -- The WorkOS tokens, sealed with AES-256-GCM (backend/src/sealing.rs) under
+    -- a key kept outside the database.
+    sealed_access_token TEXT NOT NULL,
+    sealed_refresh_token TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days'
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON mindgrab_loro.sessions(expires_at);
+-- Sessions once kept their WorkOS tokens in plain text. Those sessions end, and
+-- their people sign in again.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='mindgrab_loro' AND table_name='sessions' AND column_name='access_token') THEN
+        DELETE FROM mindgrab_loro.sessions;
+        ALTER TABLE mindgrab_loro.sessions
+            DROP COLUMN IF EXISTS access_token,
+            DROP COLUMN IF EXISTS refresh_token,
+            ADD COLUMN IF NOT EXISTS sealed_access_token TEXT NOT NULL,
+            ADD COLUMN IF NOT EXISTS sealed_refresh_token TEXT NOT NULL;
+    END IF;
+END $$;
 -- While set and in the future, one request is refreshing this session's tokens.
 ALTER TABLE mindgrab_loro.sessions ADD COLUMN IF NOT EXISTS refreshing_until TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS mindgrab_loro.projects (

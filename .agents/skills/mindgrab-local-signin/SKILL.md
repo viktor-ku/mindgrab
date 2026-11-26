@@ -25,7 +25,7 @@ The remaining instructions apply only when `MINDGRAB_AUTH_MODE=workos` is explic
 ## Requirements
 
 - The local API and webapp must be running at the URLs in this worktree's `mise.local.toml`. The webapp proxies `/api`, `/auth` and `/ws` to the Rust API. `WEBAPP_PORT` is the webapp port; `PORT` and `VITE_BACKEND_URL` configure the backend.
-- The API environment must contain valid `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` values, either exported or loaded from root `.env`, and `VITE_BACKEND_URL` must point to the Rust API port.
+- The API environment must contain valid `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` and `TOKEN_KEYS` values, either exported or loaded from root `.env`, and `VITE_BACKEND_URL` must point to the Rust API port.
 - The WorkOS application must allow these local URLs:
   - Redirect URI: `http://localhost:5173/api/auth/callback.php`
   - Initiate login URI: `http://localhost:5173/`
