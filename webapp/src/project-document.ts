@@ -106,6 +106,17 @@ export class ProjectDocument {
   version() {
     return this.#state ? Array.from(this.#state.version()).join(",") : "";
   }
+  // Names this document's version by its latest changes, in a few bytes
+  // however long its history. Undefined before the document loads, and for
+  // one with too many concurrent changes to name.
+  head() {
+    return this.#state?.head();
+  }
+  // The native version of the replica whose `head` this is. Undefined unless
+  // this document holds every change it names.
+  versionAt(head: string) {
+    return this.#state?.versionAt(head);
+  }
   snapshot() {
     return this.#state?.snapshot() ?? new Uint8Array();
   }

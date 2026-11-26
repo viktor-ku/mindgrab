@@ -37,6 +37,32 @@ struct Stored {
 struct ProjectId {
     project_id: Uuid,
 }
+/// What a merge or command left stored.
+struct Merged {
+    snapshot: Vec<u8>,
+    revision: i64,
+    /// None when the document's head is too long to name.
+    head: Option<String>,
+}
+/// A read that says what its client holds, so the answer can leave that out.
+/// A client that sends neither field holds nothing and gets the whole map.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Changes {
+    project_id: Uuid,
+    /// The cloud revision the client last saw.
+    #[serde(default, deserialize_with = "text")]
+    revision: Option<String>,
+    /// A head the client's document holds; empty when it holds none.
+    #[serde(default, deserialize_with = "text")]
+    since: Option<String>,
+}
+/// A field that is a string whenever it is sent: null is refused like a number.
+fn text<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Create {
@@ -82,6 +108,32 @@ fn record(id: Uuid, name: Option<String>) -> Value {
 }
 fn baseline(id: Uuid, project: Stored) -> Value {
     json!({"projectId":id,"encoding":"loro-snapshot","data":STANDARD.encode(project.snapshot.unwrap_or_default()),"revision":project.revision.to_string(),"durable":true})
+}
+/// The answer to a client that names versions by head. `head` is the cloud
+/// copy's. It is left out when no stored document was read to answer (the
+/// revision asked about is still current, or nothing is stored yet) and when
+/// the head cannot be named.
+fn changes(id: Uuid, encoding: &str, data: &[u8], head: Option<String>, revision: i64) -> Value {
+    let mut value = json!({"projectId":id,"encoding":encoding,"data":STANDARD.encode(data),"revision":revision.to_string(),"durable":true});
+    if let Some(head) = head {
+        value["head"] = json!(head);
+    }
+    value
+}
+/// A save's answer. The client holds what it sent, so a receipt naming the
+/// stored head is enough; only a head too long to name needs the snapshot.
+fn saved(id: Uuid, project: Merged) -> Response {
+    let value = match project.head {
+        Some(head) => changes(id, "loro-update", &[], Some(head), project.revision),
+        None => baseline(
+            id,
+            Stored {
+                snapshot: Some(project.snapshot),
+                revision: project.revision,
+            },
+        ),
+    };
+    Json(value).into_response()
 }
 
 pub async fn callback(
@@ -233,21 +285,48 @@ pub async fn rpc(
             if !(1..=100).contains(&limit) || (recent && args.cursor.is_some()) {
                 return Err(ApiError::invalid());
             }
-            let rows: Vec<(Uuid,Option<String>,String)> = sqlx::query_as("SELECT id,name,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY CASE WHEN $4 THEN updated_at END DESC, id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).bind(recent).fetch_all(&app.pool).await?;
+            let rows: Vec<(Uuid,Option<String>,String,i64)> = sqlx::query_as("SELECT id,name,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),revision FROM mindgrab_loro.projects WHERE owner_id=$1 AND NOT deleted AND snapshot IS NOT NULL AND ($2::uuid IS NULL OR id>$2) ORDER BY CASE WHEN $4 THEN updated_at END DESC, id LIMIT $3").bind(user.id).bind(args.cursor).bind(limit+1).bind(recent).fetch_all(&app.pool).await?;
             let cursor = if rows.len() > limit as usize && !recent {
                 rows.get(limit as usize - 1).map(|row| row.0)
             } else {
                 None
             };
-            Ok(Json(json!({"projects":rows.into_iter().take(limit as usize).map(|(id,name,updated_at)|{let mut project=record(id,name);project["updatedAt"]=json!(updated_at);project}).collect::<Vec<_>>(),"nextCursor":cursor})).into_response())
+            Ok(Json(json!({"projects":rows.into_iter().take(limit as usize).map(|(id,name,updated_at,revision)|{let mut project=record(id,name);project["updatedAt"]=json!(updated_at);project["revision"]=json!(revision.to_string());project}).collect::<Vec<_>>(),"nextCursor":cursor})).into_response())
         }
         "getProjectSnapshot" => {
-            let args: ProjectId = parse(&headers, &body)?;
-            Ok(Json(baseline(
-                args.project_id,
-                stored(&app, &user, args.project_id).await?,
-            ))
-            .into_response())
+            let args: Changes = parse(&headers, &body)?;
+            let id = args.project_id;
+            // Most reads find nothing new: those are answered without reading
+            // the snapshot or taking a turn.
+            let (revision, initialized): (i64, bool) = sqlx::query_as("SELECT revision,snapshot IS NOT NULL FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(id).bind(user.id).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)?;
+            if args.revision == Some(revision.to_string()) {
+                return Ok(Json(changes(id, "loro-update", &[], None, revision)).into_response());
+            }
+            if !initialized {
+                return Ok(Json(changes(id, "loro-snapshot", &[], None, revision)).into_response());
+            }
+            // The turn comes first: waiting requests then hold no snapshot.
+            let permit = app.compute.acquire(user.id).await?;
+            let project = stored(&app, &user, id).await?;
+            let revision = project.revision;
+            // Deleted and created again while this waited.
+            let Some(snapshot) = project.snapshot else {
+                return Ok(Json(changes(id, "loro-snapshot", &[], None, revision)).into_response());
+            };
+            let since = args.since.unwrap_or_default();
+            // The body is built off the executor too: it can be megabytes.
+            let body = compute::run(&permit, move || {
+                let sent = mindgrab_state::outgoing(&snapshot, &since)?;
+                let value = match (sent.updates, sent.head) {
+                    (Some(updates), Some(head)) => {
+                        changes(id, "loro-update", &updates, Some(head), revision)
+                    }
+                    (_, head) => changes(id, "loro-snapshot", &snapshot, head, revision),
+                };
+                Ok(value.to_string().into_bytes())
+            })
+            .await?;
+            Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
         }
         "listPreferences" => {
             #[derive(Deserialize)]
@@ -319,7 +398,7 @@ pub async fn rpc(
             }
             let id = Uuid::parse_str(&pairs[0].1).map_err(|_| ApiError::invalid())?;
             let project = merge(&app, &user, id, body, None).await?;
-            Ok(Json(baseline(id, project)).into_response())
+            Ok(saved(id, project))
         }
         "commandProject" => {
             #[derive(Deserialize)]
@@ -330,18 +409,15 @@ pub async fn rpc(
             }
             let args: Args = parse(&headers, &body)?;
             // Native commands operate on the same core used by browser editing.
-            Ok(Json(baseline(
+            let project = merge(
+                &app,
+                &user,
                 args.project_id,
-                merge(
-                    &app,
-                    &user,
-                    args.project_id,
-                    Bytes::new(),
-                    Some(args.command),
-                )
-                .await?,
-            ))
-            .into_response())
+                Bytes::new(),
+                Some(args.command),
+            )
+            .await?;
+            Ok(saved(args.project_id, project))
         }
         _ => unreachable!(),
     }
@@ -372,7 +448,7 @@ async fn merge(
     id: Uuid,
     bytes: Bytes,
     command: Option<mindgrab_state::Command>,
-) -> Result<Stored> {
+) -> Result<Merged> {
     // A map kept out of the cloud is not stored there.
     if !crate::preferences::resolve(&app.pool, user.id, id, PreferenceName::SaveInCloud)
         .await?
@@ -387,7 +463,7 @@ async fn merge(
     for _ in 0..MERGE_ATTEMPTS {
         let current = stored(app, user, id).await?;
         let (prior, bytes, command) = (current.snapshot, bytes.clone(), command.clone());
-        let (snapshot, name, changed) = compute::run(&permit, move || {
+        let (snapshot, name, changed, head) = compute::run(&permit, move || {
             let mut project = if let Some(ref prior) = prior {
                 mindgrab_state::Project::from_snapshot(prior)?
             } else {
@@ -406,13 +482,14 @@ async fn merge(
                 Some(prior) if !changed => prior,
                 _ => project.snapshot()?,
             };
-            Ok((snapshot, view.name, changed))
+            Ok((snapshot, view.name, changed, project.head()))
         })
         .await?;
         if !changed {
-            return Ok(Stored {
-                snapshot: Some(snapshot),
+            return Ok(Merged {
+                snapshot,
                 revision: current.revision,
+                head,
             });
         }
         let revision = current.revision + 1;
@@ -421,9 +498,10 @@ async fn merge(
         if saved == 1 {
             notify(&mut tx, user.id, id).await?;
             tx.commit().await?;
-            return Ok(Stored {
-                snapshot: Some(snapshot),
+            return Ok(Merged {
+                snapshot,
                 revision,
+                head,
             });
         }
     }

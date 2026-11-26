@@ -42,6 +42,13 @@ impl WasmProject {
     pub fn version(&self) -> Vec<u8> {
         self.0.version()
     }
+    pub fn head(&self) -> Option<String> {
+        self.0.head()
+    }
+    #[wasm_bindgen(js_name = versionAt)]
+    pub fn version_at(&self, head: &str) -> Option<Vec<u8>> {
+        self.0.version_at(head)
+    }
     #[wasm_bindgen(js_name = updatesSince)]
     pub fn updates_since(&self, version: &[u8]) -> std::result::Result<Vec<u8>, JsValue> {
         self.0.updates_since(version).map_err(js_error)

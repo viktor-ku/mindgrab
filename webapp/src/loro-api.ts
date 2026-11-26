@@ -19,15 +19,23 @@ const record = z.object({
   // Listed projects report their last committed change; registration does not.
   updatedAt: z.string().optional(),
 });
+// Listed projects also name the cloud copy's revision.
+const listed = record.extend({ revision: sequence });
+// What a read or a save answers. A "loro-snapshot" carries the complete
+// document, or nothing while the cloud has none. A "loro-update" carries only
+// changes: with a `head`, those the cloud copy has beyond what the request
+// named; without one, the copy has not moved since the revision named.
 const snapshot = z.object({
   projectId,
   revision: sequence,
-  encoding: z.literal("loro-snapshot"),
+  encoding: z.enum(["loro-snapshot", "loro-update"]),
   data: z.string(),
+  // Names the cloud copy's version, as `ProjectDocument.head` does.
+  head: z.string().max(4096).optional(),
   durable: z.literal(true),
 });
 const shareLink = z.object({ projectId, token: z.string().nullable() });
-export type CloudProject = z.infer<typeof record>;
+export type CloudProject = z.infer<typeof listed>;
 export type CloudSnapshot = z.infer<typeof snapshot>;
 
 export class SyncError extends Error {
@@ -124,7 +132,7 @@ export class LoroApi {
       signal,
       async (signal) =>
         z
-          .object({ projects: z.array(record) })
+          .object({ projects: z.array(listed) })
           .parse(
             await this.#json(
               "listProjects.php",
@@ -135,13 +143,29 @@ export class LoroApi {
     );
   }
 
-  snapshot(id: string, signal: AbortSignal) {
+  // What the cloud copy holds beyond `since`, a head this device holds ("" for
+  // nothing), or word that it has not moved since `revision`.
+  changes(
+    id: string,
+    held: { revision?: string; since: string },
+    signal: AbortSignal,
+  ): Promise<CloudSnapshot> {
     return this.#read(
-      "snapshot",
+      // Reads that hold different versions get different answers, so they
+      // must not share one request.
+      `changes ${held.revision ?? ""} ${held.since}`,
       signal,
-      (signal) => this.#readSnapshot(id, signal),
+      (signal) => this.#readSnapshot({ projectId: id, ...held }, signal),
       id,
     );
+  }
+
+  // The complete cloud copy.
+  async snapshot(id: string, signal: AbortSignal) {
+    const reply = await this.changes(id, { since: "" }, signal);
+    if (reply.encoding !== "loro-snapshot")
+      throw new SyncError("Cloud saving is unavailable. Retrying…");
+    return reply;
   }
 
   // The project's view-only link token, or null while the project is private.
@@ -267,7 +291,7 @@ export class LoroApi {
     do {
       const page = z
         .object({
-          projects: z.array(record),
+          projects: z.array(listed),
           nextCursor: z.string().nullable(),
         })
         .parse(
@@ -286,12 +310,13 @@ export class LoroApi {
     return projects;
   }
 
-  async #readSnapshot(id: string, signal: AbortSignal) {
-    const result = snapshot.parse(
-      await this.#json("getProjectSnapshot.php", { projectId: id }, signal),
+  async #readSnapshot(
+    args: { projectId: string; revision?: string; since?: string },
+    signal: AbortSignal,
+  ) {
+    return this.#parseSnapshot(
+      args.projectId,
+      await this.#json("getProjectSnapshot.php", args, signal),
     );
-    if (result.projectId !== id)
-      throw new SyncError("Unexpected project snapshot.", "blocked");
-    return result;
   }
 }

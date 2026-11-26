@@ -787,6 +787,27 @@ async fn share_links_never_reveal_deleted_ideas_or_notes() {
     f.close().await;
 }
 
+fn node(text: String) -> Command {
+    Command::CreateNode {
+        parent: None,
+        index: None,
+        text,
+        color: Color::BLUE,
+        fill: None,
+    }
+}
+/// A map whose snapshot is over 2 MiB, with the snapshot.
+fn large() -> (Project, Vec<u8>) {
+    let mut project = Project::new("Large").unwrap();
+    for n in 0..48 {
+        let text = (0..6_000).map(|i| format!("{n}-{i} ")).collect();
+        project.apply(node(text)).unwrap();
+    }
+    let snapshot = project.snapshot().unwrap();
+    assert!(snapshot.len() > 2 * 1024 * 1024, "{}", snapshot.len());
+    (project, snapshot)
+}
+
 /// Merges compute without a pool connection or a row lock, so one account's
 /// burst of merges on a large map cannot keep other accounts from the database.
 #[tokio::test]
@@ -805,20 +826,7 @@ async fn concurrent_large_merges_leave_other_accounts_responsive() {
         .status(),
         200
     );
-    let node = |text: String| Command::CreateNode {
-        parent: None,
-        index: None,
-        text,
-        color: Color::BLUE,
-        fill: None,
-    };
-    let mut project = Project::new("Large").unwrap();
-    for n in 0..48 {
-        let text = (0..6_000).map(|i| format!("{n}-{i} ")).collect();
-        project.apply(node(text)).unwrap();
-    }
-    let snapshot = project.snapshot().unwrap();
-    assert!(snapshot.len() > 2 * 1024 * 1024, "{}", snapshot.len());
+    let (project, snapshot) = large();
     assert_eq!(upload(&f, &alice, id, &project).await.status(), 200);
     // Each device sends only its own edit, as the webapp does after a first save.
     let version = project.version();
@@ -887,6 +895,260 @@ async fn concurrent_large_merges_leave_other_accounts_responsive() {
             "Edit {n}"
         );
     }
+    f.close().await;
+}
+
+const MIB: usize = 1024 * 1024;
+/// One request and its answer, with the bytes each body took on the wire.
+struct Exchange {
+    sent: usize,
+    status: u16,
+    received: Vec<u8>,
+}
+impl Exchange {
+    async fn new(request: reqwest::RequestBuilder, kind: &str, body: Vec<u8>) -> Self {
+        let sent = body.len();
+        let response = request
+            .header("content-type", kind)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        Self {
+            sent,
+            status: response.status().as_u16(),
+            received: response.bytes().await.unwrap().to_vec(),
+        }
+    }
+    /// The answer of a request that succeeded.
+    fn json(&self) -> Value {
+        assert_eq!(self.status, 200);
+        serde_json::from_slice(&self.received).unwrap()
+    }
+}
+async fn call(f: &Fixture, method: &str, browser: &str, args: Value) -> Exchange {
+    Exchange::new(
+        f.post(method, browser),
+        "application/json",
+        serde_json::to_vec(&args).unwrap(),
+    )
+    .await
+}
+async fn save(f: &Fixture, browser: &str, id: Uuid, body: Vec<u8>) -> Exchange {
+    let request = f.post("mergeProject", browser).query(&[("projectId", id)]);
+    Exchange::new(request, "application/octet-stream", body).await
+}
+
+/// Saving and polling a large map moves only what changed; the whole map goes
+/// only to a client that holds none of it.
+#[tokio::test]
+async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
+    let f = Fixture::new("http://localhost:5173").await;
+    let alice = f.credential("alice").await;
+    let bob = f.credential("bob").await;
+    let id = Uuid::new_v4();
+    let create = || {
+        f.rpc(
+            "createProject",
+            &alice,
+            json!({"projectId":id,"schemaVersion":1}),
+        )
+    };
+    assert_eq!(create().await.status(), 200);
+    let (project, snapshot) = large();
+    let stored = async || {
+        sqlx::query_scalar::<_, Vec<u8>>("SELECT snapshot FROM mindgrab_loro.projects WHERE id=$1")
+            .bind(id)
+            .fetch_one(&f.backend.pool)
+            .await
+            .unwrap()
+    };
+    let read = async |args: Value| {
+        let mut body = json!({"projectId":id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(args.as_object().unwrap().clone());
+        call(&f, "getProjectSnapshot", &alice, body).await
+    };
+    // Another account learns nothing of the map, whatever it says it holds.
+    let foreign = async |args: Value| {
+        let mut body = json!({"projectId":id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(args.as_object().unwrap().clone());
+        let refused = call(&f, "getProjectSnapshot", &bob, body).await;
+        assert_eq!(refused.status, 404, "{args}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&refused.received).unwrap(),
+            json!({"error":{"code":"project_not_found"}}),
+            "{args}"
+        );
+    };
+    // Not while the map is registered and holds no snapshot yet.
+    foreign(json!({"since":""})).await;
+
+    // The first save sends the whole map and gets a receipt back, not the map.
+    let first = save(&f, &alice, id, snapshot.clone()).await;
+    assert!(first.received.len() < 1024, "{}", first.received.len());
+    let head = project.head().unwrap();
+    assert_eq!(
+        first.json(),
+        json!({"projectId":id,"encoding":"loro-update","data":"","head":head,"revision":"1","durable":true})
+    );
+
+    let listing = call(&f, "listProjects", &alice, json!({"limit":100})).await;
+    assert!(listing.received.len() < 1024, "{}", listing.received.len());
+    assert_eq!(listing.json()["projects"][0]["revision"], "1");
+    let recent = call(&f, "listProjects", &alice, json!({"recent":true})).await;
+    assert_eq!(recent.json()["projects"][0]["revision"], "1");
+
+    // An idle poll of an unchanged map carries no document bytes.
+    let idle = read(json!({"revision":"1","since":head})).await;
+    assert!(idle.received.len() < 512, "{}", idle.received.len());
+    assert_eq!(
+        idle.json(),
+        json!({"projectId":id,"encoding":"loro-update","data":"","revision":"1","durable":true})
+    );
+    // Nor does one from a client that holds the map but no revision for it.
+    let held = read(json!({"since":head})).await;
+    assert!(held.received.len() < 512, "{}", held.received.len());
+    assert_eq!(
+        held.json(),
+        json!({"projectId":id,"encoding":"loro-update","data":"","head":head,"revision":"1","durable":true})
+    );
+    // Naming the revision the map is at tells another account nothing either.
+    foreign(json!({"revision":"1","since":head})).await;
+
+    // One typed character goes up as that change and comes back as a receipt.
+    let mut device = Project::from_snapshot(&snapshot).unwrap();
+    let idea = device.view().unwrap().nodes[0].id.clone();
+    device
+        .apply(Command::EditText {
+            id: idea,
+            index: 0,
+            delete_count: 0,
+            insert: "x".into(),
+        })
+        .unwrap();
+    let edit = device.updates_since(&project.version()).unwrap();
+    let edited = device.head().unwrap();
+    assert_ne!(edited, head);
+    let second = save(&f, &alice, id, edit.clone()).await;
+    assert!(second.sent < 2 * 1024, "{}", second.sent);
+    assert!(second.received.len() < 1024, "{}", second.received.len());
+    assert_eq!(
+        second.json(),
+        json!({"projectId":id,"encoding":"loro-update","data":"","head":edited,"revision":"2","durable":true})
+    );
+    // The whole save, with the read before it, stays small both ways.
+    assert!(idle.sent + second.sent < 4 * 1024);
+    assert!(idle.received.len() + second.received.len() < 4 * 1024);
+
+    // Another device at the earlier version gets that one change.
+    let behind = read(json!({"revision":"1","since":head})).await;
+    assert!(
+        behind.received.len() < 2 * 1024,
+        "{}",
+        behind.received.len()
+    );
+    let value = behind.json();
+    assert_eq!(value["encoding"], "loro-update");
+    assert_eq!(value["head"], edited.as_str());
+    assert_eq!(value["revision"], "2");
+    let mut replica = Project::from_snapshot(&snapshot).unwrap();
+    replica
+        .merge(&STANDARD.decode(value["data"].as_str().unwrap()).unwrap())
+        .unwrap();
+    assert_eq!(replica.view().unwrap(), device.view().unwrap());
+    assert_eq!(replica.head().unwrap(), edited);
+
+    // A client that holds nothing of the cloud copy gets the complete map. A
+    // head that is malformed or too long counts as holding nothing; it is
+    // never an error.
+    let mut elsewhere = Project::from_snapshot(&snapshot).unwrap();
+    elsewhere.apply(node("Never saved".into())).unwrap();
+    let long = vec![head.as_str(); 4096 / head.len() + 1].join(",");
+    assert!(
+        long.len() > 4096 && long.len() < 12 * 1024,
+        "{}",
+        long.len()
+    );
+    let saved = stored().await;
+    for since in ["", &elsewhere.head().unwrap(), "not a head", "-1@5", &long] {
+        let everything = read(json!({"since":since})).await;
+        assert_eq!(everything.status, 200, "{since}");
+        assert!(everything.received.len() > 2 * MIB, "{since}");
+        let value = everything.json();
+        assert_eq!(value["encoding"], "loro-snapshot", "{since}");
+        assert_eq!(value["head"], edited.as_str(), "{since}");
+        assert_eq!(value["revision"], "2", "{since}");
+        assert!(
+            STANDARD.decode(value["data"].as_str().unwrap()).unwrap() == saved,
+            "{since}"
+        );
+    }
+    // Only a string says what a client holds.
+    for args in [
+        json!({"revision":1,"since":head}),
+        json!({"revision":"1","since":5}),
+        json!({"revision":null}),
+        json!({"since":null}),
+        json!({"since":head,"version":"1"}),
+    ] {
+        let refused = read(args.clone()).await;
+        assert_eq!(refused.status, 400, "{args}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&refused.received).unwrap(),
+            json!({"error":{"code":"invalid_request"}})
+        );
+    }
+
+    // A read that names nothing holds nothing, and gets the whole map.
+    let plain = read(json!({})).await;
+    assert!(plain.received.len() > 2 * MIB);
+    let value = plain.json();
+    assert_eq!(value["encoding"], "loro-snapshot");
+    assert_eq!(value["head"], edited.as_str());
+    assert!(STANDARD.decode(value["data"].as_str().unwrap()).unwrap() == saved);
+    // A merge that changes nothing keeps the revision.
+    let repeated = save(&f, &alice, id, edit).await;
+    assert_eq!(repeated.json(), second.json());
+
+    // A native command is answered with a receipt too.
+    let command = json!({"projectId":id,"command":{"type":"createNode","parent":null,"index":null,"text":"Native","color":"teal"}});
+    let commanded = call(&f, "commandProject", &alice, command).await;
+    assert!(
+        commanded.received.len() < 1024,
+        "{}",
+        commanded.received.len()
+    );
+    let value = commanded.json();
+    assert_eq!(value["encoding"], "loro-update");
+    assert_eq!(value["data"], "");
+    assert_eq!(value["revision"], "3");
+    let commanded = Project::from_snapshot(&stored().await).unwrap();
+    assert_eq!(value["head"], commanded.head().unwrap().as_str());
+    assert_eq!(
+        commanded.view().unwrap().nodes.last().unwrap().text,
+        "Native"
+    );
+
+    // A cloud copy deleted and created again holds nothing: a client that
+    // remembers the old one is told so, and then sends its map.
+    let remembered = json!({"revision":"3","since":commanded.head().unwrap()});
+    assert_eq!(
+        f.rpc("deleteProject", &alice, json!({"projectId":id}))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(read(remembered.clone()).await.status, 404);
+    assert_eq!(create().await.status(), 200);
+    let emptied = read(remembered).await;
+    assert_eq!(
+        emptied.json(),
+        json!({"projectId":id,"encoding":"loro-snapshot","data":"","revision":"4","durable":true})
+    );
     f.close().await;
 }
 
