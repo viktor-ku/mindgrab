@@ -229,6 +229,12 @@ export class LoroApi {
         throw new SyncError("Cloud saving is unavailable. Retrying…");
       // Retrying cannot help until the account stores less, so cloud saving
       // waits for the person.
+      if (code === "id_quota_exceeded")
+        throw new SyncError(
+          "Your account has created as many cloud maps as it can, including deleted ones, so new maps are saved only in this browser. Your other cloud maps keep saving.",
+          "blocked",
+          code,
+        );
       if (code === "quota_exceeded")
         throw new SyncError(
           "Your account has used all of its cloud storage, so changes are no longer saved to the cloud. Delete maps you no longer need, or turn off cloud saving for them, to make room.",

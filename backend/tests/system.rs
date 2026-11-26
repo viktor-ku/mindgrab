@@ -1070,12 +1070,15 @@ async fn create(f: &Fixture, browser: &str, id: Uuid) -> reqwest::Response {
     )
     .await
 }
-async fn assert_over_quota(response: reqwest::Response) {
+async fn assert_refused(response: reqwest::Response, code: &str) {
     assert_eq!(response.status(), 422);
     assert_eq!(
         response.json::<Value>().await.unwrap()["error"]["code"],
-        "quota_exceeded"
+        code
     );
+}
+async fn assert_over_quota(response: reqwest::Response) {
+    assert_refused(response, "quota_exceeded").await;
 }
 async fn rows(f: &Fixture, id: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.projects WHERE id=$1")
@@ -1119,9 +1122,10 @@ async fn an_account_keeps_at_most_its_quota_of_maps_and_ids() {
     };
     delete(a).await;
     assert_eq!(create(&f, &alice, c).await.status(), 200);
-    // A deleted map keeps its ID reserved, and the reservation counts.
+    // A deleted map keeps its ID reserved, and the reservation counts. That
+    // cap is told apart: deleting more maps would not free an ID.
     delete(b).await;
-    assert_over_quota(create(&f, &alice, d).await).await;
+    assert_refused(create(&f, &alice, d).await, "id_quota_exceeded").await;
     assert_eq!(rows(&f, d).await, 0);
     // Restoring a deleted map takes no new ID, but it is a map again.
     assert_eq!(create(&f, &alice, a).await.status(), 200);
@@ -1221,9 +1225,23 @@ async fn an_account_stores_at_most_its_quota_of_bytes() {
     );
     assert_eq!(measured(xid).await.0, 0);
     assert_eq!(upload(&f, &alice, yid, &y).await.status(), 200);
+    // The database measures every write, also one that does not mention the
+    // size, as the backend before it did.
+    sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=NULL,deleted=true WHERE id=$1")
+        .bind(xid)
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=$2,deleted=false WHERE id=$1")
+        .bind(xid)
+        .bind(x.snapshot().unwrap())
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    let (bytes, length, _) = measured(xid).await;
+    assert_eq!(Some(bytes as i32), length);
     // Rows stored before sizes were kept are measured when the schema is installed.
-    sqlx::query("UPDATE mindgrab_loro.projects SET snapshot_bytes=0 WHERE id=$1")
-        .bind(yid)
+    sqlx::raw_sql("ALTER TABLE mindgrab_loro.projects DISABLE TRIGGER measure_snapshot; UPDATE mindgrab_loro.projects SET snapshot_bytes=0; ALTER TABLE mindgrab_loro.projects ENABLE TRIGGER measure_snapshot")
         .execute(&f.backend.pool)
         .await
         .unwrap();

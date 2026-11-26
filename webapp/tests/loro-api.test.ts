@@ -22,6 +22,13 @@ test("a full account stops cloud saving and says how to make room", async () => 
   expect((error as SyncError).message).toContain("to make room");
 });
 
+test("an account out of map IDs does not suggest deleting maps", async () => {
+  const error = await saveWith(refusing(422, "id_quota_exceeded"));
+  expect(error).toMatchObject({ kind: "blocked", code: "id_quota_exceeded" });
+  expect((error as SyncError).message).toContain("saved only in this browser");
+  expect((error as SyncError).message).not.toContain("Delete");
+});
+
 test("a map too large for the cloud says so", async () => {
   for (const [status, code] of [
     [413, "payload_too_large"],
