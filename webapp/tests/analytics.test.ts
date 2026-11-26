@@ -66,6 +66,17 @@ test("nothing is sent before the visitor chooses, and declining never identifies
 
   analytics.setConsent("denied");
   await Bun.sleep(10);
+  // The backend's proxy answers only its one URL, so the SDK must be given the
+  // hook that moves its paths into the query.
+  const [, , options] = calls.find(([name]) => name === "init") as [
+    string,
+    string,
+    { api_host: string; rewriteRequestPath: (url: URL) => URL },
+  ];
+  expect(options.api_host).toEndWith("/ingest.php");
+  expect(
+    options.rewriteRequestPath(new URL(`${options.api_host}/e/`)).href,
+  ).toBe(`${options.api_host}?r=%2Fe%2F`);
   calls.length = 0;
   analytics.identify(user);
   analytics.track("signed_out");

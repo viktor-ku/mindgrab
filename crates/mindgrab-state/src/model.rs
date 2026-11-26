@@ -6,6 +6,9 @@ pub const MAX_NODES: usize = 10_000;
 pub const MAX_TEXT_UTF16: usize = 65_536;
 pub const MAX_NAME_BYTES: usize = 200;
 pub const MAX_SNAPSHOT_BYTES: usize = 10 * 1024 * 1024;
+/// The longest head a version is named by. One id takes at most 31 bytes, so
+/// only a document with over a hundred concurrent latest changes exceeds it.
+pub const MAX_HEAD_BYTES: usize = 4096;
 /// The most space a gap can keep, far taller than any map. Gaps add up when
 /// ideas are deleted or moved; capping each sum here keeps it finite.
 pub const MAX_GAP: f64 = 1e9;

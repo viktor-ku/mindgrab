@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.login_attempts (
     verifier TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '10 minutes'
 );
+-- Sessions from before WorkOS tokens were sealed, which held them in plain
+-- text. Nothing reads this table now. It stays, always empty, while a deployment
+-- that still uses it may be serving: it is emptied on every startup and every
+-- hour (`Backend::cleanup`), and the people it held sign in again.
 CREATE TABLE IF NOT EXISTS mindgrab_loro.sessions (
     browser_hash TEXT PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),
@@ -20,8 +24,21 @@ CREATE TABLE IF NOT EXISTS mindgrab_loro.sessions (
     expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days'
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry ON mindgrab_loro.sessions(expires_at);
--- While set and in the future, one request is refreshing this session's tokens.
 ALTER TABLE mindgrab_loro.sessions ADD COLUMN IF NOT EXISTS refreshing_until TIMESTAMPTZ;
+DELETE FROM mindgrab_loro.sessions;
+CREATE TABLE IF NOT EXISTS mindgrab_loro.sealed_sessions (
+    browser_hash TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),
+    provider_session TEXT NOT NULL,
+    -- The WorkOS tokens, sealed with AES-256-GCM (backend/src/sealing.rs) under
+    -- a key kept outside the database.
+    sealed_access_token TEXT NOT NULL,
+    sealed_refresh_token TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '30 days',
+    -- While set and in the future, one request is refreshing this session's tokens.
+    refreshing_until TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS sealed_sessions_expiry ON mindgrab_loro.sealed_sessions(expires_at);
 CREATE TABLE IF NOT EXISTS mindgrab_loro.projects (
     id UUID PRIMARY KEY,
     owner_id BIGINT NOT NULL REFERENCES mindgrab_loro.users(id),

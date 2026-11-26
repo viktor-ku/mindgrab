@@ -29,8 +29,8 @@ and CORS allow the app's origin.
 
 Set `HOST=::` and `PORT=8080` so the API is reachable on Railway's public and
 private networks. Keep `DATABASE_URL` pointing at the project's Postgres
-service. Configure the WorkOS credentials, `APP_URL` and `WORKOS_REDIRECT_URI`
-as described below. Release builds use WorkOS authentication.
+service. Configure the WorkOS credentials, `TOKEN_KEYS`, `APP_URL` and
+`WORKOS_REDIRECT_URI` as described below. Release builds use WorkOS authentication.
 
 The backend image contains the compiled native API and trusted HTTPS certificates.
 Postgres schema creation runs on startup. GET `/` is the healthcheck: Apache's "It works!" page
@@ -110,7 +110,8 @@ allow the exact `WORKOS_REDIRECT_URI` and `APP_URL` for that environment.
 login ignores it.
 
 WorkOS authorization uses one-use state and PKCE. The server stores an opaque,
-hashed browser credential and keeps access/refresh tokens in Postgres. Each
+hashed browser credential and keeps access/refresh tokens in Postgres, sealed
+with AES-256-GCM (see below). Each
 protected request validates a signed RS256 JWT against WorkOS JWKS, checking
 issuer, client ID, audience when present, session identity and token timing.
 Refresh rotation is serialized with a short lease on the session row, so no
@@ -123,8 +124,34 @@ account fence (`x-mindgrab-account`) so a changed cookie cannot write into the
 previous workspace. The backend does not rate limit requests; that belongs in
 Cloudflare. It does bound document work: as many merges and projections at once
 as there are cores, two per account. Requests over that wait up to 3 seconds and
-are then answered 429 `busy`. The webapp treats a 429 as a temporary cloud
-failure and keeps retrying.
+are then answered 429 `busy`. A `getProjectSnapshot` takes one of those seats
+when it has to read the snapshot; one that finds the revision unchanged, or no
+snapshot, does not. The webapp treats a 429 as a temporary cloud failure and
+keeps retrying.
+
+### Token keys
+
+`TOKEN_KEYS` holds the keys that seal each session's WorkOS tokens, so a copy
+of the database alone holds no usable token. It lists `<id>:<key>` entries,
+separated by commas or spaces, where each key is 32 random bytes in base64
+(`openssl rand -base64 32`). The first entry seals; any listed entry opens a
+token it sealed, which the stored value names by its id. Keep the variable on
+the Railway service only, never next to `DATABASE_URL` in a shared place. WorkOS
+mode refuses to start without it. Local login uses a fixed key when it is unset,
+since its tokens are not secret.
+
+To rotate, do it in two deploys, so no instance seals with a key that another
+cannot open yet. First add the new entry after the current first one and let
+every instance restart. Then move the new entry first. Keep the old entry until
+every session it sealed has been refreshed or has expired: refreshes reseal
+with the first key, and sessions last at most 30 days. A session whose tokens no key opens ends, and
+its person signs in again. The sealed value is bound to its session and column,
+so tokens copied to another session do not open.
+
+Sealed sessions live in `sealed_sessions`. The `sessions` table from before
+sealing stays so a deployment still serving it keeps working during a rollout
+or rollback, but it is emptied on startup and every hour, so its people sign in
+again. A later change can drop it.
 
 ## API
 
@@ -136,11 +163,11 @@ All RPC endpoints use POST and return uncached responses:
 | `/api/startLogin.php`, `/api/logout.php` | Login/logout navigation |
 | `/api/getMe.php` | Verified current account |
 | `/api/createProject.php` | Reserve `{projectId, schemaVersion: 1}` |
-| `/api/listProjects.php` | Cursor pagination of the current owner's initialized projects |
-| `/api/getProjectSnapshot.php` | Complete Loro history snapshot, base64 encoded |
+| `/api/listProjects.php` | Cursor pagination of the current owner's initialized projects, each with its `revision` |
+| `/api/getProjectSnapshot.php` | `{projectId, revision?, since?}`: what the client lacks, base64 encoded; the complete Loro history snapshot for a client that holds nothing |
 | `/api/getProjectState.php` | Read-only Rust projection for inspection |
-| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot, or only the changes the stored one lacks |
-| `/api/commandProject.php` | Apply `{projectId, command}` with the native shared core |
+| `/api/mergeProject.php?projectId=<uuid>` | Merge an octet-stream snapshot, or only the changes the stored one lacks. Answers a receipt |
+| `/api/commandProject.php` | Apply `{projectId, command}` with the native shared core. Answers a receipt |
 | `/api/deleteProject.php` | Delete the cloud snapshot |
 | `/api/getShareLink.php` | The owner's `{projectId, token}`; `token` is null while private |
 | `/api/setShareLink.php` | Owner turns the view-only link on (keeps an existing token) or off (revokes it) |
@@ -170,11 +197,45 @@ merging, keeping one view so unchanged ideas are not rebuilt on screen.
 Uploads validate and merge with the shared Rust core off the async executor,
 holding no database connection or row lock meanwhile. The result is stored only
 if the project is still at the revision it was computed from; otherwise the merge
-starts over, up to three times, and then answers 429. The complete result is
-committed before acknowledging
-`{projectId, encoding: "loro-snapshot", data, revision, durable: true}`. Repeated
-uploads are idempotent. Invalid bytes do not mutate accepted storage. Errors
-use `{error: {code}}`; snapshots are capped at 10 MiB.
+starts over, up to three times, and then answers 429. The result is committed
+before acknowledging. The client keeps what it sent, so `mergeProject` and
+`commandProject` answer only a receipt:
+`{projectId, encoding: "loro-update", data: "", head, revision, durable: true}`.
+A merge that changed nothing answers the revision it found. Repeated uploads are
+idempotent. Invalid bytes do not mutate accepted storage. Errors use
+`{error: {code}}`; snapshots are capped at 10 MiB.
+
+A head names a document version by its latest changes: `counter@peer` ids in
+decimal, sorted by peer and joined by commas, at most 4,096 bytes
+(`Project::head`). It stays a few bytes however many sessions have edited the
+map. A map with so many concurrent latest changes that its head would be longer
+has none: its receipts are complete snapshots without `head`, and so are its
+reads.
+
+`getProjectSnapshot` takes two optional fields, `revision` (the cloud revision
+the client last saw) and `since` (a head its document holds; `""` or absent for
+none). Both must be JSON strings; any other type, `null` included, is 400
+`invalid_request`. A string never is, whatever it holds: a `revision` that is
+not the stored one is simply different, and a `since` that is malformed, too
+long or not held means the client gets everything. The answer is the first of
+these that applies:
+
+| Case | Answer |
+| --- | --- |
+| `revision` is the stored one | `encoding: "loro-update"`, `data: ""`, no `head`: nothing changed |
+| The cloud holds no snapshot | `encoding: "loro-snapshot"`, `data: ""`, no `head` |
+| The stored document holds `since`, and what it has beyond it is smaller than the snapshot | `encoding: "loro-update"`, `data` with those changes (`""` when there are none), `head` |
+| Anything else | `encoding: "loro-snapshot"`, the complete `data`, `head` |
+
+Every answer also carries `projectId`, `revision` and `durable: true`, and
+`head` is the cloud copy's.
+
+A revision must never name two contents of one project id. Clients remember
+`revision` with `head` and skip reading a map whose revision they already hold,
+so reusing one would hide a change from them until the next. That holds today:
+a revision only grows, a merge that changes nothing keeps it, deleting adds one,
+creating again keeps it, and rows are never removed. Keep it so in anything
+that restores or hard-deletes projects.
 
 A request body is read only after the session check, so a request without a
 session is refused before any of its body is held in memory. Each method then
@@ -186,8 +247,13 @@ including `getSharedProject`, which has no session. `getHealth`, `getMe`,
 phpMyAdmin decoy keep their own limits.
 
 The webapp uploads a complete snapshot only while the cloud has none. After that
-it sends the changes the cloud copy lacks. It reads the cloud copy before every
-upload, so a save whose acknowledgement was lost is not sent again. Changes that build
+it sends the changes the cloud copy lacks. Before an
+upload it asks what the cloud copy has beyond the revision and head it last
+saw, so a save whose acknowledgement was lost comes back once and is not sent
+again, and an unchanged map costs no document bytes. A background pass skips
+that question for a map whose listing just reported the revision it already
+holds; a save that commits after that listing can be sent once more, which
+changes nothing because uploads are idempotent. Changes that build
 on history the cloud copy does not hold are refused with 422
 `missing_dependencies`, and the webapp then sends the complete snapshot once.
 
@@ -282,10 +348,19 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
   `/index.php` answer every method.
 - **A path that continues past a script** (PATH_INFO, `/index.php/x`) runs the script
   in PHP. Here only the decoys accept it: `/index.php` and `/phpmyadmin/index.php`.
-  The `/api/*.php` endpoints answer 404, as Apache does with `AcceptPathInfo Off`,
-  so a rule written for an endpoint's exact path always covers it.
-- **`/ingest.php/<path>`** is PATH_INFO style, as in a PHP front controller. The
-  PostHog SDK appends its own paths, so the URL cannot end in `.php`.
+  The `/api/*.php` endpoints and `/ingest.php` answer 404, as Apache does with
+  `AcceptPathInfo Off`, so a rule written for an endpoint's exact path always
+  covers it.
+- **`/ingest.php?r=<path>`** is the analytics proxy, with the route in the query
+  as in a PHP front controller. The PostHog SDK appends its own paths to its host
+  (`/ingest.php/e/`), so the webapp moves each one into `r` with the SDK's
+  `rewriteRequestPath` option (`webapp/src/ingest-url.ts`). The proxy forwards a
+  closed list and answers 404 to the rest without contacting PostHog
+  (`upstream` in `src/analytics.rs`): `POST` to `/e/`, `/i/v0/e/`, `/s/` and
+  `/flags/`, and `GET` for the SDK's scripts under `/static/` and for the remote
+  config of the project in `POSTHOG_KEY`. Query parameters the SDK does not send
+  are dropped. A new PostHog feature that calls another path stays off until its
+  path is added there.
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
   `.php` rule. PHP behind Apache cannot hold a WebSocket, so real PHP stacks run a
   Ratchet daemon behind `mod_proxy_wstunnel` on a path such as `/ws`.
@@ -314,6 +389,10 @@ charset on JavaScript and CSS. A POST for one gets the file. A missing `/assets/
 file gets Apache's 404 page, `/assets` redirects to its slash, and `/assets/`,
 `.ht*`, `/icons/` and `/server-status` get the 403 page. `TRACE` gets the 405.
 `/phpmyadmin` redirects to the decoy on the API with Apache's 301 page.
+
+Every response, Apache's pages included, carries the security headers described in
+[`webapp/README.md`](../webapp/README.md), as a site that sets them with
+`Header always set` would send them.
 
 Two things live only in Cloudflare, on the `mindgrab.app` zone. Recreate them if the
 zone is rebuilt.

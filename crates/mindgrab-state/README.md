@@ -75,18 +75,29 @@ it are capped, so a sum can never overflow. Clients older than gaps reject
 documents that have them.
 
 The flat Rust view contains ordered nodes, parents, children, depth, colors and
-positions. JSON projections serve rendering and inspection. Sync and browser
-persistence use complete binary snapshots containing CRDT history, including
-deletes. Version comparison uses a canonical sorted vector, independent of
+positions. JSON projections serve rendering and inspection. Browser persistence, and the
+first exchange with a replica, use complete binary snapshots containing CRDT
+history, including deletes. Later exchanges carry only the changes beyond a
+version (`updates_since`) or a head (`outgoing`). Version comparison uses a canonical sorted vector, independent of
 hash-map insertion order. Snapshots merge in any order, including duplicates.
 
 Remote imports are validated on a disposable replica before accepted state or
 undo history changes. Malformed data, unexpected fields, invalid hidden nodes,
-unsupported schemas and causal gaps are rejected. Sending full history avoids
-pending-dependency transport state. Snapshot size is capped at 10 MiB, total
+unsupported schemas and causal gaps are rejected. Changes whose dependencies
+are missing are refused, not kept pending; the sender then sends the complete
+snapshot. Snapshot size is capped at 10 MiB, total
 tree entries (including deleted entries) at 10,000, node text at 65,536 UTF-16
 units, and project names at 200 UTF-8 bytes. These are application limits; large
-history compaction and incremental transport can be added separately.
+history compaction can be added separately.
+
+`head` names a document's version by its latest changes: `counter@peer` ids,
+sorted by peer and joined by commas, in at most `MAX_HEAD_BYTES`. It stays a few
+bytes where the version vector grows with every peer that has edited the map.
+`version_at` gives the version a head names, when the document holds every
+change in it. `outgoing` reads a stored snapshot and answers a replica at a
+given head with what it lacks: nothing, the changes since, or the instruction
+to send the complete snapshot, when the head is not held or the changes would
+be no smaller. Browser bindings expose `head` and `versionAt`.
 
 Run `mise run state:test`, `mise run state:check` and `mise run state:interop`.
 The interoperability suite opens the main app with the real Rust backend and

@@ -246,6 +246,13 @@ async function readStoredName(name: string, id: string, timeoutMs: number) {
   }
 }
 
+// What the server said the cloud copy held: at `revision`, exactly the changes
+// `head` names, or no document for "". It says nothing about the local copy.
+export interface CloudMarker {
+  revision: string;
+  head: string;
+}
+
 export interface CatalogEntry {
   id: string;
   name: string;
@@ -268,6 +275,7 @@ export interface CatalogEntry {
   claimSource?: string;
   saving?: SavingPreferences;
   cloudAttempted?: boolean;
+  cloud?: CloudMarker;
 }
 
 class Catalog {
@@ -954,6 +962,8 @@ export class ProjectRepository {
   readonly #volatile = new Set<string>();
   readonly #registeredCloud = new Set<string>();
   readonly #attemptedCloud = new Set<string>();
+  // Cloud markers of maps not kept locally, which have no catalog entry.
+  readonly #cloudVersions = new Map<string, CloudMarker>();
   readonly #memoryPreferences = new Map<string, unknown>();
   #latest?: string;
   readonly #channel?: BroadcastChannel;
@@ -1242,10 +1252,41 @@ export class ProjectRepository {
   async markUnregistered(id: string) {
     this.#registeredCloud.delete(id);
     this.#attemptedCloud.delete(id);
+    this.#cloudVersions.delete(id);
     await this.#catalog.update(id, (entry) =>
       entry
-        ? { ...entry, registration: "pending", cloudAttempted: false }
+        ? {
+            ...entry,
+            registration: "pending",
+            cloudAttempted: false,
+            cloud: undefined,
+          }
         : entry,
+    );
+  }
+
+  // The last cloud version the server reported for this map, if any.
+  async cloudVersion(id: string): Promise<CloudMarker | undefined> {
+    return this.#volatile.has(id)
+      ? this.#cloudVersions.get(id)
+      : (await this.#catalog.get(id))?.cloud;
+  }
+
+  // A plain overwrite, not "the higher revision wins": a restored database
+  // must not pin a revision the cloud has yet to reach. Nothing shows a
+  // marker, so nothing is announced.
+  async markCloudVersion(id: string, marker?: CloudMarker) {
+    if (this.#volatile.has(id)) {
+      if (marker) this.#cloudVersions.set(id, marker);
+      else this.#cloudVersions.delete(id);
+      return;
+    }
+    await this.#catalog.update(id, (entry) =>
+      !entry ||
+      (entry.cloud?.revision === marker?.revision &&
+        entry.cloud?.head === marker?.head)
+        ? entry
+        : { ...entry, cloud: marker },
     );
   }
 
@@ -1462,6 +1503,7 @@ export class ProjectRepository {
       if (previous?.registration === "registered")
         this.#registeredCloud.add(session.id);
       if (previous?.cloudAttempted) this.#attemptedCloud.add(session.id);
+      if (previous?.cloud) this.#cloudVersions.set(session.id, previous.cloud);
       this.#memoryEntries.set(session.id, {
         id: session.id,
         name,
@@ -1505,10 +1547,13 @@ export class ProjectRepository {
           registration: this.#registeredCloud.has(session.id)
             ? "registered"
             : "pending",
+          cloud: this.#cloudVersions.get(session.id),
         };
       },
     );
     if (entry) {
+      // The catalog holds the marker again.
+      this.#cloudVersions.delete(session.id);
       session.registered = true;
       session.catalogName = entry.name;
     }

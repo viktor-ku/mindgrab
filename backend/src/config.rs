@@ -1,4 +1,7 @@
-use crate::error::{ApiError, Result};
+use crate::{
+    error::{ApiError, Result},
+    sealing::Keys,
+};
 use reqwest::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +23,8 @@ pub struct Config {
     pub secure_cookies: bool,
     /// Product analytics; unset sends nothing and disables the /ingest.php proxy.
     pub posthog: Option<PostHogConfig>,
+    /// Seal the WorkOS tokens stored with each session (`TOKEN_KEYS`).
+    pub token_keys: Keys,
     pub quota: Quota,
 }
 /// The most one account keeps in the cloud. Without a cap, one free account
@@ -158,6 +163,11 @@ impl Config {
                 "The callback must be /api/auth/callback.php on the APP_URL host or a subdomain of it",
             );
         }
+        let token_keys = match get("TOKEN_KEYS").filter(|keys| !keys.trim().is_empty()) {
+            Some(keys) => Keys::parse(&keys)?,
+            None if auth_mode == AuthMode::Local => Keys::development(),
+            None => return Err("Missing TOKEN_KEYS; see backend/README.md"),
+        };
         let issuer = get("WORKOS_ISSUER")
             .unwrap_or_else(|| format!("https://api.workos.com/user_management/{client_id}"));
         Ok(Self {
@@ -172,6 +182,7 @@ impl Config {
             provider_url: "https://api.workos.com".into(),
             secure_cookies: app.scheme() == "https",
             posthog: PostHogConfig::from_values(get("POSTHOG_KEY"), get("POSTHOG_HOST"))?,
+            token_keys,
             quota: Quota::default(),
         })
     }
@@ -259,5 +270,29 @@ mod tests {
         );
         assert!(config(&[("MINDGRAB_AUTH_MODE", "typo")], true).is_err());
         assert!(config(&[], true).is_err()); // The default still requires WorkOS credentials.
+    }
+
+    #[test]
+    fn workos_auth_needs_token_keys() {
+        let workos = [
+            ("WORKOS_CLIENT_ID", "client_test"),
+            ("WORKOS_API_KEY", "sk_test"),
+            (
+                "WORKOS_REDIRECT_URI",
+                "https://api.mindgrab.app/api/auth/callback.php",
+            ),
+            ("APP_URL", "https://mindgrab.app/"),
+        ];
+        assert_eq!(
+            config(&workos, false).err(),
+            Some("Missing TOKEN_KEYS; see backend/README.md")
+        );
+        let keys = (
+            "TOKEN_KEYS",
+            "k1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+        );
+        assert!(config(&[&workos[..], &[keys]].concat(), false).is_ok());
+        let short = ("TOKEN_KEYS", "k1:AQEB");
+        assert!(config(&[&workos[..], &[short]].concat(), false).is_err());
     }
 }

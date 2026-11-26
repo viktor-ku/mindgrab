@@ -77,18 +77,52 @@ async fn proxy_and_signup_consent() {
         }),
     )
     .await;
-    let old = f
+    // The proxy has one URL. A path after it, as the SDK would append by itself,
+    // is a missing file, and PostHog's private API is not a route.
+    for (method, path) in [
+        (reqwest::Method::POST, "/ingest/e/"),
+        (reqwest::Method::POST, "/ingest.php/e/"),
+        (reqwest::Method::GET, "/ingest.php/api/projects/@current"),
+        (reqwest::Method::GET, "/ingest.php"),
+        (reqwest::Method::GET, "/ingest.php?r=/api/projects/@current"),
+        (reqwest::Method::GET, "/ingest.php?r=/e/"),
+        (reqwest::Method::POST, "/ingest.php?r=/static/array.js"),
+        (
+            reqwest::Method::GET,
+            "/ingest.php?r=/array/phc_other/config.js",
+        ),
+    ] {
+        let refused = f
+            .client
+            .request(method, format!("{}{path}", f.url))
+            .body("payload")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 404, "{path}");
+    }
+    assert!(events.try_recv().is_err());
+    assert!(asset_requests.try_recv().is_err());
+    let refused = f
         .client
-        .post(format!("{}/ingest/e/?test=yes", f.url))
-        .body("payload")
+        .get(format!("{}/ingest.php?r=/api/projects/@current", f.url))
         .send()
         .await
         .unwrap();
-    assert_eq!(old.status(), 404);
-    assert!(events.try_recv().is_err());
+    assert_eq!(refused.headers()["x-powered-by"], "PHP/8.3.14");
+    assert!(
+        refused
+            .text()
+            .await
+            .unwrap()
+            .contains("404 Not Found in /var/www/html/ingest.php")
+    );
     let response = f
         .client
-        .post(format!("{}/ingest.php/e/?test=yes", f.url))
+        .post(format!(
+            "{}/ingest.php?personal_api_key=phx_other&r=%2Fe%2F&retry_count=1",
+            f.url
+        ))
         .header("cookie", "secret=value")
         .header("x-forwarded-for", "203.0.113.1")
         .body("payload")
@@ -97,24 +131,40 @@ async fn proxy_and_signup_consent() {
         .unwrap();
     assert_eq!(response.text().await.unwrap(), "accepted");
     let (parts, body) = events.recv().await.unwrap();
-    assert_eq!(parts.uri.to_string(), "/e/?test=yes");
+    assert_eq!(parts.uri.to_string(), "/e/?retry_count=1");
     assert_eq!(body, "payload");
     assert!(!parts.headers.contains_key("cookie"));
     assert_eq!(parts.headers["x-forwarded-for"], "127.0.0.1");
     f.client
-        .get(format!("{}/ingest.php/flags/?v=2", f.url))
+        .post(format!("{}/ingest.php?v=2&r=%2Fflags%2F", f.url))
         .send()
         .await
         .unwrap();
     assert_eq!(events.recv().await.unwrap().0.uri, "/flags/?v=2");
-    for path in ["/static/array.js", "/array/phc_test/config.js"] {
+    for path in [
+        "/static/1.444.0/posthog-recorder.js",
+        "/array/test-key/config.js",
+    ] {
         f.client
-            .get(format!("{}/ingest.php{path}", f.url))
+            .get(format!("{}/ingest.php?r={path}", f.url))
             .send()
             .await
             .unwrap();
-        assert_eq!(asset_requests.recv().await.unwrap().0.uri.path(), path);
+        assert_eq!(asset_requests.recv().await.unwrap().0.uri, path);
     }
+    // A script request has nothing to send, so one with a body goes nowhere.
+    let oversized = f
+        .client
+        .get(format!(
+            "{}/ingest.php?r=/static/1.444.0/posthog-recorder.js",
+            f.url
+        ))
+        .body("payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), 413);
+    assert!(asset_requests.try_recv().is_err());
     let user = login(&f, "alice", true).await;
     let (parts, body) = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
         .await

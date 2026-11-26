@@ -171,6 +171,10 @@ impl Fixture {
             },
             secure_cookies: false,
             posthog,
+            token_keys: mindgrab_backend::sealing::Keys::parse(
+                "test:bWluZGdyYWItdGVzdC1rZXktMzItYnl0ZXMtbG9uZyE=",
+            )
+            .unwrap(),
             quota,
         };
         let backend = Backend::connect(config).await.unwrap();
@@ -205,8 +209,31 @@ impl Fixture {
     pub async fn credential(&self, sub: &str) -> String {
         let user_id:i64=sqlx::query_scalar("INSERT INTO mindgrab_loro.users(external_id,name,email) VALUES($1,$1,$2) ON CONFLICT(external_id) DO UPDATE SET name=EXCLUDED.name RETURNING id").bind(sub).bind(format!("{sub}@test.example")).fetch_one(&self.backend.pool).await.unwrap();
         let browser = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) VALUES($1,$2,$3,$4,$5)").bind(hash(&browser)).bind(user_id).bind(format!("session_{sub}")).bind(signed(sub,now()+3600)).bind(refresh_token(sub)).execute(&self.backend.pool).await.unwrap();
+        let browser_hash = hash(&browser);
+        let access = self.seal_access_token(&browser_hash, &signed(sub, now() + 3600));
+        let refresh =
+            self.backend
+                .auth
+                .seal("sealed_refresh_token", &browser_hash, &refresh_token(sub));
+        sqlx::query("INSERT INTO mindgrab_loro.sealed_sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) VALUES($1,$2,$3,$4,$5)").bind(&browser_hash).bind(user_id).bind(format!("session_{sub}")).bind(access).bind(refresh).execute(&self.backend.pool).await.unwrap();
         browser
+    }
+    pub fn seal_access_token(&self, browser_hash: &str, token: &str) -> String {
+        self.backend
+            .auth
+            .seal("sealed_access_token", browser_hash, token)
+    }
+    /// Replaces the session's access token with one that expired.
+    pub async fn expire(&self, browser: &str, sub: &str) {
+        let browser_hash = hash(browser);
+        sqlx::query(
+            "UPDATE mindgrab_loro.sealed_sessions SET sealed_access_token=$1 WHERE browser_hash=$2",
+        )
+        .bind(self.seal_access_token(&browser_hash, &signed(sub, now() - 1)))
+        .bind(&browser_hash)
+        .execute(&self.backend.pool)
+        .await
+        .unwrap();
     }
     pub fn post(&self, method: &str, browser: &str) -> reqwest::RequestBuilder {
         self.client

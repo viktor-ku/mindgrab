@@ -13,6 +13,13 @@ import { chromium } from "playwright";
 import type { ViteDevServer } from "vite";
 import { createServer } from "vite";
 import { PROJECT_FILE_VERSION } from "../webapp/src/project-import-export";
+import {
+  DEEP_NOTES,
+  HTML_NOTES,
+  LINKED_NOTES,
+  STALLING_NOTES,
+  UNLINKED_NOTES,
+} from "../webapp/tests/hostile-notes";
 import type { Harness } from "./harness";
 
 // The editor in headless Chromium. The harness page mounts the app with a
@@ -542,6 +549,236 @@ test("notes are rich text kept as Markdown, with a toolbar, shortcuts, undo and 
   expect(await call("note", root)).toBe(
     "Agenda\n\n**Plan** for the week\n\n1. Monday\n2. Tuesday and Wednesday",
   );
+});
+
+// Every element a note may put on the page, and what each attribute may hold.
+// A note is someone else's writing: anything past this list is a way in.
+const NOTE_ELEMENTS: Record<string, Record<string, string>> = {
+  a: {
+    href: "^(https?://|mailto:)",
+    target: "^_blank$",
+    rel: "^noopener noreferrer nofollow$",
+    title: "",
+  },
+  blockquote: {},
+  br: { class: "^ProseMirror-trailingBreak$" },
+  code: {},
+  div: { class: "^ProseMirror-[a-z -]*$", contenteditable: "^false$" },
+  em: {},
+  h1: {},
+  h2: {},
+  h3: {},
+  hr: { contenteditable: "^false$" },
+  img: { class: "^ProseMirror-separator$", alt: "^$" },
+  input: { type: "^checkbox$", "aria-label": "", checked: "" },
+  label: { contenteditable: "^false$" },
+  li: { "data-checked": "^(true|false)$" },
+  ol: { start: "^[0-9]+$" },
+  p: { class: "^is-empty( is-editor-empty)?$", "data-placeholder": "" },
+  pre: {},
+  s: {},
+  // The label of a checklist box, for screen readers only.
+  span: { style: "^position: absolute; width: 1px; height: 1px; [^<>]*$" },
+  strong: {},
+  ul: { "data-type": "^taskList$" },
+};
+const NOTES = '[aria-label="Idea notes"]';
+// The elements in the notes that are not on the list, as written.
+const strayNoteElements = (target: Page) =>
+  target.evaluate(
+    ([notes, allowed]) =>
+      [...document.querySelectorAll(`${notes} *`)]
+        .filter((element) => {
+          const attributes = allowed[element.localName];
+          if (!attributes) return true;
+          if (
+            element instanceof HTMLAnchorElement &&
+            !(
+              ["http:", "https:", "mailto:"].includes(element.protocol) &&
+              element.target === "_blank" &&
+              element.rel === "noopener noreferrer nofollow"
+            )
+          )
+            return true;
+          return [...element.attributes].some(
+            ({ name, value }) =>
+              !(name in attributes) ||
+              !new RegExp(attributes[name]).test(value),
+          );
+        })
+        .map((element) => (element.cloneNode(false) as Element).outerHTML),
+    [NOTES, NOTE_ELEMENTS] as const,
+  );
+const noteLinks = (target: Page) =>
+  target
+    .locator(`${NOTES} a`)
+    .evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+// The notes as a shared link shows them, in a tab of their own.
+async function sharedNotes() {
+  const shared = await context.newPage();
+  shared.on("pageerror", (error) => errors.push(error));
+  const url = server.resolvedUrls?.local[0] ?? "http://localhost:5199/";
+  await shared.goto(
+    new URL(`/@fs/${import.meta.dir}/notes-harness.html`, url).href,
+  );
+  await shared.locator(NOTES).waitFor();
+  return shared;
+}
+
+test("a hostile note runs nothing and links nowhere unsafe, for its writer or on a shared link", async () => {
+  const shared = await sharedNotes();
+  // Script that ran would say so, and markup that loaded would ask for it.
+  const ran: string[] = [];
+  const asked: string[] = [];
+  for (const target of [page, shared]) {
+    target.on("dialog", (dialog) => {
+      ran.push(dialog.message());
+      void dialog.dismiss();
+    });
+    target.on("request", (request) => {
+      if (new URL(request.url()).origin !== new URL(target.url()).origin)
+        asked.push(request.url());
+    });
+  }
+  await context.route("https://example.com/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<title>Elsewhere</title>",
+    }),
+  );
+
+  const root = await rootId();
+  await node(root).click();
+  await page.keyboard.press("Alt+n");
+  const notes = page.getByRole("textbox", { name: "Idea notes" });
+  // Each note arrives as another device's edit, under a line that says the
+  // editor has drawn it, and shows on the shared link as it is.
+  let shown = 0;
+  let stored = "";
+  const show = async (note: string) => {
+    const heading = `note ${++shown}`;
+    await call("editNote", root, 0, stored.length, `${heading}\n\n${note}`);
+    stored = `${heading}\n\n${note}`;
+    await notes.getByText(heading, { exact: true }).waitFor();
+    await shared.evaluate((note) => window.showNote(note), note);
+  };
+
+  for (const note of [...UNLINKED_NOTES, ...HTML_NOTES, ...DEEP_NOTES]) {
+    await show(note);
+    for (const target of [page, shared]) {
+      const seen = { strays: await strayNoteElements(target), links: 0 };
+      seen.links = await target.locator(`${NOTES} a`).count();
+      expect([note, seen]).toEqual([note, { strays: [], links: 0 }]);
+    }
+  }
+  // A note written to stall the reader shows as its text, soon.
+  for (const note of STALLING_NOTES) {
+    const started = Date.now();
+    await show(note);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    for (const target of [page, shared]) {
+      expect(await strayNoteElements(target)).toEqual([]);
+      expect(await target.locator(`${NOTES} :not(p, br)`).count()).toBe(0);
+    }
+  }
+  for (const [note, href] of LINKED_NOTES) {
+    await show(note);
+    for (const target of [page, shared]) {
+      expect([note, await strayNoteElements(target)]).toEqual([note, []]);
+      expect([note, await noteLinks(target)]).toEqual([note, [href]]);
+    }
+  }
+  // Reading a note leaves it as it was written.
+  expect(await call("note", root)).toBe(stored);
+
+  // HTML gives a link its address and nothing else: where it opens and how
+  // it looks stay the app's.
+  await show(
+    'see <a href="https://example.com/a" target="_top" rel="opener" class="fixed inset-0 z-50" style="position:fixed;inset:0" id="root" onclick="alert(1)">here</a>',
+  );
+  for (const target of [page, shared]) {
+    expect(await strayNoteElements(target)).toEqual([]);
+    expect(await noteLinks(target)).toEqual(["https://example.com/a"]);
+  }
+  const opened = async (press: () => Promise<void>) => {
+    const tab = context.waitForEvent("page");
+    await press();
+    const elsewhere = await tab;
+    await elsewhere.waitForLoadState();
+    const result = {
+      url: elsewhere.url(),
+      opener: await elsewhere.evaluate(() => window.opener),
+    };
+    await elsewhere.close();
+    return result;
+  };
+  const elsewhere = { url: "https://example.com/a", opener: null };
+  // On a shared link it opens in a tab that cannot reach back.
+  const sharedUrl = shared.url();
+  expect(await opened(() => shared.locator(`${NOTES} a`).click())).toEqual(
+    elsewhere,
+  );
+  expect(shared.url()).toBe(sharedUrl);
+  // Its writer's press edits it; with Ctrl or Cmd it opens the same way.
+  await notes.locator("a").click();
+  await frame();
+  expect(context.pages().length).toBe(2);
+  expect(
+    await opened(() =>
+      notes.locator("a").click({ modifiers: ["ControlOrMeta"] }),
+    ),
+  ).toEqual(elsewhere);
+
+  expect({ ran, asked }).toEqual({ ran: [], asked: [] });
+  await shared.close();
+});
+
+test("pasted and typed text becomes a note of text, formatting and safe links", async () => {
+  const ran: string[] = [];
+  const asked: string[] = [];
+  page.on("dialog", (dialog) => {
+    ran.push(dialog.message());
+    void dialog.dismiss();
+  });
+  page.on("request", (request) => {
+    if (new URL(request.url()).origin !== new URL(page.url()).origin)
+      asked.push(request.url());
+  });
+  const root = await rootId();
+  await node(root).click();
+  await page.keyboard.press("Alt+n");
+  const notes = page.getByRole("textbox", { name: "Idea notes" });
+  await notes.waitFor();
+  // What a page a person copies from can put on the clipboard.
+  await notes.evaluate((editor, html) => {
+    const data = new DataTransfer();
+    data.setData("text/html", html);
+    data.setData("text/plain", "plain");
+    editor.dispatchEvent(
+      new ClipboardEvent("paste", {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }, '<p><a href="javascript:alert(1)" onclick="alert(1)">script</a> <a href="https://example.com/a" target="_top" rel="opener" class="fixed inset-0 z-50" style="position:fixed">web</a> <a href="//evil.example/a">near</a> <a href="ftp://evil.example/a">files</a><img src="https://evil.example/pixel.png" onerror="alert(1)"><script>alert(1)</script><iframe src="https://evil.example/"></iframe></p><p style="position:fixed;inset:0" class="fixed inset-0" onmouseover="alert(1)"><b onclick="alert(1)">styled</b></p><pre><code class="language-x fixed inset-0 z-50">code</code></pre>');
+  await notes.locator("pre").waitFor();
+  expect(await strayNoteElements(page)).toEqual([]);
+  expect(await noteLinks(page)).toEqual(["https://example.com/a"]);
+  expect(await call("note", root)).toBe(
+    "script [web](https://example.com/a) near files\n\n**styled**\n\n```x\ncode\n```",
+  );
+
+  // Typing links a web address, and only one.
+  await call("editNote", root, 0, (await call("note", root))?.length ?? 0, "");
+  await notes.locator("pre").waitFor({ state: "detached" });
+  await notes.click();
+  await page.keyboard.type(
+    "javascript:alert(1) www.example.com ftp://evil.example/a <img src=x onerror=alert(1)> ",
+  );
+  expect(await strayNoteElements(page)).toEqual([]);
+  expect(await noteLinks(page)).toEqual(["http://www.example.com/"]);
+  expect({ ran, asked }).toEqual({ ran: [], asked: [] });
 });
 
 test("branches copy as outlines and indented text pastes as a branch", async () => {

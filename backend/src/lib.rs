@@ -7,6 +7,7 @@ pub mod error;
 mod phpmyadmin;
 mod preferences;
 mod projects;
+pub mod sealing;
 
 use crate::{analytics::Analytics, auth::Auth, compute::Compute, config::Config, error::Result};
 use axum::{
@@ -100,7 +101,7 @@ impl Backend {
             .route("/api/listPreferences.php", rpc("listPreferences"))
             .route("/api/setPreferences.php", rpc("setPreferences"))
             .route(
-                "/ingest.php/{*path}",
+                "/ingest.php",
                 get(analytics::ingest).post(analytics::ingest),
             )
             .layer(cors);
@@ -149,7 +150,12 @@ impl Backend {
         let mut timer = tokio::time::interval(Duration::from_secs(3600));
         loop {
             timer.tick().await;
-            let _ = sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE expires_at<=now()")
+            let _ =
+                sqlx::query("DELETE FROM mindgrab_loro.sealed_sessions WHERE expires_at<=now()")
+                    .execute(&self.pool)
+                    .await;
+            // Plain-text sessions an older deployment created while it still served.
+            let _ = sqlx::query("DELETE FROM mindgrab_loro.sessions")
                 .execute(&self.pool)
                 .await;
             let _ = sqlx::query("DELETE FROM mindgrab_loro.login_attempts WHERE expires_at<=now()")

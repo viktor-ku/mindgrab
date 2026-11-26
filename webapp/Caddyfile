@@ -8,6 +8,22 @@
 	encode zstd gzip
 	root * /srv
 
+	# Sent with every response, Apache's pages included, as `Header always set`
+	# in a site's configuration would. They limit what a script can do if one is
+	# ever injected into the app, and keep other sites from framing it.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		# Not `no-referrer`: under it a browser sends `Origin: null` with the
+		# sign-in form, and the API only accepts the app's origin. This still
+		# keeps a share link's path from other sites.
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+	# The Content Security Policy, written by scripts/content-security-policy.ts
+	# when the image is built.
+	import content-security-policy.caddy
+
 	# The API passes as PHP behind Apache (backend/README.md), and this site plays
 	# along as Apache serving static files, with `FallbackResource /index.php` for
 	# everything else. Apache's pages are the only place its version shows, because

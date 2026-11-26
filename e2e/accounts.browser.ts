@@ -61,6 +61,15 @@ class Backend {
   >();
   // Commit times are strictly increasing, like the server's updated_at.
   clock = Date.parse("2026-01-01T00:00:00Z");
+  // Counts each id's saves and deletions. Kept apart from the project, which
+  // a deletion removes, so a revision never names two contents.
+  revisions = new Map<string, number>();
+  advance(id: string) {
+    this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
+  }
+  revision(id: string) {
+    return String(this.revisions.get(id) ?? 0);
+  }
   registrations: string[] = [];
   // Each account's preferences, by scope, map and name.
   preferences = new Map<number, Map<string, PreferenceRow>>();
@@ -159,14 +168,17 @@ class Backend {
           format: "mindgrab-loro-v1",
           schemaVersion: 1,
           name: null,
+          revision: this.revision(projectId),
           ...(entry.updatedAt && { updatedAt: entry.updatedAt }),
         }));
       return route.fulfill({ json: { projects, nextCursor: null } });
     }
     if (url.pathname === "/api/deleteProject.php") {
       const { projectId } = request.postDataJSON();
-      if (this.projects.get(projectId)?.ownerId === owner.id)
+      if (this.projects.get(projectId)?.ownerId === owner.id) {
         this.projects.delete(projectId);
+        this.advance(projectId);
+      }
       return route.fulfill({ json: { deleted: true } });
     }
     const operation = url.pathname;
@@ -177,22 +189,36 @@ class Backend {
     const record = this.projects.get(id);
     if (!record || record.ownerId !== owner.id)
       return error(404, "project_not_found");
-    const response = () => ({
+    // Like the server, but simpler: a read finds the map unchanged or sends
+    // all of it, never only the difference, and a save gets a receipt.
+    const revision = () => this.revision(id);
+    const head = () => record.doc.head();
+    const answer = (encoding: string, data = "", head?: string) => ({
       projectId: id,
-      revision: "1",
-      encoding: "loro-snapshot",
-      data: base64(record.doc.snapshot()),
+      revision: revision(),
+      encoding,
+      data,
+      ...(head === undefined ? {} : { head }),
       durable: true,
     });
-    if (operation === "/api/getProjectSnapshot.php")
-      return route.fulfill({ json: response() });
+    if (operation === "/api/getProjectSnapshot.php") {
+      const held = request.postDataJSON();
+      return route.fulfill({
+        json:
+          held.revision === revision()
+            ? answer("loro-update")
+            : answer("loro-snapshot", base64(record.doc.snapshot()), head()),
+      });
+    }
     if (operation === "/api/mergeProject.php") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       const before = record.doc.version();
       record.doc.merge(bytes);
-      if (record.doc.version() !== before)
+      if (record.doc.version() !== before) {
         record.updatedAt = new Date(this.clock++).toISOString();
-      return route.fulfill({ json: response() });
+        this.advance(id);
+      }
+      return route.fulfill({ json: answer("loro-update", "", head()) });
     }
     return error(404, "not_found");
   }
