@@ -100,7 +100,7 @@ impl Backend {
             .route("/api/listPreferences.php", rpc("listPreferences"))
             .route("/api/setPreferences.php", rpc("setPreferences"))
             .route(
-                "/ingest.php/{*path}",
+                "/ingest.php",
                 get(analytics::ingest).post(analytics::ingest),
             )
             .layer(cors);

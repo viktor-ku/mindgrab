@@ -208,8 +208,8 @@ fn is_hidden(path: &str) -> bool {
     false
 }
 
-/// The script a route pretends to be: `/ingest.php/{*path}` is `/ingest.php`, and a
-/// directory is its `index.php`. `None` for the WebSocket routes, which Apache
+/// The script a route pretends to be: `/index.php/{*path_info}` is `/index.php`, and
+/// a directory is its `index.php`. `None` for the WebSocket routes, which Apache
 /// would proxy to a daemon.
 fn script(route: &str) -> Option<String> {
     if let Some(start) = route.find(".php") {
