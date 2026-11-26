@@ -44,8 +44,6 @@ function deferred() {
   });
   return { promise, resolve };
 }
-// Speaks the API as it was before reads could ask for changes only, so these
-// tests keep the app working against a server older than it.
 class Backend {
   user?: User;
   nextUser = A;
@@ -68,6 +66,9 @@ class Backend {
   revisions = new Map<string, number>();
   advance(id: string) {
     this.revisions.set(id, (this.revisions.get(id) ?? 0) + 1);
+  }
+  revision(id: string) {
+    return String(this.revisions.get(id) ?? 0);
   }
   registrations: string[] = [];
   // Each account's preferences, by scope, map and name.
@@ -167,6 +168,7 @@ class Backend {
           format: "mindgrab-loro-v1",
           schemaVersion: 1,
           name: null,
+          revision: this.revision(projectId),
           ...(entry.updatedAt && { updatedAt: entry.updatedAt }),
         }));
       return route.fulfill({ json: { projects, nextCursor: null } });
@@ -180,12 +182,6 @@ class Backend {
       return route.fulfill({ json: { deleted: true } });
     }
     const operation = url.pathname;
-    // This API knows no argument but the id, and refuses any other.
-    if (
-      operation === "/api/getProjectSnapshot.php" &&
-      Object.keys(request.postDataJSON()).some((key) => key !== "projectId")
-    )
-      return error(400, "invalid_request");
     const { projectId: id } =
       operation === "/api/mergeProject.php"
         ? Object.fromEntries(url.searchParams)
@@ -193,15 +189,27 @@ class Backend {
     const record = this.projects.get(id);
     if (!record || record.ownerId !== owner.id)
       return error(404, "project_not_found");
-    const response = () => ({
+    // Like the server, but simpler: a read finds the map unchanged or sends
+    // all of it, never only the difference, and a save gets a receipt.
+    const revision = () => this.revision(id);
+    const head = () => record.doc.head();
+    const answer = (encoding: string, data = "", head?: string) => ({
       projectId: id,
-      revision: String(this.revisions.get(id) ?? 0),
-      encoding: "loro-snapshot",
-      data: base64(record.doc.snapshot()),
+      revision: revision(),
+      encoding,
+      data,
+      ...(head === undefined ? {} : { head }),
       durable: true,
     });
-    if (operation === "/api/getProjectSnapshot.php")
-      return route.fulfill({ json: response() });
+    if (operation === "/api/getProjectSnapshot.php") {
+      const held = request.postDataJSON();
+      return route.fulfill({
+        json:
+          held.revision === revision()
+            ? answer("loro-update")
+            : answer("loro-snapshot", base64(record.doc.snapshot()), head()),
+      });
+    }
     if (operation === "/api/mergeProject.php") {
       const bytes = new Uint8Array(request.postDataBuffer() as Buffer);
       const before = record.doc.version();
@@ -210,7 +218,7 @@ class Backend {
         record.updatedAt = new Date(this.clock++).toISOString();
         this.advance(id);
       }
-      return route.fulfill({ json: response() });
+      return route.fulfill({ json: answer("loro-update", "", head()) });
     }
     return error(404, "not_found");
   }

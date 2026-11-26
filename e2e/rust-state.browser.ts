@@ -565,10 +565,7 @@ test("an idle workspace and a one-character save of a large map exchange only sm
     async ([id, data]) => {
       const response = await fetch(`/api/mergeProject.php?projectId=${id}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          Accept: "application/vnd.mindgrab.receipt+json",
-        },
+        headers: { "Content-Type": "application/octet-stream" },
         body: Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
       });
       if (!response.ok) throw new Error(`Upload: ${response.status}`);

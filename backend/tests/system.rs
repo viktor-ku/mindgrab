@@ -845,7 +845,6 @@ async fn concurrent_large_merges_leave_other_accounts_responsive() {
     f.close().await;
 }
 
-const RECEIPT: &str = "application/vnd.mindgrab.receipt+json";
 const MIB: usize = 1024 * 1024;
 /// One request and its answer, with the bytes each body took on the wire.
 struct Exchange {
@@ -873,9 +872,6 @@ impl Exchange {
         assert_eq!(self.status, 200);
         serde_json::from_slice(&self.received).unwrap()
     }
-    fn keys(&self) -> Vec<String> {
-        self.json().as_object().unwrap().keys().cloned().collect()
-    }
 }
 async fn call(f: &Fixture, method: &str, browser: &str, args: Value) -> Exchange {
     Exchange::new(
@@ -885,23 +881,13 @@ async fn call(f: &Fixture, method: &str, browser: &str, args: Value) -> Exchange
     )
     .await
 }
-/// A merge that sends `accept`, or no `Accept` at all.
-async fn save(
-    f: &Fixture,
-    browser: &str,
-    id: Uuid,
-    accept: Option<&str>,
-    body: Vec<u8>,
-) -> Exchange {
-    let mut request = f.post("mergeProject", browser).query(&[("projectId", id)]);
-    if let Some(accept) = accept {
-        request = request.header("accept", accept);
-    }
+async fn save(f: &Fixture, browser: &str, id: Uuid, body: Vec<u8>) -> Exchange {
+    let request = f.post("mergeProject", browser).query(&[("projectId", id)]);
     Exchange::new(request, "application/octet-stream", body).await
 }
 
-/// Saving and polling a large map moves only what changed, while callers that
-/// do not ask for that still get the complete snapshot they always got.
+/// Saving and polling a large map moves only what changed; the whole map goes
+/// only to a client that holds none of it.
 #[tokio::test]
 async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
     let f = Fixture::new("http://localhost:5173").await;
@@ -924,11 +910,6 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
             .await
             .unwrap()
     };
-    // What a caller that asks for nothing new has always been answered.
-    let complete = |snapshot: &[u8], revision: &str| {
-        serde_json::to_vec(&json!({"projectId":id,"encoding":"loro-snapshot","data":STANDARD.encode(snapshot),"revision":revision,"durable":true})).unwrap()
-    };
-    let today = ["data", "durable", "encoding", "projectId", "revision"];
     let read = async |args: Value| {
         let mut body = json!({"projectId":id});
         body.as_object_mut()
@@ -954,7 +935,7 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
     foreign(json!({"since":""})).await;
 
     // The first save sends the whole map and gets a receipt back, not the map.
-    let first = save(&f, &alice, id, Some(RECEIPT), snapshot.clone()).await;
+    let first = save(&f, &alice, id, snapshot.clone()).await;
     assert!(first.received.len() < 1024, "{}", first.received.len());
     let head = project.head().unwrap();
     assert_eq!(
@@ -999,7 +980,7 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
     let edit = device.updates_since(&project.version()).unwrap();
     let edited = device.head().unwrap();
     assert_ne!(edited, head);
-    let second = save(&f, &alice, id, Some(RECEIPT), edit.clone()).await;
+    let second = save(&f, &alice, id, edit.clone()).await;
     assert!(second.sent < 2 * 1024, "{}", second.sent);
     assert!(second.received.len() < 1024, "{}", second.received.len());
     assert_eq!(
@@ -1069,50 +1050,39 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
         );
     }
 
-    // Callers that predate receipts ask for nothing, or for anything, and get
-    // the snapshot in exactly the shape they always did.
-    let expected = complete(&saved, "2");
+    // A read that names nothing holds nothing, and gets the whole map.
     let plain = read(json!({})).await;
-    assert_eq!(plain.sent, format!(r#"{{"projectId":"{id}"}}"#).len());
-    assert_eq!(plain.keys(), today);
     assert!(plain.received.len() > 2 * MIB);
-    assert!(plain.received == expected);
-    for accept in [None, Some("*/*"), Some("application/*")] {
-        let repeated = save(&f, &alice, id, accept, edit.clone()).await;
-        assert_eq!(repeated.keys(), today, "{accept:?}");
-        assert!(repeated.received.len() > 2 * MIB, "{accept:?}");
-        assert!(repeated.received == expected, "{accept:?}");
-    }
-    // The receipt is found among other types, in any letter case, and a merge
-    // that changes nothing keeps the revision.
-    let listed = "text/html, Application/Vnd.Mindgrab.Receipt+JSON ;q=0.9";
-    let repeated = save(&f, &alice, id, Some(listed), edit).await;
+    let value = plain.json();
+    assert_eq!(value["encoding"], "loro-snapshot");
+    assert_eq!(value["head"], edited.as_str());
+    assert!(STANDARD.decode(value["data"].as_str().unwrap()).unwrap() == saved);
+    // A merge that changes nothing keeps the revision.
+    let repeated = save(&f, &alice, id, edit).await;
     assert_eq!(repeated.json(), second.json());
 
-    // Native commands answer the same two ways.
-    let command = |text: &str| json!({"projectId":id,"command":{"type":"createNode","parent":null,"index":null,"text":text,"color":"teal"}});
-    let slim = Exchange::new(
-        f.post("commandProject", &alice).header("accept", RECEIPT),
-        "application/json",
-        serde_json::to_vec(&command("Slim")).unwrap(),
-    )
-    .await;
-    assert!(slim.received.len() < 1024, "{}", slim.received.len());
-    let value = slim.json();
+    // A native command is answered with a receipt too.
+    let command = json!({"projectId":id,"command":{"type":"createNode","parent":null,"index":null,"text":"Native","color":"teal"}});
+    let commanded = call(&f, "commandProject", &alice, command).await;
+    assert!(
+        commanded.received.len() < 1024,
+        "{}",
+        commanded.received.len()
+    );
+    let value = commanded.json();
     assert_eq!(value["encoding"], "loro-update");
     assert_eq!(value["data"], "");
     assert_eq!(value["revision"], "3");
     let commanded = Project::from_snapshot(&stored().await).unwrap();
     assert_eq!(value["head"], commanded.head().unwrap().as_str());
-    assert_eq!(commanded.view().unwrap().nodes.last().unwrap().text, "Slim");
-    let full = call(&f, "commandProject", &alice, command("Full")).await;
-    assert_eq!(full.keys(), today);
-    assert!(full.received.len() > 2 * MIB);
-    assert!(full.received == complete(&stored().await, "4"));
+    assert_eq!(
+        commanded.view().unwrap().nodes.last().unwrap().text,
+        "Native"
+    );
 
     // A cloud copy deleted and created again holds nothing: a client that
     // remembers the old one is told so, and then sends its map.
-    let remembered = json!({"revision":"4","since":commanded.head().unwrap()});
+    let remembered = json!({"revision":"3","since":commanded.head().unwrap()});
     assert_eq!(
         f.rpc("deleteProject", &alice, json!({"projectId":id}))
             .await
@@ -1124,7 +1094,7 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
     let emptied = read(remembered).await;
     assert_eq!(
         emptied.json(),
-        json!({"projectId":id,"encoding":"loro-snapshot","data":"","revision":"5","durable":true})
+        json!({"projectId":id,"encoding":"loro-snapshot","data":"","revision":"4","durable":true})
     );
     f.close().await;
 }

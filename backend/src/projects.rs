@@ -45,6 +45,7 @@ struct Merged {
     head: Option<String>,
 }
 /// A read that says what its client holds, so the answer can leave that out.
+/// A client that sends neither field holds nothing and gets the whole map.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Changes {
@@ -119,28 +120,12 @@ fn changes(id: Uuid, encoding: &str, data: &[u8], head: Option<String>, revision
     }
     value
 }
-/// Sent as `Accept` by clients that keep what they saved and need only its
-/// revision and head back.
-const RECEIPT: &str = "application/vnd.mindgrab.receipt+json";
-/// True only when the type is named: `*/*`, which every browser sends, is not
-/// a request for it.
-fn wants_receipt(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::ACCEPT)
-        .iter()
-        .filter_map(|line| line.to_str().ok())
-        .flat_map(|line| line.split(','))
-        .filter_map(|item| item.split(';').next())
-        .any(|item| item.trim().eq_ignore_ascii_case(RECEIPT))
-}
-/// A save's answer: the receipt when it was asked for and the head can be
-/// named, else the complete snapshot.
-fn saved(headers: &HeaderMap, id: Uuid, project: Merged) -> Response {
+/// A save's answer. The client holds what it sent, so a receipt naming the
+/// stored head is enough; only a head too long to name needs the snapshot.
+fn saved(id: Uuid, project: Merged) -> Response {
     let value = match project.head {
-        Some(head) if wants_receipt(headers) => {
-            changes(id, "loro-update", &[], Some(head), project.revision)
-        }
-        _ => baseline(
+        Some(head) => changes(id, "loro-update", &[], Some(head), project.revision),
+        None => baseline(
             id,
             Stored {
                 snapshot: Some(project.snapshot),
@@ -311,9 +296,6 @@ pub async fn rpc(
         "getProjectSnapshot" => {
             let args: Changes = parse(&headers, &body)?;
             let id = args.project_id;
-            if args.revision.is_none() && args.since.is_none() {
-                return Ok(Json(baseline(id, stored(&app, &user, id).await?)).into_response());
-            }
             // Most reads find nothing new: those are answered without reading
             // the snapshot or taking a turn.
             let (revision, initialized): (i64, bool) = sqlx::query_as("SELECT revision,snapshot IS NOT NULL FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(id).bind(user.id).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)?;
@@ -416,7 +398,7 @@ pub async fn rpc(
             }
             let id = Uuid::parse_str(&pairs[0].1).map_err(|_| ApiError::invalid())?;
             let project = merge(&app, &user, id, body, None).await?;
-            Ok(saved(&headers, id, project))
+            Ok(saved(id, project))
         }
         "commandProject" => {
             #[derive(Deserialize)]
@@ -435,7 +417,7 @@ pub async fn rpc(
                 Some(args.command),
             )
             .await?;
-            Ok(saved(&headers, args.project_id, project))
+            Ok(saved(args.project_id, project))
         }
         _ => unreachable!(),
     }

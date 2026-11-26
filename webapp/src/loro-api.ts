@@ -18,9 +18,9 @@ const record = z.object({
   name: z.string().nullable(),
   // Listed projects report their last committed change; registration does not.
   updatedAt: z.string().optional(),
-  // Listed projects name the cloud copy's revision; an earlier API does not.
-  revision: sequence.optional(),
 });
+// Listed projects also name the cloud copy's revision.
+const listed = record.extend({ revision: sequence });
 // What a read or a save answers. A "loro-snapshot" carries the complete
 // document, or nothing while the cloud has none. A "loro-update" carries only
 // changes: with a `head`, those the cloud copy has beyond what the request
@@ -34,10 +34,8 @@ const snapshot = z.object({
   head: z.string().max(4096).optional(),
   durable: z.literal(true),
 });
-// Asks a save to answer with the cloud copy's head, not the complete document.
-const RECEIPT = "application/vnd.mindgrab.receipt+json";
 const shareLink = z.object({ projectId, token: z.string().nullable() });
-export type CloudProject = z.infer<typeof record>;
+export type CloudProject = z.infer<typeof listed>;
 export type CloudSnapshot = z.infer<typeof snapshot>;
 
 export class SyncError extends Error {
@@ -134,7 +132,7 @@ export class LoroApi {
       signal,
       async (signal) =>
         z
-          .object({ projects: z.array(record) })
+          .object({ projects: z.array(listed) })
           .parse(
             await this.#json(
               "listProjects.php",
@@ -157,21 +155,7 @@ export class LoroApi {
       // must not share one request.
       `changes ${held.revision ?? ""} ${held.since}`,
       signal,
-      async (signal) => {
-        try {
-          return await this.#readSnapshot({ projectId: id, ...held }, signal);
-        } catch (error) {
-          if (!(error instanceof SyncError) || error.code !== "invalid_request")
-            throw error;
-        }
-        // An API from before these arguments refuses them, and answers the
-        // plain request with the complete document.
-        const { head: _, ...complete } = await this.#readSnapshot(
-          { projectId: id },
-          signal,
-        );
-        return complete;
-      },
+      (signal) => this.#readSnapshot({ projectId: id, ...held }, signal),
       id,
     );
   }
@@ -224,10 +208,7 @@ export class LoroApi {
               `mergeProject.php?${new URLSearchParams({ projectId: id })}`,
               signal,
               {
-                headers: {
-                  "Content-Type": "application/octet-stream",
-                  Accept: RECEIPT,
-                },
+                headers: { "Content-Type": "application/octet-stream" },
                 body: bytes.slice().buffer,
               },
             ),
@@ -310,7 +291,7 @@ export class LoroApi {
     do {
       const page = z
         .object({
-          projects: z.array(record),
+          projects: z.array(listed),
           nextCursor: z.string().nullable(),
         })
         .parse(

@@ -543,10 +543,9 @@ export class ProjectSync {
 }
 
 // Merge discovery into local content. Uninitialized projects never receive a default root.
-// `listed` is each cloud project's revision, undefined from an API that does
-// not report one. Maps this device already has are left to their own sync,
-// except `stalled`, a map whose sync stopped: a cloud copy that has moved since
-// is merged into it here.
+// `listed` is each cloud project's revision. Maps this device already has are
+// left to their own sync, except `stalled`, a map whose sync stopped: a cloud
+// copy that has moved since is merged into it here.
 export async function discoverProjects(
   repository: ProjectRepository,
   api: LoroApi,
@@ -574,7 +573,6 @@ export async function discoverProjects(
     try {
       if (
         known &&
-        project.revision !== undefined &&
         project.revision ===
           (await repository.cloudVersion(project.projectId))?.revision
       )
@@ -622,10 +620,9 @@ async function importCloudProject(
     await handle.refreshMetadata();
     signal.throwIfAborted();
     await repository.markRegistered(handle.id);
-    // The next sync of this map then has nothing to read.
-    const head = data.length
-      ? (snapshot.head ?? committedVersion(id, data)?.head)
-      : "";
+    // The next sync of this map then has nothing to read. A head too long to
+    // name leaves no marker.
+    const head = data.length ? snapshot.head : "";
     if (head !== undefined)
       await repository.markCloudVersion(handle.id, {
         revision: snapshot.revision,

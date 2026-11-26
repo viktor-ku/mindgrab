@@ -45,9 +45,7 @@ function gate() {
   return { promise, resolve };
 }
 type Held = { revision?: string; since: string };
-// The cloud as the webapp sees it. `legacy` answers as an API from before
-// incremental reads does once LoroApi has fallen back to the plain request:
-// complete snapshots without a head, for reads and for saves alike.
+// The cloud as the webapp sees it.
 class Server extends LoroApi {
   doc: ProjectDocument;
   merges: Uint8Array[] = [];
@@ -60,10 +58,8 @@ class Server extends LoroApi {
   downloaded = 0;
   lost = false;
   mergeGate?: Promise<void>;
-  readonly legacy: boolean;
-  constructor(id: string, legacy = false) {
+  constructor(id: string) {
     super();
-    this.legacy = legacy;
     this.doc = keep(openProjectDocument(id));
   }
   #reply(
@@ -102,7 +98,6 @@ class Server extends LoroApi {
       name: null,
     };
   }
-  // The earlier API lists no revision.
   override async list() {
     return [
       {
@@ -110,14 +105,13 @@ class Server extends LoroApi {
         schemaVersion: 1 as const,
         format: "mindgrab-loro-v1" as const,
         name: null,
-        ...(this.legacy ? {} : { revision: String(this.revision) }),
+        revision: String(this.revision),
       },
     ];
   }
   override async changes(_id: string, held: Held) {
     this.reads.push(held);
     const { doc } = this;
-    if (this.legacy) return this.#reply("loro-snapshot", doc.snapshot());
     if (held.revision === String(this.revision))
       return this.#reply("loro-update");
     if (!doc.ready) return this.#reply("loro-snapshot");
@@ -147,9 +141,7 @@ class Server extends LoroApi {
       this.lost = false;
       throw new Error("Lost response");
     }
-    return this.legacy
-      ? this.#reply("loro-snapshot", this.doc.snapshot())
-      : this.#reply("loro-update", undefined, this.doc.head());
+    return this.#reply("loro-update", undefined, this.doc.head());
   }
   override async remove() {
     this.deletions++;
@@ -234,14 +226,14 @@ function attach(
   controllers.push(sync);
   return { sync, setSaving, repo, socket };
 }
-function fixture(legacy = false, options?: Attachment) {
+function fixture(options?: Attachment) {
   const doc = keep(
     createProjectDocument(crypto.randomUUID(), "Planning", {
       text: "Shared 🌲",
     }),
   );
   const root = doc.view().roots[0];
-  const server = new Server(doc.id, legacy);
+  const server = new Server(doc.id);
   return { doc, root, server, ...attach(doc, server, options) };
 }
 // A second replica of `doc`: another tab, or the same map on another device.
@@ -253,117 +245,97 @@ function elsewhere(server: Server, text: string) {
   editNodeText(device, device.view().roots[0], 0, 0, text);
   server.receive(device.snapshot());
 }
-// Both APIs must keep working: the webapp and the API deploy independently.
-function both(name: string, run: (legacy: boolean) => Promise<void>) {
-  test(`${name} (current API)`, () => run(false));
-  test(`${name} (earlier API)`, () => run(true));
-}
 
 const long = () =>
   Array.from({ length: 1500 }, () => crypto.randomUUID()).join(" ");
-both(
-  "a save whose acknowledgement was lost is not uploaded again",
-  async (legacy) => {
-    const { doc, root, server, sync } = fixture(legacy);
-    editNodeText(doc, root, 0, 0, long());
-    server.lost = true;
-    await sync.syncNow();
-    expect(sync.status.status).toBe("retrying");
-    editNodeText(doc, root, 0, 0, "Later ");
-    await sync.syncNow();
-    // The cloud kept the first save, so only the later edit is sent.
-    expect(server.merges).toHaveLength(2);
-    expect(server.merges[0].length).toBeGreaterThan(40_000);
-    expect(server.merges[1].length).toBeLessThan(1000);
-    expect(sync.status.status).toBe("saved");
-    expect(server.doc.view()).toEqual(doc.view());
-  },
-);
-both(
-  "edits received during an in-flight merge are uploaded by the same sync",
-  async (legacy) => {
-    const { doc, root, server, sync } = fixture(legacy);
-    const pending = gate();
-    server.mergeGate = pending.promise;
-    const running = sync.syncNow();
-    while (!server.merges.length) await Bun.sleep(1);
-    editNodeText(doc, root, 0, 0, "During upload ");
-    expect(sync.status.status).toBe("saving");
-    pending.resolve();
-    await running;
-    expect(server.merges).toHaveLength(2);
-    expect(sync.status.status).toBe("saved");
-    expect(server.doc.view()).toEqual(doc.view());
-  },
-);
-both(
-  "reload recovery includes pure deletions and duplicate histories produce no extra upload",
-  async (legacy) => {
-    const { doc, root, server, sync } = fixture(legacy);
-    await sync.syncNow();
-    sync.destroy();
-    editNodeText(doc, root, 0, 6, "");
-    const reopened = keep(openProjectDocument(doc.id, [doc.snapshot()]));
-    const next = attach(reopened, server).sync;
-    await next.syncNow();
-    expect(server.doc.view().nodes[0].text).toBe(" 🌲");
-    expect(
-      pendingUpload(reopened, reopened.versionAt(server.doc.head() ?? "")),
-    ).toBeUndefined();
-    const count = server.merges.length;
-    await next.syncNow();
-    expect(server.merges).toHaveLength(count);
-  },
-);
-both(
-  "saves after the first send only new changes, and the whole map again if the cloud copy was replaced",
-  async (legacy) => {
-    const { doc, root, server, sync } = fixture(legacy);
-    editNodeText(doc, root, 0, 0, long());
-    await sync.syncNow();
-    editNodeText(doc, root, 0, 0, "Next ");
-    await sync.syncNow();
-    expect(server.merges).toHaveLength(2);
-    expect(server.merges[0].length).toBeGreaterThan(40_000);
-    expect(server.merges[1].length).toBeLessThan(1000);
-    expect(server.doc.view()).toEqual(doc.view());
-    // Another device deletes the cloud copy and creates it again mid-save.
-    editNodeText(doc, root, 0, 0, "Again ");
-    const changes = server.changes.bind(server);
-    server.changes = async (...held) => {
-      const result = await changes(...held);
-      server.changes = changes;
-      await server.remove();
-      return result;
-    };
-    await sync.syncNow();
-    // The refused changes, then the whole map.
-    expect(server.merges).toHaveLength(4);
-    expect(server.merges[2].length).toBeLessThan(1000);
-    expect(server.merges[3].length).toBeGreaterThan(40_000);
-    expect(sync.status.status).toBe("saved");
-    expect(server.doc.view()).toEqual(doc.view());
-  },
-);
-both(
-  "private projects never register or upload, including manual retry",
-  async (legacy) => {
-    const { doc, root, server, sync, setSaving } = fixture(legacy);
-    setSaving({ local: false, cloud: false });
-    await sync.syncNow();
-    editNodeText(doc, root, 0, 0, "Private ");
-    sync.retry();
-    await sync.syncNow();
-    expect(server.registrations).toBe(0);
-    expect(server.merges).toHaveLength(0);
-    expect(server.deletions).toBe(0);
-    expect(sync.status.status).toBe("disabled");
-  },
-);
+test("a save whose acknowledgement was lost is not uploaded again", async () => {
+  const { doc, root, server, sync } = fixture();
+  editNodeText(doc, root, 0, 0, long());
+  server.lost = true;
+  await sync.syncNow();
+  expect(sync.status.status).toBe("retrying");
+  editNodeText(doc, root, 0, 0, "Later ");
+  await sync.syncNow();
+  // The cloud kept the first save, so only the later edit is sent.
+  expect(server.merges).toHaveLength(2);
+  expect(server.merges[0].length).toBeGreaterThan(40_000);
+  expect(server.merges[1].length).toBeLessThan(1000);
+  expect(sync.status.status).toBe("saved");
+  expect(server.doc.view()).toEqual(doc.view());
+});
+test("edits received during an in-flight merge are uploaded by the same sync", async () => {
+  const { doc, root, server, sync } = fixture();
+  const pending = gate();
+  server.mergeGate = pending.promise;
+  const running = sync.syncNow();
+  while (!server.merges.length) await Bun.sleep(1);
+  editNodeText(doc, root, 0, 0, "During upload ");
+  expect(sync.status.status).toBe("saving");
+  pending.resolve();
+  await running;
+  expect(server.merges).toHaveLength(2);
+  expect(sync.status.status).toBe("saved");
+  expect(server.doc.view()).toEqual(doc.view());
+});
+test("reload recovery includes pure deletions and duplicate histories produce no extra upload", async () => {
+  const { doc, root, server, sync } = fixture();
+  await sync.syncNow();
+  sync.destroy();
+  editNodeText(doc, root, 0, 6, "");
+  const reopened = keep(openProjectDocument(doc.id, [doc.snapshot()]));
+  const next = attach(reopened, server).sync;
+  await next.syncNow();
+  expect(server.doc.view().nodes[0].text).toBe(" 🌲");
+  expect(
+    pendingUpload(reopened, reopened.versionAt(server.doc.head() ?? "")),
+  ).toBeUndefined();
+  const count = server.merges.length;
+  await next.syncNow();
+  expect(server.merges).toHaveLength(count);
+});
+test("saves after the first send only new changes, and the whole map again if the cloud copy was replaced", async () => {
+  const { doc, root, server, sync } = fixture();
+  editNodeText(doc, root, 0, 0, long());
+  await sync.syncNow();
+  editNodeText(doc, root, 0, 0, "Next ");
+  await sync.syncNow();
+  expect(server.merges).toHaveLength(2);
+  expect(server.merges[0].length).toBeGreaterThan(40_000);
+  expect(server.merges[1].length).toBeLessThan(1000);
+  expect(server.doc.view()).toEqual(doc.view());
+  // Another device deletes the cloud copy and creates it again mid-save.
+  editNodeText(doc, root, 0, 0, "Again ");
+  const changes = server.changes.bind(server);
+  server.changes = async (...held) => {
+    const result = await changes(...held);
+    server.changes = changes;
+    await server.remove();
+    return result;
+  };
+  await sync.syncNow();
+  // The refused changes, then the whole map.
+  expect(server.merges).toHaveLength(4);
+  expect(server.merges[2].length).toBeLessThan(1000);
+  expect(server.merges[3].length).toBeGreaterThan(40_000);
+  expect(sync.status.status).toBe("saved");
+  expect(server.doc.view()).toEqual(doc.view());
+});
+test("private projects never register or upload, including manual retry", async () => {
+  const { doc, root, server, sync, setSaving } = fixture();
+  setSaving({ local: false, cloud: false });
+  await sync.syncNow();
+  editNodeText(doc, root, 0, 0, "Private ");
+  sync.retry();
+  await sync.syncNow();
+  expect(server.registrations).toBe(0);
+  expect(server.merges).toHaveLength(0);
+  expect(server.deletions).toBe(0);
+  expect(sync.status.status).toBe("disabled");
+});
 
 // A map saved once, with the server's counters started over.
 async function saved(options?: Attachment) {
-  const made = fixture(false, options);
+  const made = fixture(options);
   editNodeText(made.doc, made.root, 0, 0, long());
   await made.sync.syncNow();
   expect(made.sync.status.status).toBe("saved");
@@ -587,7 +559,7 @@ test("a sync still reads without a listed revision, without a marker, and before
     revision: String(server.revision),
   }).sync.syncNow();
   expect(server.reads).toHaveLength(2);
-  const unmarked = fixture(false, { revision: "0" });
+  const unmarked = fixture({ revision: "0" });
   await unmarked.sync.syncNow();
   expect(unmarked.server.reads).toHaveLength(1);
   // The cloud held no document at the marker's revision, so it gets one.
@@ -695,7 +667,7 @@ test("word that nothing changed counts only for the revision the marker names", 
   expect(doc.view()).toEqual(server.doc.view());
 });
 test("a socket notice naming the marker's revision asks nothing, and any other reads once", async () => {
-  const { doc, server, sync, socket } = fixture(false, { live: true });
+  const { doc, server, sync, socket } = fixture({ live: true });
   const settled = () => until(() => sync.status.status === "saved");
   await settled();
   const reads = server.reads.length;
@@ -715,71 +687,68 @@ test("a socket notice naming the marker's revision asks nothing, and any other r
   await settled();
   expect(server.reads).toHaveLength(reads + 2);
 });
-both(
-  "discovery imports a map this device lacks, and one it has only when that map's sync stalled and its cloud copy moved",
-  async (legacy) => {
-    const { doc, server, sync } = fixture(legacy);
-    await sync.syncNow();
-    const { signal } = new AbortController();
-    const imports: Uint8Array[] = [];
-    let entries: { id: string; saving: SavingPreferences }[] = [];
-    const repo = {
-      ...repository(doc.id),
-      list: async () => entries,
-      open: async (
-        id: string,
-        { initialSnapshot }: { initialSnapshot: Uint8Array },
-      ) => {
-        imports.push(initialSnapshot);
-        return {
-          id,
-          flush: async () => {},
-          refreshMetadata: async () => {},
-          close: async () => {},
-        };
-      },
-    };
-    const discover = (stalled?: string) =>
-      discoverProjects(
-        repo as unknown as ProjectRepository,
-        server,
-        signal,
-        stalled,
-      );
-    const revision = legacy ? undefined : String(server.revision);
-    const first = await discover();
-    expect(first.unreadable).toBeUndefined();
-    expect([...first.listed]).toEqual([[doc.id, revision]]);
-    expect(imports).toHaveLength(1);
-    expect(await repo.isRegistered()).toBe(true);
-    expect(await repo.cloudVersion()).toEqual({
-      revision: String(server.revision),
-      head: doc.head() ?? "",
-    });
-    // A map this device has is left to its own sync.
-    entries = [{ id: doc.id, saving: { local: true, cloud: true } }];
-    await discover();
-    expect(imports).toHaveLength(1);
-    // The earlier API cannot say whether a stalled map's copy moved.
-    await discover(doc.id);
-    expect(imports).toHaveLength(legacy ? 2 : 1);
-    elsewhere(server, "Elsewhere ");
-    await discover();
-    expect(imports).toHaveLength(legacy ? 2 : 1);
-    await discover(doc.id);
-    expect(imports).toHaveLength(legacy ? 3 : 2);
-    expect(await repo.cloudVersion()).toEqual({
-      revision: String(server.revision),
-      head: server.doc.head() ?? "",
-    });
-    // Once per change to the cloud copy, and never for a map kept out of it.
-    if (!legacy) await discover(doc.id);
-    elsewhere(server, "Again ");
-    entries = [{ id: doc.id, saving: { local: true, cloud: false } }];
-    await discover(doc.id);
-    expect(imports).toHaveLength(legacy ? 3 : 2);
-  },
-);
+test("discovery imports a map this device lacks, and one it has only when that map's sync stalled and its cloud copy moved", async () => {
+  const { doc, server, sync } = fixture();
+  await sync.syncNow();
+  const { signal } = new AbortController();
+  const imports: Uint8Array[] = [];
+  let entries: { id: string; saving: SavingPreferences }[] = [];
+  const repo = {
+    ...repository(doc.id),
+    list: async () => entries,
+    open: async (
+      id: string,
+      { initialSnapshot }: { initialSnapshot: Uint8Array },
+    ) => {
+      imports.push(initialSnapshot);
+      return {
+        id,
+        flush: async () => {},
+        refreshMetadata: async () => {},
+        close: async () => {},
+      };
+    },
+  };
+  const discover = (stalled?: string) =>
+    discoverProjects(
+      repo as unknown as ProjectRepository,
+      server,
+      signal,
+      stalled,
+    );
+  const revision = String(server.revision);
+  const first = await discover();
+  expect(first.unreadable).toBeUndefined();
+  expect([...first.listed]).toEqual([[doc.id, revision]]);
+  expect(imports).toHaveLength(1);
+  expect(await repo.isRegistered()).toBe(true);
+  expect(await repo.cloudVersion()).toEqual({
+    revision: String(server.revision),
+    head: doc.head() ?? "",
+  });
+  // A map this device has is left to its own sync.
+  entries = [{ id: doc.id, saving: { local: true, cloud: true } }];
+  await discover();
+  expect(imports).toHaveLength(1);
+  // A stalled map whose cloud copy has not moved is left alone.
+  await discover(doc.id);
+  expect(imports).toHaveLength(1);
+  elsewhere(server, "Elsewhere ");
+  await discover();
+  expect(imports).toHaveLength(1);
+  await discover(doc.id);
+  expect(imports).toHaveLength(2);
+  expect(await repo.cloudVersion()).toEqual({
+    revision: String(server.revision),
+    head: server.doc.head() ?? "",
+  });
+  // Once per change to the cloud copy, and never for a map kept out of it.
+  await discover(doc.id);
+  elsewhere(server, "Again ");
+  entries = [{ id: doc.id, saving: { local: true, cloud: false } }];
+  await discover(doc.id);
+  expect(imports).toHaveLength(2);
+});
 test("a workspace pass imports the open map while its sync is blocked, once per change to the cloud copy", async () => {
   const doc = keep(
     createProjectDocument(crypto.randomUUID(), "Planning", { text: "Shared" }),
