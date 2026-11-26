@@ -191,7 +191,7 @@ interface Exchange {
   sent: number;
   received: number;
 }
-// Records the body sizes of every API request the page completes.
+// Records the body sizes of every API request the page makes, answered or not.
 function traffic(page: Page) {
   const exchanges: Exchange[] = [];
   const unread: string[] = [];
@@ -209,30 +209,36 @@ function traffic(page: Page) {
     open.add(request);
     moved = Date.now();
   });
+  // What a request names and sends, known as soon as it starts.
+  const sending = (request: Request) => {
+    const url = new URL(request.url());
+    const body = request.postDataBuffer();
+    let id = url.searchParams.get("projectId") ?? undefined;
+    if (!id && body)
+      try {
+        id = JSON.parse(body.toString()).projectId;
+      } catch {}
+    return {
+      method: url.pathname.slice("/api/".length, -".php".length),
+      id,
+      sent: body?.length ?? 0,
+    };
+  };
+  // A request that got no answer still sent its body, so it still counts.
   page.on("requestfailed", (request) => {
-    if (api(request)) settle(request);
+    if (!api(request)) return;
+    exchanges.push({ ...sending(request), received: 0 });
+    settle(request);
   });
   page.on("requestfinished", async (request) => {
     if (!api(request)) return;
-    const url = new URL(request.url());
-    const method = url.pathname.slice("/api/".length, -".php".length);
+    const sent = sending(request);
     try {
       const response = await request.response();
       if (!response) throw new Error("No response");
-      const body = request.postDataBuffer();
-      let id = url.searchParams.get("projectId") ?? undefined;
-      if (!id && body)
-        try {
-          id = JSON.parse(body.toString()).projectId;
-        } catch {}
-      exchanges.push({
-        method,
-        id,
-        sent: body?.length ?? 0,
-        received: (await response.body()).length,
-      });
+      exchanges.push({ ...sent, received: (await response.body()).length });
     } catch (error) {
-      unread.push(`${method}: ${error}`);
+      unread.push(`${sent.method}: ${error}`);
     } finally {
       settle(request);
     }

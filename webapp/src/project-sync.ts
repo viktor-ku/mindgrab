@@ -475,16 +475,28 @@ export class ProjectSync {
     }
     // Before anything is awaited, so an edit made meanwhile is measured
     // against the copy just merged.
+    const before = { cloud: this.#cloud, committed: this.#committed };
     const cloud =
       head === undefined ? undefined : { revision: reply.revision, head };
     this.#cloud = cloud;
     this.#committed = version;
-    await this.handle.flush();
-    this.#alive(signal);
-    await this.handle.refreshMetadata();
-    this.#alive(signal);
-    await this.repository.markCloudVersion(id, cloud);
-    this.#alive(signal);
+    try {
+      await this.handle.flush();
+      this.#alive(signal);
+      await this.handle.refreshMetadata();
+      this.#alive(signal);
+      await this.repository.markCloudVersion(id, cloud);
+      this.#alive(signal);
+    } catch (error) {
+      // Until it is stored, the marker must not let a retry's "unchanged"
+      // answer skip the writes that failed: the retry reads from the older
+      // one, and merging what comes back again changes nothing.
+      if (this.#cloud === cloud) {
+        this.#cloud = before.cloud;
+        this.#committed = before.committed;
+      }
+      throw error;
+    }
     return true;
   }
   #connect() {
@@ -556,14 +568,17 @@ export async function discoverProjects(
     const known = knownProjects.get(project.projectId);
     if (
       known &&
-      (project.projectId !== stalled ||
-        known.saving?.cloud === false ||
-        (project.revision !== undefined &&
-          project.revision ===
-            (await repository.cloudVersion(project.projectId))?.revision))
+      (project.projectId !== stalled || known.saving?.cloud === false)
     )
       continue;
     try {
+      if (
+        known &&
+        project.revision !== undefined &&
+        project.revision ===
+          (await repository.cloudVersion(project.projectId))?.revision
+      )
+        continue;
       const handle = await importCloudProject(
         repository,
         api,
@@ -572,7 +587,13 @@ export async function discoverProjects(
       );
       await handle.close();
     } catch (error) {
-      if (signal.aborted || error instanceof SyncError) throw error;
+      // A cloud that is busy or unreachable for one map may serve the next;
+      // signing in again or a refusal holds for every map.
+      if (
+        signal.aborted ||
+        (error instanceof SyncError && error.kind !== "retry")
+      )
+        throw error;
       unreadable ??= error;
     }
   }

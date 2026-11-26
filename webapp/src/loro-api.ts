@@ -153,7 +153,9 @@ export class LoroApi {
     signal: AbortSignal,
   ): Promise<CloudSnapshot> {
     return this.#read(
-      "changes",
+      // Reads that hold different versions get different answers, so they
+      // must not share one request.
+      `changes ${held.revision ?? ""} ${held.since}`,
       signal,
       async (signal) => {
         try {

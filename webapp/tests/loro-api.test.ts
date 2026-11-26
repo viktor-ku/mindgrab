@@ -251,3 +251,28 @@ test("a map saves and keeps saving against the earlier API", async () => {
   expect(calls[1].body).toEqual({ projectId: id });
   expect((calls[2].body as Uint8Array).length).toBeLessThan(200);
 });
+test("reads that hold different versions are separate requests, even at once", async () => {
+  const doc = keep(createProjectDocument(id, "Planning", { text: "Idea" }));
+  const { api, calls } = connect(({ body }) =>
+    json({
+      projectId: id,
+      revision: "1",
+      ...((body as { since?: string }).since
+        ? { encoding: "loro-update", data: "" }
+        : {
+            encoding: "loro-snapshot",
+            data: Buffer.from(doc.snapshot()).toString("base64"),
+          }),
+      head: doc.head(),
+      durable: true,
+    }),
+  );
+  const lifetime = signal();
+  const [update, complete] = await Promise.all([
+    api.changes(id, { since: doc.head() ?? "" }, lifetime),
+    api.snapshot(id, lifetime),
+  ]);
+  expect(calls).toHaveLength(2);
+  expect(update.encoding).toBe("loro-update");
+  expect(complete.encoding).toBe("loro-snapshot");
+});

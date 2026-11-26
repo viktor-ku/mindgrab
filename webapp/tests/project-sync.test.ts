@@ -391,6 +391,23 @@ test("an idle sync downloads and uploads nothing", async () => {
   expect(server.downloaded).toBe(0);
   expect(sync.status.status).toBe("saved");
 });
+test("a marker whose local writes failed is written by the next run, even when the cloud has not moved", async () => {
+  const { server, sync, repo } = await saved();
+  elsewhere(server, "Elsewhere ");
+  const mark = repo.markCloudVersion;
+  repo.markCloudVersion = async () => {
+    repo.markCloudVersion = mark;
+    throw new Error("Storage failed");
+  };
+  await sync.syncNow();
+  expect(sync.status.status).toBe("retrying");
+  await sync.syncNow();
+  expect(sync.status.status).toBe("saved");
+  expect(await repo.cloudVersion()).toEqual({
+    revision: String(server.revision),
+    head: server.doc.head() ?? "",
+  });
+});
 test("a save whose acknowledgement was lost comes back once, no larger than it went up", async () => {
   const { doc, root, server, sync } = await saved();
   const head = doc.head();
