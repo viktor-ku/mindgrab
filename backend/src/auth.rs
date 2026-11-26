@@ -390,9 +390,9 @@ impl Auth {
         let refresh_token = self.seal("sealed_refresh_token", &browser_hash, &auth.refresh_token);
         let mut tx = self.pool.begin().await?;
         let Upserted { user, created } = upsert(&mut tx, &auth.user).await?;
-        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) VALUES($1,$2,$3,$4,$5)").bind(&browser_hash).bind(user.id).bind(claims.sid).bind(access_token).bind(refresh_token).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO mindgrab_loro.sealed_sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) VALUES($1,$2,$3,$4,$5)").bind(&browser_hash).bind(user.id).bind(claims.sid).bind(access_token).bind(refresh_token).execute(&mut *tx).await?;
         if let Some(previous) = self.browser_cookie(headers, SESSION_COOKIE) {
-            sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1")
+            sqlx::query("DELETE FROM mindgrab_loro.sealed_sessions WHERE browser_hash=$1")
                 .bind(hash(&previous))
                 .execute(&mut *tx)
                 .await?;
@@ -451,7 +451,7 @@ impl Auth {
     async fn session_user(&self, browser_hash: &str) -> Result<User> {
         let started = std::time::Instant::now();
         loop {
-            let stored: StoredSession = sqlx::query_as("SELECT u.id,u.name,u.email,u.external_id,s.provider_session,s.sealed_access_token,s.sealed_refresh_token FROM mindgrab_loro.sessions s JOIN mindgrab_loro.users u ON u.id=s.user_id WHERE s.browser_hash=$1 AND s.expires_at>now()").bind(browser_hash).fetch_optional(&self.pool).await?.ok_or_else(ApiError::unauthorized)?;
+            let stored: StoredSession = sqlx::query_as("SELECT u.id,u.name,u.email,u.external_id,s.provider_session,s.sealed_access_token,s.sealed_refresh_token FROM mindgrab_loro.sealed_sessions s JOIN mindgrab_loro.users u ON u.id=s.user_id WHERE s.browser_hash=$1 AND s.expires_at>now()").bind(browser_hash).fetch_optional(&self.pool).await?.ok_or_else(ApiError::unauthorized)?;
             let (access_token, refresh_token) = (
                 stored.sealed_access_token.clone(),
                 stored.sealed_refresh_token.clone(),
@@ -471,7 +471,7 @@ impl Auth {
                 Err(error) if error.status == StatusCode::UNAUTHORIZED => {
                     // Only the tokens that were judged end the session: a
                     // refresh may have replaced them since they were read.
-                    let ended = sqlx::query("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1 AND sealed_access_token=$2 AND sealed_refresh_token=$3").bind(browser_hash).bind(access_token).bind(refresh_token).execute(&self.pool).await?.rows_affected();
+                    let ended = sqlx::query("DELETE FROM mindgrab_loro.sealed_sessions WHERE browser_hash=$1 AND sealed_access_token=$2 AND sealed_refresh_token=$3").bind(browser_hash).bind(access_token).bind(refresh_token).execute(&self.pool).await?.rows_affected();
                     if ended == 1 {
                         return Err(error);
                     }
@@ -514,7 +514,7 @@ impl Auth {
     /// request holds the lease.
     async fn refresh(&self, browser_hash: &str, session: Session) -> Result<Option<User>> {
         // The lease's end time identifies it, so only its holder releases it.
-        let lease: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.sessions SET refreshing_until=now()+make_interval(secs => $3) WHERE browser_hash=$1 AND sealed_refresh_token=$2 AND (refreshing_until IS NULL OR refreshing_until<=now()) RETURNING refreshing_until::text").bind(browser_hash).bind(&session.sealed_refresh_token).bind(REFRESH_LEASE.as_secs_f64()).fetch_optional(&self.pool).await?;
+        let lease: Option<String> = sqlx::query_scalar("UPDATE mindgrab_loro.sealed_sessions SET refreshing_until=now()+make_interval(secs => $3) WHERE browser_hash=$1 AND sealed_refresh_token=$2 AND (refreshing_until IS NULL OR refreshing_until<=now()) RETURNING refreshing_until::text").bind(browser_hash).bind(&session.sealed_refresh_token).bind(REFRESH_LEASE.as_secs_f64()).fetch_optional(&self.pool).await?;
         let Some(lease) = lease else {
             return Ok(None);
         };
@@ -532,7 +532,7 @@ impl Auth {
             let refresh_token =
                 self.seal("sealed_refresh_token", browser_hash, &auth.refresh_token);
             let mut tx = self.pool.begin().await?;
-            let stored = sqlx::query("UPDATE mindgrab_loro.sessions SET sealed_access_token=$2,sealed_refresh_token=$3,refreshing_until=NULL WHERE browser_hash=$1 AND sealed_refresh_token=$4").bind(browser_hash).bind(access_token).bind(refresh_token).bind(&session.sealed_refresh_token).execute(&mut *tx).await?.rows_affected();
+            let stored = sqlx::query("UPDATE mindgrab_loro.sealed_sessions SET sealed_access_token=$2,sealed_refresh_token=$3,refreshing_until=NULL WHERE browser_hash=$1 AND sealed_refresh_token=$4").bind(browser_hash).bind(access_token).bind(refresh_token).bind(&session.sealed_refresh_token).execute(&mut *tx).await?.rows_affected();
             // Signed out while refreshing.
             if stored == 0 {
                 return Err(ApiError::unauthorized());
@@ -545,7 +545,7 @@ impl Auth {
         .unwrap_or_else(|_| Err(ApiError::unavailable()));
         if refreshed.is_err() {
             // The next request may try at once rather than wait out the lease.
-            let _ = sqlx::query("UPDATE mindgrab_loro.sessions SET refreshing_until=NULL WHERE browser_hash=$1 AND refreshing_until::text=$2").bind(browser_hash).bind(lease).execute(&self.pool).await;
+            let _ = sqlx::query("UPDATE mindgrab_loro.sealed_sessions SET refreshing_until=NULL WHERE browser_hash=$1 AND refreshing_until::text=$2").bind(browser_hash).bind(lease).execute(&self.pool).await;
         }
         refreshed.map(Some)
     }
@@ -553,7 +553,7 @@ impl Auth {
         self.config.same_origin(headers)?;
         let mut destination = self.config.app_url.clone();
         if let Some(browser) = self.browser_cookie(headers, SESSION_COOKIE) {
-            let sid: Option<String> = sqlx::query_scalar("DELETE FROM mindgrab_loro.sessions WHERE browser_hash=$1 RETURNING provider_session").bind(hash(&browser)).fetch_optional(&self.pool).await?;
+            let sid: Option<String> = sqlx::query_scalar("DELETE FROM mindgrab_loro.sealed_sessions WHERE browser_hash=$1 RETURNING provider_session").bind(hash(&browser)).fetch_optional(&self.pool).await?;
             if let Some(sid) = sid.filter(|_| self.config.auth_mode == AuthMode::WorkOs) {
                 let mut url = self.url("/user_management/sessions/logout");
                 url.query_pairs_mut().extend_pairs([

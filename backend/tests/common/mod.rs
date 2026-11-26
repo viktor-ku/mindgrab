@@ -202,7 +202,7 @@ impl Fixture {
             self.backend
                 .auth
                 .seal("sealed_refresh_token", &browser_hash, &refresh_token(sub));
-        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) VALUES($1,$2,$3,$4,$5)").bind(&browser_hash).bind(user_id).bind(format!("session_{sub}")).bind(access).bind(refresh).execute(&self.backend.pool).await.unwrap();
+        sqlx::query("INSERT INTO mindgrab_loro.sealed_sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) VALUES($1,$2,$3,$4,$5)").bind(&browser_hash).bind(user_id).bind(format!("session_{sub}")).bind(access).bind(refresh).execute(&self.backend.pool).await.unwrap();
         browser
     }
     pub fn seal_access_token(&self, browser_hash: &str, token: &str) -> String {
@@ -214,7 +214,7 @@ impl Fixture {
     pub async fn expire(&self, browser: &str, sub: &str) {
         let browser_hash = hash(browser);
         sqlx::query(
-            "UPDATE mindgrab_loro.sessions SET sealed_access_token=$1 WHERE browser_hash=$2",
+            "UPDATE mindgrab_loro.sealed_sessions SET sealed_access_token=$1 WHERE browser_hash=$2",
         )
         .bind(self.seal_access_token(&browser_hash, &signed(sub, now() - 1)))
         .bind(&browser_hash)

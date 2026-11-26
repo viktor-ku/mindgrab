@@ -133,6 +133,11 @@ and sessions last at most 30 days. A session whose tokens no key opens ends, and
 its person signs in again. The sealed value is bound to its session and column,
 so tokens copied to another session do not open.
 
+Sealed sessions live in `sealed_sessions`. The `sessions` table from before
+sealing stays so a deployment still serving it keeps working during a rollout
+or rollback, but it is emptied on startup and every hour, so its people sign in
+again. A later change can drop it.
+
 ## API
 
 All RPC endpoints use POST and return uncached responses:

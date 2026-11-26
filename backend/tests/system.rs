@@ -118,7 +118,7 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     // Neither the tokens from sign-in nor those from refreshes are readable
     // in the database.
     let rows: Vec<String> =
-        sqlx::query_scalar("SELECT row_to_json(s)::text FROM mindgrab_loro.sessions s")
+        sqlx::query_scalar("SELECT row_to_json(s)::text FROM mindgrab_loro.sealed_sessions s")
             .fetch_all(&f.backend.pool)
             .await
             .unwrap();
@@ -143,12 +143,13 @@ async fn authkit_state_pkce_callback_refresh_and_logout() {
     f.expire(&browser, "alice").await;
     f.provider.rejected.store(1, Ordering::SeqCst);
     assert_eq!(f.rpc("getMe", &browser, json!({})).await.status(), 401);
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.sessions WHERE browser_hash=$1")
-            .bind(hash(&browser))
-            .fetch_one(&f.backend.pool)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM mindgrab_loro.sealed_sessions WHERE browser_hash=$1",
+    )
+    .bind(hash(&browser))
+    .fetch_one(&f.backend.pool)
+    .await
+    .unwrap();
     assert_eq!(count, 0);
     f.close().await;
 }
@@ -160,12 +161,12 @@ async fn stored_tokens_open_only_in_their_own_session() {
     // Someone who can write to the database but has no key cannot move a
     // session's sealed tokens to a browser credential they hold.
     let stolen = Uuid::new_v4().to_string();
-    sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) SELECT $2,user_id,provider_session,sealed_access_token,sealed_refresh_token FROM mindgrab_loro.sessions WHERE browser_hash=$1").bind(hash(&browser)).bind(hash(&stolen)).execute(&f.backend.pool).await.unwrap();
+    sqlx::query("INSERT INTO mindgrab_loro.sealed_sessions(browser_hash,user_id,provider_session,sealed_access_token,sealed_refresh_token) SELECT $2,user_id,provider_session,sealed_access_token,sealed_refresh_token FROM mindgrab_loro.sealed_sessions WHERE browser_hash=$1").bind(hash(&browser)).bind(hash(&stolen)).execute(&f.backend.pool).await.unwrap();
     assert_eq!(f.rpc("getMe", &stolen, json!({})).await.status(), 401);
     // Nor swap the two tokens of one session.
-    sqlx::query("UPDATE mindgrab_loro.sessions SET sealed_access_token=sealed_refresh_token,sealed_refresh_token=sealed_access_token WHERE browser_hash=$1").bind(hash(&browser)).execute(&f.backend.pool).await.unwrap();
+    sqlx::query("UPDATE mindgrab_loro.sealed_sessions SET sealed_access_token=sealed_refresh_token,sealed_refresh_token=sealed_access_token WHERE browser_hash=$1").bind(hash(&browser)).execute(&f.backend.pool).await.unwrap();
     assert_eq!(f.rpc("getMe", &browser, json!({})).await.status(), 401);
-    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.sessions")
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.sealed_sessions")
         .fetch_one(&f.backend.pool)
         .await
         .unwrap();
@@ -175,24 +176,35 @@ async fn stored_tokens_open_only_in_their_own_session() {
 #[tokio::test]
 async fn sessions_with_plain_text_tokens_end_on_upgrade() {
     let f = Fixture::new("http://localhost:5173").await;
-    let browser = f.credential("alice").await;
-    // The table as it was before tokens were sealed, with one session.
-    sqlx::raw_sql("DELETE FROM mindgrab_loro.sessions; ALTER TABLE mindgrab_loro.sessions DROP COLUMN sealed_access_token, DROP COLUMN sealed_refresh_token, ADD COLUMN access_token TEXT NOT NULL, ADD COLUMN refresh_token TEXT NOT NULL").execute(&f.backend.pool).await.unwrap();
-    sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) SELECT $1,id,'session_alice',$2,'refresh_alice.old' FROM mindgrab_loro.users WHERE external_id='alice'").bind(hash(&browser)).bind(signed("alice", now() + 3600)).execute(&f.backend.pool).await.unwrap();
+    let legacy = Uuid::new_v4().to_string();
+    // A session as a deployment from before sealing writes it, which keeps
+    // serving until this one passes its healthcheck.
+    let insert_legacy = |browser: String| {
+        sqlx::query("INSERT INTO mindgrab_loro.sessions(browser_hash,user_id,provider_session,access_token,refresh_token) SELECT $1,id,'session_alice',$2,'refresh_alice.old' FROM mindgrab_loro.users WHERE external_id='alice'").bind(hash(&browser)).bind(signed("alice", now() + 3600))
+    };
+    let sealed = f.credential("alice").await;
+    insert_legacy(legacy.clone())
+        .execute(&f.backend.pool)
+        .await
+        .unwrap();
+    let legacy_count =
+        || sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mindgrab_loro.sessions");
     for _ in 0..2 {
         sqlx::raw_sql(include_str!("../schema.sql"))
             .execute(&f.backend.pool)
             .await
             .unwrap();
+        assert_eq!(legacy_count().fetch_one(&f.backend.pool).await.unwrap(), 0);
+        // The older deployment's queries still run, so it keeps working, with
+        // its people signed out, until it stops.
+        insert_legacy(legacy.clone())
+            .execute(&f.backend.pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT u.id,s.provider_session,s.access_token,s.refresh_token,s.refreshing_until FROM mindgrab_loro.sessions s JOIN mindgrab_loro.users u ON u.id=s.user_id WHERE s.browser_hash=$1 AND s.expires_at>now()").bind(hash(&legacy)).fetch_one(&f.backend.pool).await.unwrap();
     }
-    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM mindgrab_loro.sessions")
-        .fetch_one(&f.backend.pool)
-        .await
-        .unwrap();
-    assert_eq!(left, 0);
-    assert_eq!(f.rpc("getMe", &browser, json!({})).await.status(), 401);
-    let browser = f.credential("alice").await;
-    assert_eq!(f.rpc("getMe", &browser, json!({})).await.status(), 200);
+    assert_eq!(f.rpc("getMe", &legacy, json!({})).await.status(), 401);
+    assert_eq!(f.rpc("getMe", &sealed, json!({})).await.status(), 200);
     f.close().await;
 }
 #[tokio::test]
