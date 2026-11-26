@@ -51,9 +51,12 @@ RUN bun --bun run --cwd webapp build \
             ${RAILWAY_GIT_COMMIT_SHA:+--release-version "$RAILWAY_GIT_COMMIT_SHA"}; \
     fi \
     && find webapp/dist -name '*.map' -delete
+# The policy names the API the bundle above was built to call.
+RUN bun --bun webapp/scripts/content-security-policy.ts > /content-security-policy.caddy
 
 FROM caddy:2.11.8-alpine
 COPY webapp/Caddyfile /etc/caddy/Caddyfile
+COPY --from=webapp /content-security-policy.caddy /etc/caddy/content-security-policy.caddy
 COPY --from=webapp /app/webapp/dist /srv
 ENV PORT=8080
 EXPOSE 8080

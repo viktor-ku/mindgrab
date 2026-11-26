@@ -304,6 +304,10 @@ file gets Apache's 404 page, `/assets` redirects to its slash, and `/assets/`,
 `.ht*`, `/icons/` and `/server-status` get the 403 page. `TRACE` gets the 405.
 `/phpmyadmin` redirects to the decoy on the API with Apache's 301 page.
 
+Every response, Apache's pages included, carries the security headers described in
+[`webapp/README.md`](../webapp/README.md), as a site that sets them with
+`Header always set` would send them.
+
 Two things live only in Cloudflare, on the `mindgrab.app` zone. Recreate them if the
 zone is rebuilt.
 
