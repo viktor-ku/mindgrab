@@ -116,3 +116,40 @@ test("reads that hold different versions are separate requests, even at once", a
   expect(update.encoding).toBe("loro-update");
   expect(complete.encoding).toBe("loro-snapshot");
 });
+
+const saveRefused = (status: number, code: string) =>
+  connect(() => refused(code, status))
+    .api.merge(id, new Uint8Array([1]), signal())
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+test("a full account stops cloud saving and says how to make room", async () => {
+  const error = await saveRefused(422, "quota_exceeded");
+  expect(error).toBeInstanceOf(SyncError);
+  expect(error).toMatchObject({ kind: "blocked", code: "quota_exceeded" });
+  expect((error as SyncError).message).toContain("cloud storage");
+  expect((error as SyncError).message).toContain("to make room");
+});
+
+test("an account out of map IDs does not suggest deleting maps", async () => {
+  const error = await saveRefused(422, "id_quota_exceeded");
+  expect(error).toMatchObject({ kind: "blocked", code: "id_quota_exceeded" });
+  expect((error as SyncError).message).toContain("saved only in this browser");
+  expect((error as SyncError).message).not.toContain("Delete");
+});
+
+test("a map too large for the cloud says so", async () => {
+  for (const [status, code] of [
+    [413, "payload_too_large"],
+    [422, "resource_limit"],
+  ] as const) {
+    const error = await saveRefused(status, code);
+    expect(error).toMatchObject({
+      kind: "blocked",
+      code,
+      message: "This map is too large to save to the cloud.",
+    });
+  }
+});

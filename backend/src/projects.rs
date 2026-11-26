@@ -103,6 +103,30 @@ async fn revision(app: &Backend, user: &User, id: Uuid) -> Result<i64> {
     .await?
     .ok_or_else(ApiError::missing)
 }
+/// What an account keeps in the cloud, against its [`crate::config::Quota`].
+#[derive(FromRow)]
+struct Usage {
+    projects: i64,
+    ids: i64,
+    /// Bytes stored by its maps other than the one being saved.
+    other_bytes: i64,
+    /// Bytes the map being saved stores now.
+    saving_bytes: i64,
+}
+/// Locks the account for the rest of `tx`, then measures what it stores
+/// beside `saving`. Requests that check the quota before storing take turns,
+/// so two of them cannot both fill the same room.
+async fn usage(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: i64,
+    saving: Option<Uuid>,
+) -> Result<Usage> {
+    sqlx::query("SELECT 1 FROM mindgrab_loro.users WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(owner)
+        .execute(&mut **tx)
+        .await?;
+    Ok(sqlx::query_as("SELECT count(*) FILTER (WHERE NOT deleted) AS projects,count(*) AS ids,COALESCE(sum(snapshot_bytes) FILTER (WHERE id IS DISTINCT FROM $2),0)::bigint AS other_bytes,COALESCE(sum(snapshot_bytes) FILTER (WHERE id=$2),0)::bigint AS saving_bytes FROM mindgrab_loro.projects WHERE owner_id=$1").bind(owner).bind(saving).fetch_one(&mut **tx).await?)
+}
 fn record(id: Uuid, name: Option<String>) -> Value {
     json!({"projectId":id,"schemaVersion":1,"format":"mindgrab-loro-v1","name":name})
 }
@@ -245,26 +269,48 @@ pub async fn rpc(
                     "unsupported_schema",
                 ));
             }
+            let quota = app.config.quota;
             let mut tx = app.pool.begin().await?;
-            sqlx::query("INSERT INTO mindgrab_loro.projects(id,owner_id) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(args.project_id).bind(user.id).execute(&mut *tx).await?;
-            let owner: i64 = sqlx::query_scalar(
-                "SELECT owner_id FROM mindgrab_loro.projects WHERE id=$1 FOR UPDATE",
+            let usage = usage(&mut tx, user.id, None).await?;
+            let existing: Option<(i64, bool, Option<String>)> = sqlx::query_as(
+                "SELECT owner_id,deleted,name FROM mindgrab_loro.projects WHERE id=$1 FOR UPDATE",
             )
             .bind(args.project_id)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-            if owner != user.id {
-                return Err(ApiError::new(StatusCode::CONFLICT, "project_id_conflict"));
-            }
-            sqlx::query("UPDATE mindgrab_loro.projects SET deleted=false WHERE id=$1")
-                .bind(args.project_id)
-                .execute(&mut *tx)
-                .await?;
-            let name: Option<String> =
-                sqlx::query_scalar("SELECT name FROM mindgrab_loro.projects WHERE id=$1")
-                    .bind(args.project_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let name = match existing {
+                Some((owner, ..)) if owner != user.id => {
+                    return Err(ApiError::new(StatusCode::CONFLICT, "project_id_conflict"));
+                }
+                Some((_, false, name)) => name,
+                // Its ID is the account's already, so only the map counts.
+                Some((_, true, name)) => {
+                    if usage.projects >= quota.projects {
+                        return Err(ApiError::quota_exceeded());
+                    }
+                    sqlx::query("UPDATE mindgrab_loro.projects SET deleted=false WHERE id=$1")
+                        .bind(args.project_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    name
+                }
+                None => {
+                    // The permanent cap first: deleting maps frees no ID.
+                    if usage.ids >= quota.ids {
+                        return Err(ApiError::id_quota_exceeded());
+                    }
+                    if usage.projects >= quota.projects {
+                        return Err(ApiError::quota_exceeded());
+                    }
+                    // The account is locked, so a row that appeared meanwhile
+                    // was added by another account.
+                    let added = sqlx::query("INSERT INTO mindgrab_loro.projects(id,owner_id) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(args.project_id).bind(user.id).execute(&mut *tx).await?.rows_affected();
+                    if added == 0 {
+                        return Err(ApiError::new(StatusCode::CONFLICT, "project_id_conflict"));
+                    }
+                    None
+                }
+            };
             tx.commit().await?;
             Ok(Json(record(args.project_id, name)).into_response())
         }
@@ -462,6 +508,7 @@ async fn merge(
     let permit = app.compute.acquire(user.id).await?;
     for _ in 0..MERGE_ATTEMPTS {
         let current = stored(app, user, id).await?;
+        let prior_bytes = current.snapshot.as_ref().map_or(0, Vec::len) as i64;
         let (prior, bytes, command) = (current.snapshot, bytes.clone(), command.clone());
         let (snapshot, name, changed, head) = compute::run(&permit, move || {
             let mut project = if let Some(ref prior) = prior {
@@ -493,7 +540,21 @@ async fn merge(
             });
         }
         let revision = current.revision + 1;
+        let snapshot_bytes = snapshot.len() as i64;
         let mut tx = app.pool.begin().await?;
+        // A map that grows must fit in the account's quota. One that does not
+        // grow is always saved, so an account over its quota keeps what it has.
+        if snapshot_bytes > prior_bytes {
+            // Measured under the lock: should the map have changed since it
+            // was read, a save that no longer grows it goes on to the update,
+            // which stores nothing and starts over from the newer revision.
+            let usage = usage(&mut tx, user.id, Some(id)).await?;
+            if snapshot_bytes > usage.saving_bytes
+                && usage.other_bytes + snapshot_bytes > app.config.quota.bytes
+            {
+                return Err(ApiError::quota_exceeded());
+            }
+        }
         let saved = sqlx::query("UPDATE mindgrab_loro.projects SET snapshot=$3,name=$4,revision=$5,updated_at=now() WHERE id=$1 AND owner_id=$2 AND NOT deleted AND revision=$6").bind(id).bind(user.id).bind(&snapshot).bind(name).bind(revision).bind(current.revision).execute(&mut *tx).await?.rows_affected();
         if saved == 1 {
             notify(&mut tx, user.id, id).await?;

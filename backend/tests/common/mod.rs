@@ -10,7 +10,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mindgrab_backend::{
     Backend,
     auth::{SESSION_COOKIE, hash},
-    config::{AuthMode, Config},
+    config::{AuthMode, Config, Quota},
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -113,6 +113,18 @@ impl Fixture {
         auth_mode: AuthMode,
         posthog: Option<mindgrab_backend::config::PostHogConfig>,
     ) -> Self {
+        Self::build(origin, auth_mode, posthog, Quota::default()).await
+    }
+    /// A backend whose accounts may store only `quota`.
+    pub async fn with_quota(origin: &str, quota: Quota) -> Self {
+        Self::build(origin, AuthMode::WorkOs, None, quota).await
+    }
+    async fn build(
+        origin: &str,
+        auth_mode: AuthMode,
+        posthog: Option<mindgrab_backend::config::PostHogConfig>,
+        quota: Quota,
+    ) -> Self {
         let database = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres@localhost:5432/mindgrab".into());
         let admin = PgPoolOptions::new()
@@ -163,6 +175,7 @@ impl Fixture {
                 "test:bWluZGdyYWItdGVzdC1rZXktMzItYnl0ZXMtbG9uZyE=",
             )
             .unwrap(),
+            quota,
         };
         let backend = Backend::connect(config).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

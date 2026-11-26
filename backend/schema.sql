@@ -55,6 +55,24 @@ ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS share_token TEXT UNI
 -- history, which keeps deleted ideas and notes. Built when first viewed.
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_snapshot BYTEA;
 ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS shared_revision BIGINT;
+-- The length of `snapshot`, kept beside it so an account's quota check sums a
+-- column instead of reading every snapshot. The database measures it on every
+-- write, so it stays right whichever backend version writes the snapshot,
+-- including one from before the column existed that is still serving during a
+-- deploy or after a rollback. Rows such a version left behind are measured here.
+ALTER TABLE mindgrab_loro.projects ADD COLUMN IF NOT EXISTS snapshot_bytes BIGINT NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION mindgrab_loro.measure_snapshot() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.snapshot_bytes := COALESCE(octet_length(NEW.snapshot), 0);
+    RETURN NEW;
+END
+$$;
+CREATE OR REPLACE TRIGGER measure_snapshot BEFORE INSERT OR UPDATE OF snapshot, snapshot_bytes
+    ON mindgrab_loro.projects FOR EACH ROW EXECUTE FUNCTION mindgrab_loro.measure_snapshot();
+UPDATE mindgrab_loro.projects SET snapshot_bytes=COALESCE(octet_length(snapshot),0) WHERE snapshot_bytes<>COALESCE(octet_length(snapshot),0);
+-- Everything an account's quota counts: its maps, every ID it holds, and the
+-- bytes they store.
+CREATE INDEX IF NOT EXISTS projects_usage ON mindgrab_loro.projects(owner_id) INCLUDE (deleted, snapshot_bytes);
 -- How each account wants Mindgrab to work: how its maps look, where they are
 -- saved, and its answer about analytics. A preference is set for all of the
 -- account's maps (global) or for one map, whose own value wins. Scopes and

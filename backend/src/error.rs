@@ -31,6 +31,16 @@ impl ApiError {
     pub fn missing() -> Self {
         Self::new(StatusCode::NOT_FOUND, "project_not_found")
     }
+    /// The account would keep more maps or bytes in the cloud than its quota
+    /// allows. Deleting cloud maps makes room.
+    pub fn quota_exceeded() -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "quota_exceeded")
+    }
+    /// The account holds every project ID its quota allows. Deleted maps keep
+    /// theirs, so only maps it already has can be stored.
+    pub fn id_quota_exceeded() -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "id_quota_exceeded")
+    }
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
