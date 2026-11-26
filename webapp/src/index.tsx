@@ -1,4 +1,5 @@
 /* @refresh reload */
+import "./zod-config";
 import { QueryClientProvider } from "@tanstack/solid-query";
 import { queryClient } from "./query-client";
 import { RouterProvider } from "@tanstack/solid-router";
