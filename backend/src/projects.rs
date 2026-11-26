@@ -65,6 +65,18 @@ fn parse<T: serde::de::DeserializeOwned>(headers: &HeaderMap, body: &Bytes) -> R
 async fn stored(app: &Backend, user: &User, id: Uuid) -> Result<Stored> {
     sqlx::query_as("SELECT snapshot,revision FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted").bind(id).bind(user.id).fetch_optional(&app.pool).await?.ok_or_else(ApiError::missing)
 }
+/// The project's committed revision, without reading its snapshot: sockets
+/// look it up on every change and every 20 seconds.
+async fn revision(app: &Backend, user: &User, id: Uuid) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT revision FROM mindgrab_loro.projects WHERE id=$1 AND owner_id=$2 AND NOT deleted",
+    )
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&app.pool)
+    .await?
+    .ok_or_else(ApiError::missing)
+}
 fn record(id: Uuid, name: Option<String>) -> Value {
     json!({"projectId":id,"schemaVersion":1,"format":"mindgrab-loro-v1","name":name})
 }
@@ -435,7 +447,7 @@ pub async fn socket(
     if args.owner_id != user.id {
         return Err(ApiError::new(StatusCode::CONFLICT, "account_changed"));
     }
-    stored(&app, &user, id).await?;
+    revision(&app, &user, id).await?;
     // Subscribe before the upgrade so an edit during the handshake isn't lost.
     let receiver = app.changes.subscribe();
     let target = format!("{}/{id}", user.id);
@@ -447,10 +459,9 @@ pub async fn socket(
                 if app.auth.identify(&headers).await.is_err() {
                     return Err("Sign in again");
                 }
-                match stored(&app, &user, id).await {
-                    Ok(project) => Ok(project.revision),
-                    Err(_) => Err("Project unavailable"),
-                }
+                revision(&app, &user, id)
+                    .await
+                    .map_err(|_| "Project unavailable")
             })
         }))
 }
