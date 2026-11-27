@@ -21,7 +21,7 @@ async fn mock() -> (
         let tx = tx.clone();
         async move {
             let (parts, body) = request.into_parts();
-            tx.send((parts, to_bytes(body, 1024 * 1024).await.unwrap()))
+            tx.send((parts, to_bytes(body, 8 * 1024 * 1024).await.unwrap()))
                 .unwrap();
             "accepted"
         }
@@ -196,4 +196,56 @@ async fn proxy_and_signup_consent() {
     f.close().await;
     task.abort();
     asset_task.abort();
+}
+
+/// Anyone may post to the proxy, so the bodies it holds at once share a budget,
+/// and a body declared over the limit is refused unread.
+#[tokio::test]
+async fn proxied_bodies_share_a_bounded_budget() {
+    let (host, mut events, task) = mock().await;
+    let f = Fixture::with_posthog(
+        "http://localhost:5173",
+        AuthMode::WorkOs,
+        Some(PostHogConfig {
+            key: "test-key".into(),
+            host: host.parse().unwrap(),
+            assets_host: host.parse().unwrap(),
+        }),
+    )
+    .await;
+    let head = "POST /ingest.php?r=/s/ HTTP/1.1";
+    let mebibyte = 1024 * 1024;
+    let mut oversized = stalled(&f.url, head, 6 * mebibyte).await;
+    assert_eq!(status(&mut oversized, 5).await, 413);
+    // Twelve stalled replay batches of 5 MiB fit in the 64 MiB budget; a
+    // thirteenth does not, and is turned away before any of it is read.
+    let mut held = Vec::new();
+    for _ in 0..12 {
+        held.push(stalled(&f.url, head, 5 * mebibyte).await);
+    }
+    let mut over = stalled(&f.url, head, 5 * mebibyte).await;
+    assert_eq!(status(&mut over, 5).await, 503);
+    // A closed connection gives its share back.
+    drop(held);
+    let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = f
+                .client
+                .post(format!("{}/ingest.php?r=/s/", f.url))
+                .body(vec![b' '; 5 * mebibyte])
+                .send()
+                .await
+                .unwrap();
+            if response.status() != 503 {
+                return response.status();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(accepted, 200);
+    assert_eq!(events.recv().await.unwrap().1.len(), 5 * mebibyte);
+    f.close().await;
+    task.abort();
 }

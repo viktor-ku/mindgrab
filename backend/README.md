@@ -238,12 +238,16 @@ creating again keeps it, and rows are never removed. Keep it so in anything
 that restores or hard-deletes projects.
 
 A request body is read only after the session check, so a request without a
-session is refused before any of its body is held in memory. Each method then
-reads up to its own limit and answers 413 `payload_too_large` beyond it: 10 MiB
-for `mergeProject`, 2 MiB for `commandProject`, 512 KiB for `setPreferences`,
-and 16 KiB for everything else,
-including `getSharedProject`, which has no session. `getHealth`, `getMe`,
-`startLogin` and `logout` read no body at all. The analytics proxy and the
+session is refused before any of its body is held in memory. Each method has its
+own limit: 10 MiB for `mergeProject`, 2 MiB for `commandProject`, 512 KiB for
+`setPreferences`, and 16 KiB for everything else, including `getSharedProject`,
+which has no session. A body declared larger than its method's limit gets 413
+`payload_too_large` before anything else runs and before any of it is read; one
+that turns out larger while it is read gets the same. `getHealth`, `getMe`,
+`startLogin` and `logout` read no body at all, but still refuse a large one.
+The client then has a minute to send a snapshot, 30 seconds for a command or
+preferences and 10 seconds for anything else, or gets 408 `request_timeout`,
+so a slow sender cannot hold a buffer open. The analytics proxy and the
 phpMyAdmin decoy keep their own limits.
 
 The webapp uploads a complete snapshot only while the cloud has none. After that
@@ -360,7 +364,10 @@ a hostname becomes `localhost`, and nothing else from the request reaches a page
   `/flags/`, and `GET` for the SDK's scripts under `/static/` and for the remote
   config of the project in `POSTHOG_KEY`. Query parameters the SDK does not send
   are dropped. A new PostHog feature that calls another path stays off until its
-  path is added there.
+  path is added there. A body may be up to 5 MiB and must arrive within 20
+  seconds. Anyone may post here, so the bodies held at once share a 64 MiB
+  budget: a request that would exceed it gets 503 before any of it is read, and
+  the SDK sends it again later.
 - **`/ws/project/<uuid>` and `/ws/share/<token>`** are the deliberate exception to the
   `.php` rule. PHP behind Apache cannot hold a WebSocket, so real PHP stacks run a
   Ratchet daemon behind `mod_proxy_wstunnel` on a path such as `/ws`.

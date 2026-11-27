@@ -14,12 +14,22 @@ use axum::{
 };
 use reqwest::Url;
 use serde_json::{Value, json};
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::sync::Semaphore;
 
 /// Mirrors the webapp's consent choice. Without "granted" the backend never
 /// links an event to a person.
 pub const CONSENT_COOKIE: &str = "mindgrab_analytics_consent";
+/// The SDK splits a replay batch at about 6.3 MB before compressing it. Gzip
+/// shrinks that several times over, so a real request stays well under this.
 const MAX_INGEST_BYTES: usize = 5 * 1024 * 1024;
+/// What every proxied body held at once may add up to. Anyone may post here, so
+/// the total, not only each body, is bounded; past it the SDK retries later.
+const MAX_BUFFERED_INGEST_BYTES: usize = 64 * 1024 * 1024;
+/// The budget is counted in KiB so that it fits a semaphore's permits.
+const BUDGET_UNIT: usize = 1024;
+/// How long a client has to send its body.
+const MAX_READ_TIME: Duration = Duration::from_secs(20);
 const REQUEST_HEADERS: [header::HeaderName; 5] = [
     header::CONTENT_TYPE,
     header::CONTENT_ENCODING,
@@ -41,6 +51,7 @@ const QUERY_PARAMETERS: [&str; 4] = ["v", "t", "compression", "retry_count"];
 pub struct Analytics {
     config: Option<PostHogConfig>,
     client: reqwest::Client,
+    budget: Arc<Semaphore>,
 }
 impl Analytics {
     pub fn new(config: Option<PostHogConfig>) -> Self {
@@ -51,6 +62,7 @@ impl Analytics {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
+            budget: Arc::new(Semaphore::new(MAX_BUFFERED_INGEST_BYTES / BUDGET_UNIT)),
         }
     }
 
@@ -116,8 +128,23 @@ impl Analytics {
         } else {
             0
         };
-        let Ok(body) = to_bytes(body, limit).await else {
+        let declared = parts
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok());
+        if declared.is_some_and(|length| length > limit) {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+        // A body of unknown length is charged the whole limit.
+        let charge = declared.unwrap_or(limit).div_ceil(BUDGET_UNIT) as u32;
+        let Ok(_held) = self.budget.try_acquire_many(charge) else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let body = match tokio::time::timeout(MAX_READ_TIME, to_bytes(body, limit)).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
         };
         let mut headers = HeaderMap::new();
         for name in REQUEST_HEADERS {

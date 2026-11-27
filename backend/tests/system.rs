@@ -1154,29 +1154,47 @@ async fn saves_and_reads_of_a_large_map_carry_only_what_changed() {
 }
 
 /// Only a snapshot upload may be large, and only from a signed-in account: every
-/// other body the server agrees to hold is a few identifiers.
+/// other body the server agrees to hold is a few identifiers. Each request sends
+/// a KiB of its body and then stalls, so an answer proves the server did not
+/// wait for the rest.
 #[tokio::test]
 async fn a_body_is_read_only_after_the_session_and_up_to_its_methods_limit() {
     let f = Fixture::new("http://localhost:5173").await;
-    let megabyte = vec![b' '; 1024 * 1024];
-    let stranger = f
-        .post("mergeProject", "no-such-session")
-        .query(&[("projectId", Uuid::new_v4())])
-        .header("content-type", "application/octet-stream")
-        .body(megabyte.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stranger.status(), 401);
+    let megabyte = 1024 * 1024;
+    let mut health = stalled(&f.url, "POST /api/getHealth.php HTTP/1.1", megabyte).await;
+    assert_eq!(status(&mut health, 5).await, 413);
+    let mut stranger = stalled(
+        &f.url,
+        &format!(
+            "POST /api/mergeProject.php?projectId={} HTTP/1.1\r\norigin: {}\r\ncontent-type: application/octet-stream",
+            Uuid::new_v4(),
+            f.origin
+        ),
+        mindgrab_state::MAX_SNAPSHOT_BYTES,
+    )
+    .await;
+    assert_eq!(status(&mut stranger, 5).await, 401);
     let alice = f.credential("alice").await;
-    let oversized = f
-        .post("listProjects", &alice)
-        .header("content-type", "application/json")
-        .body(megabyte)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(oversized.status(), 413);
+    let cookie = format!(
+        "cookie: {}={alice}",
+        f.backend.config.cookie_name(SESSION_COOKIE)
+    );
+    let mut oversized = stalled(
+        &f.url,
+        &format!("POST /api/listProjects.php HTTP/1.1\r\n{cookie}"),
+        megabyte,
+    )
+    .await;
+    assert_eq!(status(&mut oversized, 5).await, 413);
+    // A body within the limit has a few seconds to arrive, not as long as the
+    // client likes.
+    let mut slow = stalled(
+        &f.url,
+        &format!("POST /api/listProjects.php HTTP/1.1\r\n{cookie}"),
+        2048,
+    )
+    .await;
+    assert_eq!(status(&mut slow, 15).await, 408);
     f.close().await;
 }
 
