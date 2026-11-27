@@ -280,3 +280,42 @@ pub fn cookies(headers: &HeaderMap) -> Vec<String> {
         })
         .collect()
 }
+/// Sends `head` (the request line and headers, without the blank line), a
+/// declared length of `length` and only the first KiB of the body, then stops
+/// sending. The connection is returned so it can be held open.
+pub async fn stalled(url: &str, head: &str, length: usize) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+    let address = url.strip_prefix("http://").unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!("{head}\r\nhost: {address}\r\ncontent-length: {length}\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    stream
+        .write_all(&vec![b' '; length.min(1024)])
+        .await
+        .unwrap();
+    stream
+}
+/// The status the server answers on `stream` within `seconds`.
+pub async fn status(stream: &mut tokio::net::TcpStream, seconds: u64) -> u16 {
+    use tokio::io::AsyncReadExt;
+    let mut response = Vec::new();
+    let mut chunk = [0; 1024];
+    tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
+        while !response.windows(2).any(|window| window == b"\r\n") {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(
+                read > 0,
+                "the server closed the connection without answering"
+            );
+            response.extend_from_slice(&chunk[..read]);
+        }
+    })
+    .await
+    .expect("the server waited for the rest of the body");
+    String::from_utf8_lossy(&response)
+        .split(' ')
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap()
+}

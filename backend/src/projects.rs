@@ -202,35 +202,47 @@ pub async fn health(axum::extract::State(app): AppState) -> Response {
         .insert("server-timing", format!("db;dur={ms:.3}").parse().unwrap());
     response
 }
-/// The most a method reads of a request body. A snapshot upload is the only large
-/// one; everything else is a few identifiers.
-fn body_limit(method: &str) -> usize {
+/// The most a method reads of a request body, and how long the client has to
+/// send it. A snapshot upload is the only large one; everything else is a few
+/// identifiers.
+fn body_limit(method: &str) -> (usize, Duration) {
     match method {
         // The slack lets the shared core, not this limit, refuse a snapshot that
-        // is only just too large.
-        "mergeProject" => mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
+        // is only just too large. A full snapshot takes a minute at 1.4 Mbit/s.
+        "mergeProject" => (
+            mindgrab_state::MAX_SNAPSHOT_BYTES + 4096,
+            Duration::from_secs(60),
+        ),
         // One command can carry a position for every idea on a full map.
-        "commandProject" => 2 * 1024 * 1024,
+        "commandProject" => (2 * 1024 * 1024, Duration::from_secs(30)),
         // A browser sends at most a hundred preferences at once, each at most
         // every color.
-        "setPreferences" => 512 * 1024,
-        _ => 16 * 1024,
+        "setPreferences" => (512 * 1024, Duration::from_secs(30)),
+        _ => (16 * 1024, Duration::from_secs(10)),
     }
 }
-/// Reads a body up to the method's limit. A declared length over the limit is
-/// refused before a byte is read.
-async fn read(method: &str, headers: &HeaderMap, body: Body) -> Result<Bytes> {
-    let limit = body_limit(method);
-    let too_large = || ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large");
+/// Refuses a body declared larger than the method's limit, before a byte of it
+/// is read.
+fn declared_within(method: &str, headers: &HeaderMap) -> Result<()> {
     let declared = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > limit) {
+    if declared.is_some_and(|length| length > body_limit(method).0) {
         return Err(too_large());
     }
-    axum::body::to_bytes(body, limit)
+    Ok(())
+}
+fn too_large() -> ApiError {
+    ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
+}
+/// Reads a body up to the method's limit and within its time, so a client that
+/// sends slowly cannot keep the buffer for long.
+async fn read(method: &str, body: Body) -> Result<Bytes> {
+    let (limit, time) = body_limit(method);
+    tokio::time::timeout(time, axum::body::to_bytes(body, limit))
         .await
+        .map_err(|_| ApiError::new(StatusCode::REQUEST_TIMEOUT, "request_timeout"))?
         .map_err(|_| too_large())
 }
 /// The body arrives unread. A method that needs a session checks it first, so a
@@ -242,6 +254,8 @@ pub async fn rpc(
     RawQuery(query): RawQuery,
     body: Body,
 ) -> Result<Response> {
+    // Also for the methods that ignore their body: none of them takes a large one.
+    declared_within(method, &headers)?;
     match method {
         "getHealth" => return Ok(health(axum::extract::State(app)).await),
         "startLogin" => return app.auth.start(&headers).await,
@@ -249,7 +263,7 @@ pub async fn rpc(
         "getMe" => return Ok(Json(app.auth.identify(&headers).await?).into_response()),
         // Anyone holding a share token may read; no session is involved.
         "getSharedProject" => {
-            let body = read(method, &headers, body).await?;
+            let body = read(method, body).await?;
             return shared(&app, &headers, &body).await;
         }
         "createProject" | "deleteProject" | "mergeProject" | "commandProject" | "setShareLink"
@@ -259,7 +273,7 @@ pub async fn rpc(
         _ => unreachable!(),
     }
     let user = app.auth.identify(&headers).await?;
-    let body = read(method, &headers, body).await?;
+    let body = read(method, body).await?;
     match method {
         "createProject" => {
             let args: Create = parse(&headers, &body)?;
