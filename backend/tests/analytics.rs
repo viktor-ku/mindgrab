@@ -218,13 +218,16 @@ async fn proxied_bodies_share_a_bounded_budget() {
     let mut oversized = stalled(&f.url, head, 6 * mebibyte).await;
     assert_eq!(status(&mut oversized, 5).await, 413);
     // Twelve stalled replay batches of 5 MiB fit in the 64 MiB budget; a
-    // thirteenth does not, and is turned away before any of it is read.
+    // thirteenth does not, and is turned away before any of it is read. The
+    // server may admit them in any order, so whichever answers first must be
+    // the one turned away: the twelve admitted wait for the rest of their body.
     let mut held = Vec::new();
-    for _ in 0..12 {
+    for _ in 0..13 {
         held.push(stalled(&f.url, head, 5 * mebibyte).await);
     }
-    let mut over = stalled(&f.url, head, 5 * mebibyte).await;
-    assert_eq!(status(&mut over, 5).await, 503);
+    let answers = held.iter_mut().map(|stream| Box::pin(status(stream, 5)));
+    let (first, ..) = futures_util::future::select_all(answers).await;
+    assert_eq!(first, 503);
     // A closed connection gives its share back.
     drop(held);
     let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
